@@ -1,0 +1,33 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.db import get_db
+from app.core.redis import redis_client
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/healthz")
+async def healthz():
+    """Liveness — the process is up."""
+    return {"status": "ok"}
+
+
+@router.get("/readyz")
+async def readyz(db: AsyncSession = Depends(get_db)):
+    """Readiness — can reach Postgres + Redis."""
+    checks: dict[str, str] = {}
+    try:
+        await db.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        checks["db"] = f"error: {exc}"
+    try:
+        await redis_client.ping()
+        checks["redis"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        checks["redis"] = f"error: {exc}"
+
+    ok = all(v == "ok" for v in checks.values())
+    return {"status": "ok" if ok else "degraded", "checks": checks}
