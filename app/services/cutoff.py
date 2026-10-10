@@ -10,7 +10,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
+from app.models.shop import Shop
 from app.models.subscription import Subscription
+from app.services.pricing import resolve_tier_id, resolve_unit_price
 from app.services.subscription import compute_plan
 
 
@@ -53,15 +55,26 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
                 delete(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
             )
 
+        shop = await db.get(Shop, sub.shop_id)
+        tier_id = await resolve_tier_id(db, shop)
+        subtotal = 0.0
         for line in lines:
+            unit_price = await resolve_unit_price(db, line["product_id"], tier_id, line["qty"])
+            line_total = round(unit_price * line["qty"], 2)
+            subtotal += line_total
             db.add(
                 DeliveryOrderItem(
                     delivery_order_id=order.id,
                     product_id=line["product_id"],
                     qty_planned=line["qty"],
+                    unit_price=unit_price,
+                    line_total=line_total,
                     status="planned",
                 )
             )
+        order.subtotal = subtotal
+        order.total = subtotal
+        order.amount_due = subtotal
         count += 1
 
     run.status = "frozen"

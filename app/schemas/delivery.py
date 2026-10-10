@@ -8,6 +8,8 @@ class DeliveryOrderItemOut(BaseModel):
     product_id: int
     qty_planned: float
     qty_delivered: float
+    unit_price: float
+    line_total: float
     status: str
 
 
@@ -18,6 +20,9 @@ class DeliveryOrderOut(BaseModel):
     shop_id: int
     origin: str
     status: str
+    subtotal: float
+    total: float
+    amount_due: float
     items: list[DeliveryOrderItemOut] = []
 
 

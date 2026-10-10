@@ -48,6 +48,9 @@ class DeliveryOrder(Base, TimestampMixin):
         ForeignKey("delivery_schedule_runs.id"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(20), default="generated", nullable=False)
+    subtotal: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    amount_due: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
 
 
 class DeliveryOrderItem(Base):
@@ -60,4 +63,6 @@ class DeliveryOrderItem(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
     qty_planned: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     qty_delivered: Mapped[float] = mapped_column(Numeric(10, 2), default=0, nullable=False)
+    unit_price: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    line_total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="planned", nullable=False)

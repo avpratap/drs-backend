@@ -16,6 +16,7 @@ class CustomerAccount(Base, TimestampMixin):
     billing_mode: Mapped[str] = mapped_column(
         String(20), default="prepaid_wallet", nullable=False
     )  # prepaid_wallet|postpaid_credit
+    price_tier_id: Mapped[int | None] = mapped_column(ForeignKey("price_tiers.id"), nullable=True)
 
 
 class Shop(Base, TimestampMixin):
@@ -32,6 +33,7 @@ class Shop(Base, TimestampMixin):
     geo: Mapped[object | None] = mapped_column(
         Geography(geometry_type="POINT", srid=4326, spatial_index=False), nullable=True
     )
+    price_tier_id: Mapped[int | None] = mapped_column(ForeignKey("price_tiers.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
 
 

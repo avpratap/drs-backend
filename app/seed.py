@@ -3,10 +3,12 @@
 Run:  python -m uv run python -m app.seed
 """
 import asyncio
+import datetime as dt
 
 from sqlalchemy import select
 
 from app.core.db import SessionLocal
+from app.models.pricing import PriceTier, ProductPrice
 from app.models.product import Product
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.user import User
@@ -81,9 +83,56 @@ async def main() -> None:
             if res.scalar_one_or_none() is None:
                 db.add(Product(**p))
 
+        # price tiers
+        tiers: dict[str, PriceTier] = {}
+        for code, name, ttype in [("RETAIL", "Retail", "retail"), ("B2B_STANDARD", "B2B Standard", "b2b")]:
+            res = await db.execute(select(PriceTier).where(PriceTier.code == code))
+            t = res.scalar_one_or_none()
+            if t is None:
+                t = PriceTier(code=code, name=name, tier_type=ttype)
+                db.add(t)
+                await db.flush()
+            tiers[code] = t
+
+        account.price_tier_id = tiers["B2B_STANDARD"].id  # subscriber bills at B2B rates
+
+        prices = {  # sku: (retail, b2b)
+            "MILK-500": (30, 27),
+            "GHEE-500": (400, 370),
+            "CHAAS-200": (15, 13),
+            "PANEER-200": (90, 82),
+            "CHEESE-200": (120, 110),
+        }
+        res = await db.execute(select(Product))
+        by_sku = {p.sku: p for p in res.scalars().all()}
+        for sku, (retail, b2b) in prices.items():
+            prod = by_sku.get(sku)
+            if prod is None:
+                continue
+            for tier_code, price in [("RETAIL", retail), ("B2B_STANDARD", b2b)]:
+                tid = tiers[tier_code].id
+                res = await db.execute(
+                    select(ProductPrice).where(
+                        ProductPrice.product_id == prod.id,
+                        ProductPrice.price_tier_id == tid,
+                        ProductPrice.min_qty == 1,
+                    )
+                )
+                if res.scalar_one_or_none() is None:
+                    db.add(
+                        ProductPrice(
+                            product_id=prod.id,
+                            price_tier_id=tid,
+                            unit_price=price,
+                            min_qty=1,
+                            valid_from=dt.date(2026, 1, 1),
+                        )
+                    )
+
         await db.commit()
 
         print("Seed complete.")
+        print(f"  price tiers -> RETAIL, B2B_STANDARD (subscriber on B2B)")
         print(f"  admin      -> phone {ADMIN['phone']} (role=admin)")
         print(f"  subscriber -> phone {SUBSCRIBER['phone']} with {len(shops)} shops")
         print(f"  delivery   -> phone {DELIVERY['phone']} assigned to {len(shops)} shops")
