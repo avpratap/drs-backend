@@ -7,6 +7,13 @@ from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.pricing import PriceTier, ProductPrice
 from app.models.product import Product
+from app.models.profile import (
+    Address,
+    Consent,
+    PaymentMandate,
+    PaymentMethod,
+    UserProfile,
+)
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.user import User, UserRole
@@ -37,4 +44,9 @@ __all__ = [
     "Order",
     "OrderItem",
     "Payment",
+    "UserProfile",
+    "Address",
+    "PaymentMethod",
+    "PaymentMandate",
+    "Consent",
 ]
