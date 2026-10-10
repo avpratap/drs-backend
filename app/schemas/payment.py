@@ -1,8 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PaymentCreate(BaseModel):
-    amount: float
+    amount: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
     purpose: str  # wallet_topup | order_payment
     order_id: int | None = None  # required for order_payment
 

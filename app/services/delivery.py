@@ -10,7 +10,6 @@ from app.services.billing import bill_delivery
 
 
 async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, data) -> None:
-    prior_status = order.status
     res = await db.execute(
         select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
     )
@@ -76,11 +75,15 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             )
         )
 
-    # Bill once, on the first delivery action (wallet debit or credit charge).
-    if prior_status in ("generated", "assigned", "frozen"):
-        delivered_total = round(
-            sum(float(i.unit_price) * float(i.qty_delivered) for i in items.values()), 2
-        )
-        await bill_delivery(db, order, delivered_total)
+    # Net chargeable = delivered value − returned value. bill_delivery is idempotent
+    # per delivery_order, so a corrected re-submit never double-charges.
+    delivered_total = sum(float(i.unit_price) * float(i.qty_delivered) for i in items.values())
+    returns_total = sum(
+        float(items[r.product_id].unit_price) * float(r.qty_returned)
+        for r in data.returns
+        if r.product_id in items
+    )
+    net = round(delivered_total - returns_total, 2)
+    await bill_delivery(db, order, net)
 
     await db.commit()

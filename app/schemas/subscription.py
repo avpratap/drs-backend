@@ -1,6 +1,6 @@
 import datetime as dt
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubscriptionCreate(BaseModel):
@@ -9,9 +9,9 @@ class SubscriptionCreate(BaseModel):
 
 class ItemIn(BaseModel):
     product_id: int
-    default_qty: float
+    default_qty: float = Field(ge=0, le=100_000, allow_inf_nan=False)
     frequency: str = "daily"  # daily | alternate | weekly
-    interval_days: int | None = None
+    interval_days: int | None = Field(default=None, ge=1, le=365)
     days_of_week: str | None = None  # csv "1,3,5" (Mon=1)
 
 
@@ -38,7 +38,7 @@ class SubscriptionDetail(SubscriptionOut):
 class OverrideIn(BaseModel):
     product_id: int
     for_date: dt.date
-    override_qty: float  # 0 = skip
+    override_qty: float = Field(ge=0, le=100_000, allow_inf_nan=False)  # 0 = skip
     note: str | None = None
 
 

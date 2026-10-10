@@ -1,9 +1,9 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class OrderItemIn(BaseModel):
     product_id: int
-    qty: float
+    qty: float = Field(gt=0, le=100_000, allow_inf_nan=False)
 
 
 class OrderCreate(BaseModel):

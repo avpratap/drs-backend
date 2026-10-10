@@ -1,6 +1,6 @@
 import datetime as dt
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DeliveryOrderItemOut(BaseModel):
@@ -34,7 +34,7 @@ class CutoffResult(BaseModel):
 
 class DeliverItem(BaseModel):
     product_id: int
-    qty_delivered: float
+    qty_delivered: float = Field(ge=0, le=100_000, allow_inf_nan=False)
 
 
 class PODIn(BaseModel):
@@ -48,14 +48,14 @@ class PODIn(BaseModel):
 
 class ReturnIn(BaseModel):
     product_id: int
-    qty_returned: float
+    qty_returned: float = Field(gt=0, le=100_000, allow_inf_nan=False)
     reason: str  # damaged|expired|wrong_item|excess|refused
 
 
 class DeliverRequest(BaseModel):
-    items: list[DeliverItem]
+    items: list[DeliverItem] = Field(max_length=200)
     pod: PODIn | None = None
-    returns: list[ReturnIn] = []
-    cash_collected: float | None = None
+    returns: list[ReturnIn] = Field(default=[], max_length=200)
+    cash_collected: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
     cash_method: str | None = None  # cash|upi|cheque
     cash_reference: str | None = None

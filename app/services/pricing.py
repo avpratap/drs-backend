@@ -1,9 +1,11 @@
 """Price resolution: shop tier -> account tier -> RETAIL default, with volume breaks."""
 import datetime as dt
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.pricing import PriceTier, ProductPrice
 from app.models.shop import CustomerAccount, Shop
 
@@ -21,7 +23,7 @@ async def resolve_tier_id(db: AsyncSession, shop: Shop) -> int | None:
 async def resolve_unit_price(db: AsyncSession, product_id: int, tier_id: int | None, qty: float) -> float:
     if tier_id is None:
         return 0.0
-    today = dt.date.today()
+    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
     res = await db.execute(
         select(ProductPrice)
         .where(
@@ -29,6 +31,7 @@ async def resolve_unit_price(db: AsyncSession, product_id: int, tier_id: int | N
             ProductPrice.price_tier_id == tier_id,
             ProductPrice.min_qty <= qty,
             ProductPrice.valid_from <= today,
+            or_(ProductPrice.valid_to.is_(None), ProductPrice.valid_to >= today),
         )
         .order_by(ProductPrice.min_qty.desc(), ProductPrice.valid_from.desc())
     )

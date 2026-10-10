@@ -58,7 +58,10 @@ async def deliver_order(
     if user.role not in ("delivery", "admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only delivery staff can mark deliveries")
 
-    order = await db.get(DeliveryOrder, order_id)
+    res = await db.execute(
+        select(DeliveryOrder).where(DeliveryOrder.id == order_id).with_for_update()
+    )
+    order = res.scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     ids = await allowed_shop_ids(user, db)

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WalletTxnOut(BaseModel):
@@ -18,4 +18,4 @@ class BillingSummary(BaseModel):
 
 class TopupIn(BaseModel):
     account_id: int
-    amount: float
+    amount: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)

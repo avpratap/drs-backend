@@ -28,6 +28,13 @@ async def _account(db: AsyncSession, user: User) -> CustomerAccount:
     return account
 
 
+async def _my_account_ids(db: AsyncSession, user: User) -> set[int]:
+    res = await db.execute(
+        select(CustomerAccount.id).where(CustomerAccount.owner_user_id == user.id)
+    )
+    return set(res.scalars().all())
+
+
 @router.post("/create", response_model=PaymentCreateOut, operation_id="create_payment")
 async def create_payment(
     data: PaymentCreate,
@@ -37,16 +44,32 @@ async def create_payment(
     if data.purpose not in ("wallet_topup", "order_payment"):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid purpose")
     account = await _account(db, user)
-    gateway_order_id = await pay_service.create_gateway_order(data.amount)
+
+    amount = data.amount
+    ref_type = "topup"
+    ref_id = None
+    if data.purpose == "order_payment":
+        if not data.order_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "order_id required")
+        order = await db.get(Order, data.order_id)
+        if order is None or order.account_id != account.id:  # ownership
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+        if order.payment_status == "paid":
+            raise HTTPException(status.HTTP_409_CONFLICT, "Order already paid")
+        amount = float(order.total)  # server-authoritative, ignore client amount
+        ref_type = "order"
+        ref_id = order.id
+
+    gateway_order_id = await pay_service.create_gateway_order(amount)
     payment = Payment(
         account_id=account.id,
         payment_type=data.purpose,
         gateway="razorpay",
         gateway_order_id=gateway_order_id,
-        amount=data.amount,
+        amount=amount,
         status="initiated",
-        ref_type="order" if data.purpose == "order_payment" else "topup",
-        ref_id=data.order_id,
+        ref_type=ref_type,
+        ref_id=ref_id,
     )
     db.add(payment)
     await db.commit()
@@ -54,7 +77,7 @@ async def create_payment(
     return PaymentCreateOut(
         payment_id=payment.id,
         gateway_order_id=gateway_order_id,
-        amount=data.amount,
+        amount=amount,
         key_id=settings.RAZORPAY_KEY_ID,
     )
 
@@ -66,11 +89,20 @@ async def verify_payment(
     db: AsyncSession = Depends(get_db),
 ):
     res = await db.execute(
-        select(Payment).where(Payment.gateway_order_id == data.gateway_order_id)
+        select(Payment).where(Payment.gateway_order_id == data.gateway_order_id).with_for_update()
     )
     payment = res.scalar_one_or_none()
     if payment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+
+    # Ownership: a user may only finalize their own payment (admin may finalize any).
+    if user.role != "admin" and payment.account_id not in await _my_account_ids(db, user):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+
+    if payment.status == "success":  # idempotent replay
+        return {"detail": "payment successful", "payment_id": payment.id, "status": "success"}
+    if payment.status != "initiated":  # e.g. 'failed' — don't re-finalize; start a new payment
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Payment is {payment.status}")
 
     if not pay_service.verify_signature(
         data.gateway_order_id, data.gateway_payment_id, data.signature
@@ -79,18 +111,16 @@ async def verify_payment(
         await db.commit()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Signature verification failed")
 
-    if payment.status != "success":  # idempotent finalize
-        payment.status = "success"
-        payment.gateway_payment_id = data.gateway_payment_id
-        if payment.payment_type == "wallet_topup":
-            await billing_service.wallet_adjust(
-                db, payment.account_id, float(payment.amount), "topup", "payment", payment.id
-            )
-        elif payment.payment_type == "order_payment" and payment.ref_id:
-            order = await db.get(Order, payment.ref_id)
-            if order is not None:
-                order.payment_status = "paid"
-                order.status = "confirmed"
-        await db.commit()
-
+    payment.status = "success"
+    payment.gateway_payment_id = data.gateway_payment_id
+    if payment.payment_type == "wallet_topup":
+        await billing_service.wallet_adjust(
+            db, payment.account_id, float(payment.amount), "topup", "payment", payment.id
+        )
+    elif payment.payment_type == "order_payment" and payment.ref_id:
+        order = await db.get(Order, payment.ref_id)
+        if order is not None and order.account_id == payment.account_id:
+            order.payment_status = "paid"
+            order.status = "confirmed"
+    await db.commit()
     return {"detail": "payment successful", "payment_id": payment.id, "status": payment.status}

@@ -6,7 +6,7 @@ background job (ARQ -> Celery Beat) and chunks work per shop/route.
 """
 import datetime as dt
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
@@ -17,6 +17,12 @@ from app.services.subscription import compute_plan
 
 
 async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
+    # Serialize cutoff runs for this date (cron + manual admin trigger can't race).
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :d)"),
+        {"ns": 424242, "d": int(delivery_date.strftime("%Y%m%d"))},
+    )
+
     run = ScheduleRun(for_delivery_date=delivery_date, status="generating")
     db.add(run)
     await db.flush()
@@ -31,12 +37,17 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
             continue
 
         res = await db.execute(
-            select(DeliveryOrder).where(
+            select(DeliveryOrder)
+            .where(
                 DeliveryOrder.shop_id == sub.shop_id,
                 DeliveryOrder.delivery_date == delivery_date,
             )
+            .with_for_update()
         )
         order = res.scalar_one_or_none()
+        # Never clobber an order that's already past generation (assigned/dispatched/delivered).
+        if order is not None and order.status not in ("generated", "frozen"):
+            continue
         if order is None:
             order = DeliveryOrder(
                 delivery_date=delivery_date,
