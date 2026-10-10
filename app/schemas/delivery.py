@@ -27,9 +27,10 @@ class DeliveryOrderOut(BaseModel):
 
 
 class CutoffResult(BaseModel):
-    schedule_run_id: int
+    schedule_run_id: int | None = None
     delivery_date: dt.date
     orders_generated: int
+    skipped: str | None = None
 
 
 class DeliverItem(BaseModel):

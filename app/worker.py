@@ -39,3 +39,10 @@ class WorkerSettings:
         cron(scheduled_cutoff, hour=17, minute=35),  # 23:05 IST
         cron(drain_outbox),  # every minute
     ]
+    # Resilience: retry failed jobs with backoff; a job that exhausts max_tries
+    # lands in ARQ's result store with its error (our dead-letter surface).
+    max_tries = 4
+    retry_jobs = True
+    job_timeout = 600  # seconds; a stuck cutoff is killed, not hung forever
+    keep_result = 3600  # keep job results 1h for inspection
+    max_jobs = 20
