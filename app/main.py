@@ -9,6 +9,15 @@ from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.idempotency import IdempotencyMiddleware
+from app.core.observability import (
+    RequestContextMiddleware,
+    configure_logging,
+    init_sentry,
+    metrics_response,
+)
+
+configure_logging()
+init_sentry()
 
 app = FastAPI(title="DRS API", version="0.1.0")
 
@@ -27,6 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(IdempotencyMiddleware)
+app.add_middleware(RequestContextMiddleware)  # outermost: times & tags every request
 
 
 @app.middleware("http")
@@ -64,6 +74,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 app.include_router(health_router)  # /healthz, /readyz
 app.include_router(api_router)  # /api/v1/...
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return metrics_response()
 
 
 @app.get("/")
