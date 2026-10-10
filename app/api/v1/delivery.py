@@ -1,6 +1,6 @@
 import datetime as dt
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,10 +9,20 @@ from app.deps.auth import get_current_user
 from app.deps.scope import ALL, allowed_shop_ids
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.user import User
-from app.schemas.delivery import DeliveryOrderItemOut, DeliveryOrderOut
+from app.schemas.delivery import DeliverRequest, DeliveryOrderItemOut, DeliveryOrderOut
+from app.services import delivery as delivery_service
 from app.services.subscription import today_ist
 
 router = APIRouter(prefix="/delivery", tags=["delivery"])
+
+
+async def _order_detail(db: AsyncSession, order: DeliveryOrder) -> DeliveryOrderOut:
+    res = await db.execute(
+        select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
+    )
+    out = DeliveryOrderOut.model_validate(order)
+    out.items = [DeliveryOrderItemOut.model_validate(i) for i in res.scalars().all()]
+    return out
 
 
 @router.get("/orders", response_model=list[DeliveryOrderOut], operation_id="list_delivery_orders")
@@ -32,13 +42,28 @@ async def list_delivery_orders(
             return []
         query = query.where(DeliveryOrder.shop_id.in_(ids))
     orders = (await db.execute(query.order_by(DeliveryOrder.id))).scalars().all()
+    return [await _order_detail(db, o) for o in orders]
 
-    out: list[DeliveryOrderOut] = []
-    for order in orders:
-        res = await db.execute(
-            select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
-        )
-        do = DeliveryOrderOut.model_validate(order)
-        do.items = [DeliveryOrderItemOut.model_validate(i) for i in res.scalars().all()]
-        out.append(do)
-    return out
+
+@router.post(
+    "/orders/{order_id}/deliver", response_model=DeliveryOrderOut, operation_id="deliver_order"
+)
+async def deliver_order(
+    order_id: int,
+    data: DeliverRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark a stop delivered: per-item quantities (partial OK), POD, returns, cash."""
+    if user.role not in ("delivery", "admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only delivery staff can mark deliveries")
+
+    order = await db.get(DeliveryOrder, order_id)
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    ids = await allowed_shop_ids(user, db)
+    if ids is not ALL and order.shop_id not in ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+
+    await delivery_service.mark_delivered(db, order, user, data)
+    return await _order_detail(db, order)
