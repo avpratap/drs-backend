@@ -3,6 +3,7 @@ from app.models.base import Base
 from app.models.billing import CreditLedger, Wallet, WalletTransaction
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
+from app.models.notification import Notification
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.pricing import PriceTier, ProductPrice
@@ -49,4 +50,5 @@ __all__ = [
     "PaymentMethod",
     "PaymentMandate",
     "Consent",
+    "Notification",
 ]

@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
 
+    # WhatsApp (Gupshup BSP). Empty key -> dev stub (messages logged, not sent).
+    WHATSAPP_PROVIDER: str = "gupshup"
+    GUPSHUP_API_KEY: str = ""
+    GUPSHUP_APP_NAME: str = ""
+    GUPSHUP_SOURCE: str = ""  # the WABA sender number (e.g. 919999999999)
+    GUPSHUP_SRC_NAME: str = ""  # registered src.name / app display name
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]

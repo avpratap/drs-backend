@@ -1,11 +1,16 @@
 import datetime as dt
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import require_role
+from app.models.notification import Notification
+from app.models.user import User
 from app.schemas.delivery import CutoffResult
+from app.services import notifications as notify
 from app.services.cutoff import run_cutoff
 from app.services.subscription import today_ist
 
@@ -17,3 +22,64 @@ async def run_cutoff_endpoint(date: dt.date | None = None, db: AsyncSession = De
     """Materialize active subscriptions into delivery_orders for a date (default tomorrow)."""
     delivery_date = date or (today_ist() + dt.timedelta(days=1))
     return await run_cutoff(db, delivery_date)
+
+
+class NotifyTestIn(BaseModel):
+    user_id: int
+    event_type: str
+    data: dict = Field(default_factory=dict)
+    dedupe_key: str | None = None
+
+
+@router.post("/notifications/test", operation_id="emit_test_notification")
+async def emit_test_notification(body: NotifyTestIn, db: AsyncSession = Depends(get_db)):
+    """Emit an event for one user (gating applies) and return the rows created."""
+    user = await db.get(User, body.user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    rows = await notify.emit_event(
+        db, body.event_type, user, body.data, dedupe_key=body.dedupe_key
+    )
+    await db.commit()
+    return {
+        "created": [
+            {"id": r.id, "channel": r.channel, "status": r.status, "skip_reason": r.skip_reason}
+            for r in rows
+        ]
+    }
+
+
+@router.post("/notifications/flush", operation_id="flush_notifications")
+async def flush_notifications(limit: int = 100, db: AsyncSession = Depends(get_db)):
+    """Drain due queued notifications (also runs automatically in the ARQ worker)."""
+    return await notify.process_outbox(db, limit=limit)
+
+
+@router.get("/notifications", operation_id="list_notifications")
+async def list_notifications(
+    user_id: int | None = None,
+    status_filter: str | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(Notification).order_by(Notification.id.desc()).limit(min(limit, 200))
+    if user_id is not None:
+        q = q.where(Notification.user_id == user_id)
+    if status_filter:
+        q = q.where(Notification.status == status_filter)
+    res = await db.execute(q)
+    return [
+        {
+            "id": n.id,
+            "user_id": n.user_id,
+            "event_type": n.event_type,
+            "channel": n.channel,
+            "category": n.category,
+            "status": n.status,
+            "skip_reason": n.skip_reason,
+            "provider_message_id": n.provider_message_id,
+            "body": n.body,
+            "attempts": n.attempts,
+        }
+        for n in res.scalars().all()
+    ]

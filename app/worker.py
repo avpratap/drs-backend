@@ -14,6 +14,7 @@ from arq.connections import RedisSettings
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.services.cutoff import run_cutoff
+from app.services.notifications import process_outbox
 from app.services.subscription import today_ist
 
 
@@ -25,7 +26,16 @@ async def scheduled_cutoff(ctx: dict) -> dict:
     return result
 
 
+async def drain_outbox(ctx: dict) -> dict:
+    """Deliver due queued notifications. Runs every minute."""
+    async with SessionLocal() as db:
+        return await process_outbox(db, limit=200)
+
+
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    functions = [scheduled_cutoff]
-    cron_jobs = [cron(scheduled_cutoff, hour=17, minute=35)]  # 23:05 IST
+    functions = [scheduled_cutoff, drain_outbox]
+    cron_jobs = [
+        cron(scheduled_cutoff, hour=17, minute=35),  # 23:05 IST
+        cron(drain_outbox),  # every minute
+    ]
