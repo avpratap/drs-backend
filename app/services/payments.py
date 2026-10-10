@@ -19,7 +19,7 @@ async def create_gateway_order(amount: float) -> str:
     """Create a Razorpay order and return its id (amount in paise)."""
     if not gateway_enabled():
         return "order_dev_" + secrets.token_hex(8)
-    paise = int(round(amount * 100))
+    paise = round(amount * 100)
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             RAZORPAY_ORDERS_URL,

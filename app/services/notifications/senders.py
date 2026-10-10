@@ -45,7 +45,7 @@ async def send_whatsapp(to_addr: str, body: str, payload: dict | None) -> tuple[
         if resp.status_code < 300 and str(j.get("status", "")).lower() in ("submitted", "success"):
             return True, j.get("messageId"), None
         return False, None, f"gupshup {resp.status_code}: {resp.text[:200]}"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return False, None, f"gupshup error: {exc}"
 
 

@@ -1,6 +1,6 @@
 """Token issuance + refresh rotation with reuse detection."""
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +44,7 @@ async def issue_tokens(
         device_name=device_name,
         user_agent=user_agent,
         ip=ip,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_DAYS),
+        expires_at=datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_DAYS),
     )
     db.add(session)
     await db.flush()
@@ -76,7 +76,7 @@ async def rotate_refresh(
         )
         raise AuthError("refresh_token_reuse_detected")
 
-    if session.expires_at <= datetime.now(timezone.utc):
+    if session.expires_at <= datetime.now(UTC):
         raise AuthError("refresh_token_expired")
 
     user = await db.get(User, session.user_id)

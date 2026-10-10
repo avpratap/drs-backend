@@ -11,7 +11,7 @@ Each event maps to:
 Keep provider template *names* (wa_template) in sync with what's approved in the
 Gupshup/WABA console. Until approved, dev-stub just logs `text`.
 """
-from typing import Callable
+from collections.abc import Callable
 
 TRANSACTIONAL = "transactional"
 MARKETING = "marketing"

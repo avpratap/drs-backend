@@ -62,7 +62,7 @@ def init_sentry() -> None:
 
         sentry_sdk.init(dsn=settings.SENTRY_DSN, traces_sample_rate=0.1, environment=settings.ENV)
         log.info("Sentry initialised")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("Sentry not initialised: %s", exc)
 
 

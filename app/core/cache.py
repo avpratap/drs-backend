@@ -16,7 +16,7 @@ async def cache_get_json(key: str):
     try:
         raw = await redis_client.get(key)
         return json.loads(raw) if raw else None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("cache get failed (%s): %s", key, exc)
         return None
 
@@ -26,7 +26,7 @@ async def cache_set_json(key: str, value, ttl: int | None = None) -> None:
         await redis_client.set(
             key, json.dumps(value, default=str), ex=ttl or settings.CACHE_TTL_SECONDS
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("cache set failed (%s): %s", key, exc)
 
 
@@ -35,5 +35,5 @@ async def cache_delete(*keys: str) -> None:
         return
     try:
         await redis_client.delete(*keys)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("cache delete failed: %s", exc)

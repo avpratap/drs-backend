@@ -119,7 +119,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
         run = await db.get(ScheduleRun, run_id)
         run.status = "frozen"
         run.orders_generated = count
-        run.finished_at = dt.datetime.now(dt.timezone.utc)
+        run.finished_at = dt.datetime.now(dt.UTC)
         await db.commit()
         return {
             "schedule_run_id": run_id,

@@ -22,7 +22,7 @@ async def get_current_user(
     try:
         payload = decode_token(cred.credentials)
     except jwt.PyJWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from None
 
     if payload.get("type") != "access":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")

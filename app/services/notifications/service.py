@@ -153,7 +153,7 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
         notif.status = "sent"
         notif.provider = settings.WHATSAPP_PROVIDER if notif.channel == "whatsapp" else notif.channel
         notif.provider_message_id = msg_id
-        notif.sent_at = dt.datetime.now(dt.timezone.utc)
+        notif.sent_at = dt.datetime.now(dt.UTC)
         notif.error = None
     else:
         notif.error = err
@@ -164,7 +164,7 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
 
 async def process_outbox(db: AsyncSession, *, limit: int = 100) -> dict:
     """Drain due queued notifications (worker poller + admin flush endpoint)."""
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     res = await db.execute(
         select(Notification)
         .where(

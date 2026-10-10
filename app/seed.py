@@ -43,7 +43,7 @@ async def _upsert_user(db, data) -> User:
 
 async def main() -> None:
     async with SessionLocal() as db:
-        admin = await _upsert_user(db, ADMIN)
+        await _upsert_user(db, ADMIN)
         subscriber = await _upsert_user(db, SUBSCRIBER)
         delivery = await _upsert_user(db, DELIVERY)
 
@@ -132,7 +132,7 @@ async def main() -> None:
         await db.commit()
 
         print("Seed complete.")
-        print(f"  price tiers -> RETAIL, B2B_STANDARD (subscriber on B2B)")
+        print("  price tiers -> RETAIL, B2B_STANDARD (subscriber on B2B)")
         print(f"  admin      -> phone {ADMIN['phone']} (role=admin)")
         print(f"  subscriber -> phone {SUBSCRIBER['phone']} with {len(shops)} shops")
         print(f"  delivery   -> phone {DELIVERY['phone']} assigned to {len(shops)} shops")

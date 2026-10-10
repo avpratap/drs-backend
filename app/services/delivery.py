@@ -77,7 +77,7 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             )
         )
 
-    # Net chargeable = delivered value − returned value. bill_delivery is idempotent
+    # Net chargeable = delivered value - returned value. bill_delivery is idempotent
     # per delivery_order, so a corrected re-submit never double-charges.
     delivered_total = sum(float(i.unit_price) * float(i.qty_delivered) for i in items.values())
     returns_total = sum(

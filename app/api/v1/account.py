@@ -104,7 +104,7 @@ async def update_profile(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already in use")
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already in use") from None
     await db.refresh(user)
     await db.refresh(prof)
     return _profile_out(user, prof)

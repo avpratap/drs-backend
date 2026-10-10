@@ -21,12 +21,12 @@ async def readyz(db: AsyncSession = Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
         checks["db"] = "ok"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         checks["db"] = f"error: {exc}"
     try:
         await redis_client.ping()
         checks["redis"] = "ok"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         checks["redis"] = f"error: {exc}"
 
     ok = all(v == "ok" for v in checks.values())

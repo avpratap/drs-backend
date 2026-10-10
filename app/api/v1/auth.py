@@ -31,7 +31,7 @@ async def request_otp(data: OTPRequest):
     try:
         dev_otp = await otp_service.request_otp(data.phone)
     except ValueError as exc:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc))
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
     return OTPRequestResponse(detail="OTP sent", dev_otp=dev_otp)
 
 
@@ -53,7 +53,7 @@ async def refresh_token(data: RefreshRequest, request: Request, db: AsyncSession
         )
     except auth_service.AuthError as exc:
         await db.commit()  # persist family revocation if reuse was detected
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc))
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
     await db.commit()
     return TokenPair(access_token=access, refresh_token=refresh)
 
