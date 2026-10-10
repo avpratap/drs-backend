@@ -4,6 +4,7 @@ from app.models.billing import CreditLedger, Wallet, WalletTransaction
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.order import Order, OrderItem
+from app.models.payment import Payment
 from app.models.pricing import PriceTier, ProductPrice
 from app.models.product import Product
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
@@ -35,4 +36,5 @@ __all__ = [
     "CreditLedger",
     "Order",
     "OrderItem",
+    "Payment",
 ]

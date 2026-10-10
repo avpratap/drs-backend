@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     TIMEZONE: str = "Asia/Kolkata"
     CUTOFF_HOUR: int = 23  # local hour after which tomorrow's order is frozen
 
+    # Razorpay (payments). Empty keys -> dev stub (verify accepts signature "dev").
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
