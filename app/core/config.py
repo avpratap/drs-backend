@@ -6,7 +6,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://drs:drs@localhost:5432/drs"
     REDIS_URL: str = "redis://localhost:6379/0"
-    JWT_SECRET: str = "dev-only-change-me"
+    JWT_SECRET: str = "dev-only-change-me-to-a-long-random-32plus-byte-string"
     JWT_ALG: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 15
     REFRESH_TOKEN_DAYS: int = 14

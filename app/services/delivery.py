@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.user import User
+from app.services.billing import bill_delivery
 
 
 async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, data) -> None:
+    prior_status = order.status
     res = await db.execute(
         select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
     )
@@ -73,5 +75,12 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
                 collected_by=user.id,
             )
         )
+
+    # Bill once, on the first delivery action (wallet debit or credit charge).
+    if prior_status in ("generated", "assigned", "frozen"):
+        delivered_total = round(
+            sum(float(i.unit_price) * float(i.qty_delivered) for i in items.values()), 2
+        )
+        await bill_delivery(db, order, delivered_total)
 
     await db.commit()

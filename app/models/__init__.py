@@ -1,5 +1,6 @@
 from app.models.auth_session import AuthSession
 from app.models.base import Base
+from app.models.billing import CreditLedger, Wallet, WalletTransaction
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.pricing import PriceTier, ProductPrice
@@ -28,4 +29,7 @@ __all__ = [
     "ProofOfDelivery",
     "Return",
     "CashCollection",
+    "Wallet",
+    "WalletTransaction",
+    "CreditLedger",
 ]
