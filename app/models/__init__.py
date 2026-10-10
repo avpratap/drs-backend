@@ -2,6 +2,7 @@ from app.models.auth_session import AuthSession
 from app.models.base import Base
 from app.models.product import Product
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
+from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.user import User, UserRole
 
 __all__ = [
@@ -13,4 +14,7 @@ __all__ = [
     "Shop",
     "DeliveryAssignment",
     "Product",
+    "Subscription",
+    "SubscriptionItem",
+    "SubscriptionOverride",
 ]

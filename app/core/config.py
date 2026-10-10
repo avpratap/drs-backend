@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     MSG91_SENDER: str = ""
     MSG91_OTP_EXPIRY_MIN: int = 5
 
+    # Subscriptions / daily cutoff
+    TIMEZONE: str = "Asia/Kolkata"
+    CUTOFF_HOUR: int = 23  # local hour after which tomorrow's order is frozen
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
