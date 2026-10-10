@@ -12,6 +12,7 @@ from app.services.sms import send_otp_sms, sms_enabled
 
 OTP_TTL = 300  # 5 minutes
 MAX_SENDS_PER_HOUR = 5
+MAX_SENDS_PER_IP_HOUR = 50  # across all phones from one device/IP
 MAX_VERIFY_ATTEMPTS = 5
 RESEND_COOLDOWN = 60  # seconds
 
@@ -20,8 +21,16 @@ def _hash_otp(phone: str, otp: str) -> str:
     return hashlib.sha256(f"{phone}:{otp}:{settings.JWT_SECRET}".encode()).hexdigest()
 
 
-async def request_otp(phone: str) -> str | None:
+async def request_otp(phone: str, ip: str | None = None) -> str | None:
     """Generate + store an OTP. Returns the OTP in non-prod for testing, else None."""
+    # Per-IP cap first — stops a single device cycling through many phone numbers.
+    if ip:
+        ip_sends = await redis_client.incr(f"otp:ip:{ip}")
+        if ip_sends == 1:
+            await redis_client.expire(f"otp:ip:{ip}", 3600)
+        if ip_sends > MAX_SENDS_PER_IP_HOUR:
+            raise ValueError("Too many OTP requests from this device. Try again later.")
+
     if await redis_client.get(f"otp:cooldown:{phone}"):
         raise ValueError("Please wait a moment before requesting another OTP")
 

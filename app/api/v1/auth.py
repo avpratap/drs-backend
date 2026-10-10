@@ -27,9 +27,10 @@ def _client_meta(request: Request) -> dict:
 
 
 @router.post("/otp/request", response_model=OTPRequestResponse, operation_id="request_otp")
-async def request_otp(data: OTPRequest):
+async def request_otp(data: OTPRequest, request: Request):
+    ip = request.client.host if request.client else None
     try:
-        dev_otp = await otp_service.request_otp(data.phone)
+        dev_otp = await otp_service.request_otp(data.phone, ip=ip)
     except ValueError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
     return OTPRequestResponse(detail="OTP sent", dev_otp=dev_otp)

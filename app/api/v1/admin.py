@@ -60,13 +60,15 @@ async def list_notifications(
     user_id: int | None = None,
     status_filter: str | None = None,
     limit: int = 50,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Notification).order_by(Notification.id.desc()).limit(min(limit, 200))
+    q = select(Notification).order_by(Notification.id.desc())
     if user_id is not None:
         q = q.where(Notification.user_id == user_id)
     if status_filter:
         q = q.where(Notification.status == status_filter)
+    q = q.limit(min(max(limit, 1), 200)).offset(max(offset, 0))
     res = await db.execute(q)
     return [
         {

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user
+from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.user import User
@@ -25,11 +26,33 @@ async def _order_detail(db: AsyncSession, order: DeliveryOrder) -> DeliveryOrder
     return out
 
 
+async def _order_details(db: AsyncSession, orders: list[DeliveryOrder]) -> list[DeliveryOrderOut]:
+    """Build delivery-order views with a single batched item query (no N+1)."""
+    if not orders:
+        return []
+    ids = [o.id for o in orders]
+    res = await db.execute(
+        select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id.in_(ids))
+    )
+    by_order: dict[int, list[DeliveryOrderItemOut]] = {}
+    for item in res.scalars().all():
+        by_order.setdefault(item.delivery_order_id, []).append(
+            DeliveryOrderItemOut.model_validate(item)
+        )
+    views = []
+    for o in orders:
+        view = DeliveryOrderOut.model_validate(o)
+        view.items = by_order.get(o.id, [])
+        views.append(view)
+    return views
+
+
 @router.get("/orders", response_model=list[DeliveryOrderOut], operation_id="list_delivery_orders")
 async def list_delivery_orders(
     date: dt.date | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
 ):
     """Delivery orders for a date, scoped to the caller's shops (delivery=assigned,
     subscriber=owned, admin=all)."""
@@ -41,8 +64,12 @@ async def list_delivery_orders(
         if not ids:
             return []
         query = query.where(DeliveryOrder.shop_id.in_(ids))
-    orders = (await db.execute(query.order_by(DeliveryOrder.id))).scalars().all()
-    return [await _order_detail(db, o) for o in orders]
+    orders = (
+        await db.execute(
+            query.order_by(DeliveryOrder.id).limit(page.limit).offset(page.offset)
+        )
+    ).scalars().all()
+    return await _order_details(db, list(orders))
 
 
 @router.post(

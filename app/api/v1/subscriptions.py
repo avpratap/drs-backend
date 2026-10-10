@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user
+from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
 from app.models.shop import Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
@@ -82,7 +83,9 @@ async def create_subscription(
 
 @router.get("", response_model=list[SubscriptionOut], operation_id="list_subscriptions")
 async def list_subscriptions(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
 ):
     ids = await allowed_shop_ids(user, db)
     query = select(Subscription)
@@ -90,7 +93,7 @@ async def list_subscriptions(
         if not ids:
             return []
         query = query.where(Subscription.shop_id.in_(ids))
-    res = await db.execute(query.order_by(Subscription.id))
+    res = await db.execute(query.order_by(Subscription.id).limit(page.limit).offset(page.offset))
     return res.scalars().all()
 
 

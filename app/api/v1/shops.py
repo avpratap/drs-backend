@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user
+from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
 from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
@@ -13,14 +14,18 @@ router = APIRouter(prefix="/shops", tags=["shops"])
 
 
 @router.get("", response_model=list[ShopOut], operation_id="list_my_shops")
-async def list_shops(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_shops(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
     ids = await allowed_shop_ids(user, db)
     query = select(Shop)
     if ids is not ALL:
         if not ids:
             return []
         query = query.where(Shop.id.in_(ids))
-    res = await db.execute(query.order_by(Shop.id))
+    res = await db.execute(query.order_by(Shop.id).limit(page.limit).offset(page.offset))
     return res.scalars().all()
 
 

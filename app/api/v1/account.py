@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user
+from app.deps.pagination import Page, pagination
 from app.models.profile import Address, PaymentMandate, PaymentMethod
 from app.models.user import User
 from app.schemas.profile import (
@@ -146,7 +147,9 @@ async def post_consent(
 # ---------- Addresses ----------
 @router.get("/addresses", response_model=list[AddressOut], operation_id="list_addresses")
 async def list_addresses(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
 ):
     ids = await svc.my_account_ids(db, user)
     if not ids:
@@ -155,6 +158,8 @@ async def list_addresses(
         select(Address)
         .where(Address.account_id.in_(ids), Address.status == "active")
         .order_by(Address.is_default.desc(), Address.id.desc())
+        .limit(page.limit)
+        .offset(page.offset)
     )
     return res.scalars().all()
 
@@ -226,7 +231,9 @@ async def delete_address(
     "/payment-methods", response_model=list[PaymentMethodOut], operation_id="list_payment_methods"
 )
 async def list_payment_methods(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
 ):
     ids = await svc.my_account_ids(db, user)
     if not ids:
@@ -235,6 +242,8 @@ async def list_payment_methods(
         select(PaymentMethod)
         .where(PaymentMethod.account_id.in_(ids), PaymentMethod.status == "active")
         .order_by(PaymentMethod.is_default.desc(), PaymentMethod.id.desc())
+        .limit(page.limit)
+        .offset(page.offset)
     )
     return res.scalars().all()
 
@@ -292,7 +301,9 @@ async def delete_payment_method(
 # ---------- Mandates (autopay) ----------
 @router.get("/mandates", response_model=list[MandateOut], operation_id="list_mandates")
 async def list_mandates(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
 ):
     ids = await svc.my_account_ids(db, user)
     if not ids:
@@ -301,6 +312,8 @@ async def list_mandates(
         select(PaymentMandate)
         .where(PaymentMandate.account_id.in_(ids))
         .order_by(PaymentMandate.id.desc())
+        .limit(page.limit)
+        .offset(page.offset)
     )
     return res.scalars().all()
 
