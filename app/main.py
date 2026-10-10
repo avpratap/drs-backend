@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.idempotency import IdempotencyMiddleware
 
 app = FastAPI(title="DRS API", version="0.1.0")
 
@@ -25,6 +26,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(IdempotencyMiddleware)
 
 
 @app.middleware("http")

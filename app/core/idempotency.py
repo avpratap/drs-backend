@@ -1,0 +1,104 @@
+"""Idempotency-Key middleware.
+
+Opt-in per request: a client that sends `Idempotency-Key: <uuid>` on a write
+gets at-most-once execution. The first call runs and its 2xx response is stored;
+retries replay the stored response. Non-2xx responses release the key so the
+client can genuinely retry. Reusing a key with a different body is a 422.
+"""
+import hashlib
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+from app.core.db import SessionLocal
+from app.models.idempotency import IdempotencyKey
+
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_HOP_HEADERS = {"content-length", "content-type"}
+
+
+class IdempotencyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        key = request.headers.get("Idempotency-Key")
+        if request.method not in _WRITE_METHODS or not key:
+            return await call_next(request)
+
+        body = await request.body()
+        # Re-inject the body so downstream handlers can read it again.
+        async def _receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request._receive = _receive
+
+        path = request.url.path
+        req_hash = hashlib.sha256(
+            b"%s:%s:%s" % (request.method.encode(), path.encode(), body)
+        ).hexdigest()
+
+        # Try to claim the key (unique constraint arbitrates concurrent claims).
+        claimed = False
+        async with SessionLocal() as db:
+            db.add(
+                IdempotencyKey(
+                    key=key, method=request.method, path=path, request_hash=req_hash
+                )
+            )
+            try:
+                await db.commit()
+                claimed = True
+            except IntegrityError:
+                await db.rollback()
+
+            if not claimed:
+                existing = await db.scalar(
+                    select(IdempotencyKey).where(IdempotencyKey.key == key)
+                )
+                if existing is None:
+                    pass  # extremely rare race; fall through and execute
+                elif existing.request_hash != req_hash:
+                    return JSONResponse(
+                        status_code=422,
+                        content={"detail": "Idempotency-Key reused with a different request"},
+                    )
+                elif existing.response_status is None:
+                    return JSONResponse(
+                        status_code=409,
+                        content={"detail": "A request with this Idempotency-Key is in progress"},
+                    )
+                else:
+                    return Response(
+                        content=existing.response_body or "",
+                        status_code=existing.response_status,
+                        media_type=existing.response_media_type,
+                        headers={"Idempotent-Replay": "true"},
+                    )
+
+        # We hold the claim: execute and buffer the response.
+        response = await call_next(request)
+        chunks = [chunk async for chunk in response.body_iterator]
+        out = b"".join(chunks)
+
+        async with SessionLocal() as db:
+            row = await db.scalar(select(IdempotencyKey).where(IdempotencyKey.key == key))
+            if row is not None:
+                if 200 <= response.status_code < 300:
+                    row.response_status = response.status_code
+                    row.response_body = out.decode("utf-8", "replace")
+                    row.response_media_type = (
+                        response.media_type or response.headers.get("content-type")
+                    )
+                    await db.commit()
+                else:
+                    await db.delete(row)  # release so a real retry can proceed
+                    await db.commit()
+
+        headers = {k: v for k, v in response.headers.items() if k.lower() not in _HOP_HEADERS}
+        return Response(
+            content=out,
+            status_code=response.status_code,
+            headers=headers,
+            media_type=response.media_type,
+        )
