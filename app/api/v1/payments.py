@@ -11,7 +11,13 @@ from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.schemas.payment import PaymentCreate, PaymentCreateOut, PaymentVerify
 from app.services import billing as billing_service
+from app.services import notifications as notify
 from app.services import payments as pay_service
+
+
+async def _owner_user(db: AsyncSession, account_id: int) -> User | None:
+    account = await db.get(CustomerAccount, account_id)
+    return await db.get(User, account.owner_user_id) if account else None
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -108,15 +114,35 @@ async def verify_payment(
         data.gateway_order_id, data.gateway_payment_id, data.signature
     ):
         payment.status = "failed"
+        owner = await _owner_user(db, payment.account_id)
+        if owner is not None:
+            await notify.emit_event(
+                db,
+                "payment.failed",
+                owner,
+                {"amount": float(payment.amount)},
+                account_id=payment.account_id,
+                dedupe_key=f"payment.failed:{payment.id}",
+            )
         await db.commit()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Signature verification failed")
 
     payment.status = "success"
     payment.gateway_payment_id = data.gateway_payment_id
     if payment.payment_type == "wallet_topup":
-        await billing_service.wallet_adjust(
+        wallet = await billing_service.wallet_adjust(
             db, payment.account_id, float(payment.amount), "topup", "payment", payment.id
         )
+        owner = await _owner_user(db, payment.account_id)
+        if owner is not None:
+            await notify.emit_event(
+                db,
+                "payment.success",
+                owner,
+                {"amount": float(payment.amount), "balance": float(wallet.balance)},
+                account_id=payment.account_id,
+                dedupe_key=f"payment.success:{payment.id}",
+            )
     elif payment.payment_type == "order_payment" and payment.ref_id:
         order = await db.get(Order, payment.ref_id)
         if order is not None and order.account_id == payment.account_id:

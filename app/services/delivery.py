@@ -5,7 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
+from app.models.shop import CustomerAccount
 from app.models.user import User
+from app.services import notifications as notify
 from app.services.billing import bill_delivery
 
 
@@ -85,5 +87,19 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     )
     net = round(delivered_total - returns_total, 2)
     await bill_delivery(db, order, net)
+
+    # Notify the account owner that their stop is done (idempotent per order).
+    account = await db.get(CustomerAccount, order.account_id)
+    owner = await db.get(User, account.owner_user_id) if account else None
+    if owner is not None:
+        delivered_count = sum(1 for i in items.values() if i.status in ("delivered", "partial"))
+        await notify.emit_event(
+            db,
+            "delivery.completed",
+            owner,
+            {"summary": f"{delivered_count} item(s)", "amount": net},
+            account_id=order.account_id,
+            dedupe_key=f"delivery.completed:{order.id}",
+        )
 
     await db.commit()
