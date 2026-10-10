@@ -3,6 +3,8 @@
 Full phone-OTP + refresh-rotation/reuse-detection lives in the auth service
 (see drs-backend skill); these are the low-level building blocks.
 """
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -38,15 +40,13 @@ def create_access_token(sub: str, role: str, token_version: int) -> str:
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
 
 
-def create_refresh_token(sub: str) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(sub),
-        "type": "refresh",
-        "iat": now,
-        "exp": now + timedelta(days=settings.REFRESH_TOKEN_DAYS),
-    }
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
+def generate_refresh_token() -> str:
+    """Opaque 256-bit refresh token. Stored server-side only as a hash."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def decode_token(token: str) -> dict:
