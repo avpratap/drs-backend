@@ -29,6 +29,27 @@ services:
       timeout: 5s
       retries: 20
 
+  # Transaction-pooling in front of Postgres. Opt-in: `docker compose --profile prod up`.
+  # Then set DB_POOL_MODE=pgbouncer and point DATABASE_URL at port 6432.
+  pgbouncer:
+    image: edoburu/pgbouncer:1.22.1-p0
+    container_name: drs_pgbouncer
+    profiles: ["prod"]
+    environment:
+      DB_HOST: db
+      DB_USER: drs
+      DB_PASSWORD: drs
+      DB_NAME: drs
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      MAX_CLIENT_CONN: "1000"
+      DEFAULT_POOL_SIZE: "20"
+    ports:
+      - "6432:6432"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   drs_pgdata:
   drs_redisdata:
