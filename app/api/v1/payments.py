@@ -65,6 +65,9 @@ async def create_payment(
         amount = float(order.total)  # server-authoritative, ignore client amount
         ref_type = "order"
         ref_id = order.id
+    else:  # wallet_topup — client amount is authoritative and required
+        if amount is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount required for top-up")
 
     gateway_order_id = await pay_service.create_gateway_order(amount)
     payment = Payment(

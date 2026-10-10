@@ -2,7 +2,8 @@ from pydantic import BaseModel, Field
 
 
 class PaymentCreate(BaseModel):
-    amount: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
+    # Required for wallet_topup; ignored for order_payment (server uses order.total).
+    amount: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     purpose: str  # wallet_topup | order_payment
     order_id: int | None = None  # required for order_payment
 

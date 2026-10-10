@@ -52,3 +52,11 @@ async def test_negative_amount_rejected(client):
         headers=auth(token),
     )
     assert r.status_code == 422
+
+
+async def test_topup_requires_amount(client):
+    token = await login(client, "9876543210")
+    r = await client.post(
+        "/api/v1/payments/create", json={"purpose": "wallet_topup"}, headers=auth(token)
+    )
+    assert r.status_code == 422
