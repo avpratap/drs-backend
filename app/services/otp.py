@@ -8,6 +8,7 @@ import secrets
 
 from app.core.config import settings
 from app.core.redis import redis_client
+from app.services.sms import send_otp_sms, sms_enabled
 
 OTP_TTL = 300  # 5 minutes
 MAX_SENDS_PER_HOUR = 5
@@ -35,7 +36,10 @@ async def request_otp(phone: str) -> str | None:
     await redis_client.set(f"otp:attempts:{phone}", 0, ex=OTP_TTL)
     await redis_client.set(f"otp:cooldown:{phone}", "1", ex=RESEND_COOLDOWN)
 
-    # TODO(prod): await send_sms(phone, otp) via MSG91 (DLT template)
+    sent = await send_otp_sms(phone, otp) if sms_enabled() else False
+    # Return the OTP for testing ONLY when we did not actually send an SMS.
+    if sent:
+        return None
     return otp if settings.ENV != "prod" else None
 
 

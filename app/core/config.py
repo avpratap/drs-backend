@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     ENV: str = "dev"
     CORS_ORIGINS: str = "http://localhost:3000"
 
+    # MSG91 (OTP SMS). SMS is only sent when BOTH authkey + template_id are set
+    # (template_id requires a DLT-approved OTP template). Until then, dev returns the OTP.
+    MSG91_AUTHKEY: str = ""
+    MSG91_TEMPLATE_ID: str = ""
+    MSG91_SENDER: str = ""
+    MSG91_OTP_EXPIRY_MIN: int = 5
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
