@@ -21,6 +21,7 @@ from app.schemas.profile import (
     ProfileOut,
     ProfileUpdate,
 )
+from app.services import dpdp
 from app.services import profile as svc
 
 router = APIRouter(tags=["account"])
@@ -109,6 +110,23 @@ async def update_profile(
     await db.refresh(user)
     await db.refresh(prof)
     return _profile_out(user, prof)
+
+
+# ---------- DPDP data rights ----------
+@router.get("/account/export", operation_id="export_my_data")
+async def export_my_data(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Data access + portability: everything we hold about the caller."""
+    return await dpdp.export_user_data(db, user)
+
+
+@router.post("/account/erase", operation_id="erase_my_account")
+async def erase_my_account(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Right to erasure — anonymizes PII; tax/financial records are retained by law."""
+    return await dpdp.erase_user(db, user)
 
 
 # ---------- Consent ----------

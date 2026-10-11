@@ -52,3 +52,18 @@ class ProductPriceOut(BaseModel):
 
 class TierAssignIn(BaseModel):
     price_tier_id: int
+
+
+class UserAdminOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    phone: str
+    email: str | None = None
+    full_name: str | None = None
+    role: str
+    status: str
+
+
+class UserPatch(BaseModel):
+    role: str | None = Field(default=None, pattern="^(admin|customer|subscriber|delivery)$")
+    status: str | None = Field(default=None, pattern="^(active|suspended)$")

@@ -1,15 +1,19 @@
 """Admin management CRUD: delivery-staff assignment, price tiers/prices, tier
 assignment. All admin-gated."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_delete
 from app.core.db import get_db
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
+from app.models.billing import CreditLedger, Wallet
+from app.models.delivery import DeliveryOrder
+from app.models.order import Order
 from app.models.pricing import PriceTier, ProductPrice
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
+from app.models.subscription import Subscription
 from app.models.user import User
 from app.schemas.management import (
     DeliveryAssignmentIn,
@@ -19,7 +23,10 @@ from app.schemas.management import (
     ProductPriceIn,
     ProductPriceOut,
     TierAssignIn,
+    UserAdminOut,
+    UserPatch,
 )
+from app.services import dpdp
 
 router = APIRouter(
     prefix="/admin", tags=["management"], dependencies=[Depends(require_role("admin"))]
@@ -167,3 +174,81 @@ async def set_account_tier(account_id: int, data: TierAssignIn, db: AsyncSession
     account.price_tier_id = data.price_tier_id
     await db.commit()
     return {"detail": "tier set", "account_id": account_id, "price_tier_id": data.price_tier_id}
+
+
+# ---------- User management ----------
+@router.get("/users", response_model=list[UserAdminOut], operation_id="list_users")
+async def list_users(
+    role: str | None = None,
+    status_filter: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    q = select(User).order_by(User.id)
+    if role is not None:
+        q = q.where(User.role == role)
+    if status_filter is not None:
+        q = q.where(User.status == status_filter)
+    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+
+
+@router.patch("/users/{user_id}", response_model=UserAdminOut, operation_id="update_user")
+async def update_user(user_id: int, data: UserPatch, db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    patch = data.model_dump(exclude_unset=True)
+    if "role" in patch:
+        user.role = patch["role"]
+        user.token_version += 1  # force re-auth so the new role takes effect
+    if "status" in patch:
+        user.status = patch["status"]
+        if patch["status"] == "suspended":
+            user.token_version += 1  # kick existing sessions
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@router.post("/users/{user_id}/erase", operation_id="admin_erase_user")
+async def admin_erase_user(user_id: int, db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return await dpdp.erase_user(db, user)
+
+
+# ---------- Reports ----------
+@router.get("/reports/summary", operation_id="reports_summary")
+async def reports_summary(db: AsyncSession = Depends(get_db)):
+    """At-a-glance operational + financial counters for the admin dashboard."""
+    paid_revenue = await db.scalar(
+        select(func.coalesce(func.sum(Order.total), 0)).where(Order.payment_status == "paid")
+    )
+    wallet_float = await db.scalar(select(func.coalesce(func.sum(Wallet.balance), 0)))
+    # Outstanding postpaid credit = latest balance per account, summed.
+    latest = (
+        select(CreditLedger.account_id, func.max(CreditLedger.id).label("mx"))
+        .group_by(CreditLedger.account_id)
+        .subquery()
+    )
+    outstanding = await db.scalar(
+        select(func.coalesce(func.sum(CreditLedger.balance_after), 0)).join(
+            latest, CreditLedger.id == latest.c.mx
+        )
+    )
+    active_subs = await db.scalar(
+        select(func.count()).select_from(Subscription).where(Subscription.status == "active")
+    )
+    shops = await db.scalar(select(func.count()).select_from(Shop))
+    delivered = await db.scalar(
+        select(func.count()).select_from(DeliveryOrder).where(DeliveryOrder.status == "delivered")
+    )
+    return {
+        "paid_order_revenue": float(paid_revenue or 0),
+        "wallet_float": float(wallet_float or 0),
+        "credit_outstanding": float(outstanding or 0),
+        "active_subscriptions": active_subs or 0,
+        "shops": shops or 0,
+        "delivered_orders": delivered or 0,
+    }
