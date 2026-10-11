@@ -10,6 +10,7 @@ from app.deps.auth import require_role
 from app.models.notification import Notification
 from app.models.user import User
 from app.schemas.delivery import CutoffResult
+from app.services import forecasting
 from app.services import notifications as notify
 from app.services.cutoff import run_cutoff
 from app.services.subscription import today_ist
@@ -47,6 +48,20 @@ async def emit_test_notification(body: NotifyTestIn, db: AsyncSession = Depends(
             for r in rows
         ]
     }
+
+
+@router.get("/forecast", operation_id="demand_forecast")
+async def demand_forecast(
+    date: dt.date | None = None,
+    history_days: int = 28,
+    db: AsyncSession = Depends(get_db),
+):
+    """Next-day production plan: known committed standing orders + forecast of the
+    variable (one-time) demand, with a service-level safety buffer, per product."""
+    for_date = date or (today_ist() + dt.timedelta(days=1))
+    history_days = min(max(history_days, 7), 365)
+    plan = await forecasting.production_plan(db, for_date, history_days=history_days)
+    return {"for_date": str(for_date), "history_days": history_days, "plan": plan}
 
 
 @router.post("/notifications/flush", operation_id="flush_notifications")
