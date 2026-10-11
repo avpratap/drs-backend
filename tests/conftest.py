@@ -79,6 +79,11 @@ async def _seed() -> None:
 
         product = Product(sku="MILK-1L", name="Full Cream Milk 1L", uom="litre", gst_rate=0)
         db.add(product)
+        # A 12% GST item (ghee) so invoice tax computation is exercisable.
+        ghee = Product(
+            sku="GHEE-1KG", name="Bilona Ghee 1kg", uom="kg", gst_rate=12, hsn_code="04059020"
+        )
+        db.add(ghee)
         tier = PriceTier(code="RETAIL", name="Retail", tier_type="retail")
         db.add(tier)
         await db.flush()
@@ -87,6 +92,15 @@ async def _seed() -> None:
                 product_id=product.id,
                 price_tier_id=tier.id,
                 unit_price=27,
+                min_qty=1,
+                valid_from=dt.date(2025, 1, 1),
+            )
+        )
+        db.add(
+            ProductPrice(
+                product_id=ghee.id,
+                price_tier_id=tier.id,
+                unit_price=500,
                 min_qty=1,
                 valid_from=dt.date(2025, 1, 1),
             )

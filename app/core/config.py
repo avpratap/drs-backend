@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     MSG91_SENDER: str = ""
     MSG91_OTP_EXPIRY_MIN: int = 5
 
+    # GST invoicing (seller = Dhanna Ram Sherawat Enterprises)
+    SELLER_LEGAL_NAME: str = "Dhanna Ram Sherawat Enterprises"
+    SELLER_GSTIN: str = ""  # 15-char GSTIN once registered
+    SELLER_STATE: str = "Rajasthan"  # seller's place of business (for intra/inter-state)
+    INVOICE_PREFIX: str = "DRS"
+
     # Subscriptions / daily cutoff
     TIMEZONE: str = "Asia/Kolkata"
     CUTOFF_HOUR: int = 23  # local hour after which tomorrow's order is frozen
