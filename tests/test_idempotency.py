@@ -27,6 +27,23 @@ async def test_key_reuse_different_body_422(client):
     assert r2.status_code == 422
 
 
+async def test_idempotency_key_scoped_per_user(client):
+    # Same raw key + same body from two different users must NOT replay across users.
+    a = await login(client, "9876543210")
+    b = await login(client, "9191919191")
+    body = {"purpose": "wallet_topup", "amount": 20}
+    hk = "shared-key-xyz"
+    ra = await client.post(
+        "/api/v1/payments/create", json=body, headers={**auth(a), "Idempotency-Key": hk}
+    )
+    rb = await client.post(
+        "/api/v1/payments/create", json=body, headers={**auth(b), "Idempotency-Key": hk}
+    )
+    assert ra.status_code == 200 and rb.status_code == 200
+    assert rb.headers.get("Idempotent-Replay") != "true"  # B executed its own, not A's
+    assert ra.json()["payment_id"] != rb.json()["payment_id"]
+
+
 async def test_no_key_creates_distinct(client):
     token = await login(client, "9876543210")
     body = {"purpose": "wallet_topup", "amount": 5}

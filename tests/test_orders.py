@@ -64,3 +64,25 @@ async def test_order_payment_flow(client):
         headers=auth(cust),
     )
     assert again.status_code == 409
+
+
+async def test_no_double_open_order_payment(client):
+    cust = await login(client, "9876543210")
+    order = (
+        await client.post(
+            "/api/v1/orders", json={"items": [{"product_id": 1, "qty": 1}]}, headers=auth(cust)
+        )
+    ).json()
+    first = await client.post(
+        "/api/v1/payments/create",
+        json={"purpose": "order_payment", "order_id": order["id"]},
+        headers=auth(cust),
+    )
+    assert first.status_code == 200
+    # A second open payment for the same order is blocked (no double gateway charge).
+    second = await client.post(
+        "/api/v1/payments/create",
+        json={"purpose": "order_payment", "order_id": order["id"]},
+        headers=auth(cust),
+    )
+    assert second.status_code == 409

@@ -22,6 +22,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     func,
@@ -120,7 +121,7 @@ class PaymentMandate(Base, TimestampMixin):
     gateway_mandate_id: Mapped[str | None] = mapped_column(
         String(128), unique=True, nullable=True
     )
-    max_amount: Mapped[float] = mapped_column(nullable=False)  # per-debit cap (rupees)
+    max_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)  # per-debit cap (₹)
     frequency: Mapped[str] = mapped_column(
         String(16), default="as_presented", nullable=False
     )  # daily|weekly|monthly|as_presented

@@ -19,14 +19,22 @@ from app.core.observability import (
 configure_logging()
 init_sentry()
 
-app = FastAPI(title="DRS API", version="0.1.0")
-
 # Production safety guards: fail fast instead of booting an insecure instance.
 if settings.ENV == "prod":
     if "dev-only" in settings.JWT_SECRET or len(settings.JWT_SECRET) < 32:
         raise RuntimeError("JWT_SECRET must be a strong secret (>=32 chars) in prod")
     if "*" in settings.cors_origins_list:
         raise RuntimeError("CORS_ORIGINS must be an explicit allow-list in prod")
+    # Payment secrets: without these the gateway stub accepts the "dev" signature
+    # and unsigned webhooks — forgeable payments. Refuse to boot.
+    if not (settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET):
+        raise RuntimeError("RAZORPAY_KEY_ID/SECRET required in prod")
+    if not settings.RAZORPAY_WEBHOOK_SECRET:
+        raise RuntimeError("RAZORPAY_WEBHOOK_SECRET required in prod")
+
+# Hide API docs in prod (don't advertise the surface publicly).
+_docs = None if settings.ENV == "prod" else "/docs"
+app = FastAPI(title="DRS API", version="0.1.0", docs_url=_docs, redoc_url=None)
 
 app.add_middleware(
     CORSMiddleware,

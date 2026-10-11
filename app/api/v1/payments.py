@@ -89,11 +89,30 @@ async def create_payment(
     if data.purpose == "order_payment":
         if not data.order_id:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "order_id required")
-        order = await db.get(Order, data.order_id)
+        # Lock the order so two concurrent creates can't both open a gateway payment
+        # (which would double-charge the customer).
+        res = await db.execute(
+            select(Order).where(Order.id == data.order_id).with_for_update()
+        )
+        order = res.scalar_one_or_none()
         if order is None or order.account_id != account.id:  # ownership
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
         if order.payment_status == "paid":
             raise HTTPException(status.HTTP_409_CONFLICT, "Order already paid")
+        # One open/settled payment per order at a time.
+        open_pay = await db.scalar(
+            select(func.count())
+            .select_from(Payment)
+            .where(
+                Payment.ref_type == "order",
+                Payment.ref_id == order.id,
+                Payment.status.in_(("initiated", "success")),
+            )
+        )
+        if open_pay:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "A payment for this order is already in progress"
+            )
         amount = float(order.total)  # server-authoritative, ignore client amount
         ref_type = "order"
         ref_id = order.id

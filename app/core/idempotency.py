@@ -14,17 +14,31 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from app.core.db import SessionLocal
+from app.core.security import decode_token
 from app.models.idempotency import IdempotencyKey
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _HOP_HEADERS = {"content-length", "content-type"}
 
 
+def _subject(request: Request) -> str:
+    """Best-effort caller id from the bearer token, to scope keys per user."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        try:
+            return str(decode_token(auth[7:]).get("sub") or "anon")
+        except Exception:
+            return "anon"
+    return "anon"
+
+
 class IdempotencyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        key = request.headers.get("Idempotency-Key")
-        if request.method not in _WRITE_METHODS or not key:
+        raw_key = request.headers.get("Idempotency-Key")
+        if request.method not in _WRITE_METHODS or not raw_key:
             return await call_next(request)
+        # Scope the key to the caller so two users can't collide / replay each other.
+        key = f"{_subject(request)}:{raw_key}"
 
         body = await request.body()
         # Re-inject the body so downstream handlers can read it again.

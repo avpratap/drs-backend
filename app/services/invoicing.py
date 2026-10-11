@@ -19,6 +19,8 @@ from app.models.profile import Address, UserProfile
 from app.models.shop import CustomerAccount
 
 _SEQ_LOCK_NS = 555001
+_INV_LOCK_NS = 555002  # serialize invoice generation per delivery order
+_CN_LOCK_NS = 555003  # serialize credit-note generation per source invoice
 
 
 def fy_for_date(d: dt.date) -> str:
@@ -63,6 +65,9 @@ def _split(taxable: float, rate: float, interstate: bool) -> tuple[float, float,
 
 
 async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:
+    # Serialize concurrent generations for this order so the existence check below
+    # is reliable (partial-unique index on delivery_order_id is the DB backstop).
+    await db.execute(select(func.pg_advisory_xact_lock(_INV_LOCK_NS, order.id)))
     # Idempotent: reuse the existing tax invoice for this delivery order.
     existing = await db.scalar(
         select(Invoice).where(
@@ -144,6 +149,7 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
 async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str | None) -> Invoice:
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
+    await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, invoice.id)))
     existing = await db.scalar(
         select(Invoice).where(
             Invoice.original_invoice_id == invoice.id, Invoice.is_credit_note.is_(True)
