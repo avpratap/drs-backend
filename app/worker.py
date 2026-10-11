@@ -14,6 +14,7 @@ from arq.connections import RedisSettings
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.services.cutoff import run_cutoff
+from app.services.maintenance import prune
 from app.services.notifications import process_outbox
 from app.services.subscription import today_ist
 
@@ -32,12 +33,19 @@ async def drain_outbox(ctx: dict) -> dict:
         return await process_outbox(db, limit=200)
 
 
+async def housekeeping(ctx: dict) -> dict:
+    """Prune short-retention rows (idempotency keys, webhook events, old notifications)."""
+    async with SessionLocal() as db:
+        return await prune(db)
+
+
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    functions = [scheduled_cutoff, drain_outbox]
+    functions = [scheduled_cutoff, drain_outbox, housekeeping]
     cron_jobs = [
         cron(scheduled_cutoff, hour=17, minute=35),  # 23:05 IST
         cron(drain_outbox),  # every minute
+        cron(housekeeping, hour=1, minute=0),  # daily prune
     ]
     # Resilience: retry failed jobs with backoff; a job that exhausts max_tries
     # lands in ARQ's result store with its error (our dead-letter surface).

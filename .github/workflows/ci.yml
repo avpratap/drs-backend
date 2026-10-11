@@ -47,6 +47,11 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check .
 
+      - name: Migrations apply cleanly
+        env:
+          DATABASE_URL: postgresql+asyncpg://drs:drs@localhost:5432/drs
+        run: uv run alembic upgrade head
+
       - name: Run tests
         env:
           # conftest recreates drs_test from the drs maintenance DB on localhost.

@@ -45,7 +45,14 @@ async def create_shop(
         )
         db.add(account)
         await db.flush()
-    shop = Shop(account_id=account.id, name=data.name, address=data.address, status="active")
+    shop = Shop(
+        account_id=account.id,
+        name=data.name,
+        address=data.address,
+        state=data.state,
+        pincode=data.pincode,
+        status="active",
+    )
     db.add(shop)
     await db.commit()
     await db.refresh(shop)

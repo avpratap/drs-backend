@@ -30,6 +30,8 @@ class Shop(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     address: Mapped[str | None] = mapped_column(String, nullable=True)
+    state: Mapped[str | None] = mapped_column(String(120), nullable=True)  # GST place of supply
+    pincode: Mapped[str | None] = mapped_column(String(10), nullable=True)
     geo: Mapped[object | None] = mapped_column(
         Geography(geometry_type="POINT", srid=4326, spatial_index=False), nullable=True
     )

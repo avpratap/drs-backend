@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict
 class ShopCreate(BaseModel):
     name: str
     address: str | None = None
+    state: str | None = None
+    pincode: str | None = None
 
 
 class ShopOut(BaseModel):
@@ -12,4 +14,6 @@ class ShopOut(BaseModel):
     account_id: int
     name: str
     address: str | None = None
+    state: str | None = None
+    pincode: str | None = None
     status: str

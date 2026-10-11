@@ -16,7 +16,7 @@ from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.invoice import Invoice, InvoiceLine
 from app.models.product import Product
 from app.models.profile import Address, UserProfile
-from app.models.shop import CustomerAccount
+from app.models.shop import CustomerAccount, Shop
 
 _SEQ_LOCK_NS = 555001
 _INV_LOCK_NS = 555002  # serialize invoice generation per delivery order
@@ -34,13 +34,16 @@ async def _next_seq(db: AsyncSession, fy: str) -> int:
     return (last or 0) + 1
 
 
-async def _place_of_supply(db: AsyncSession, account_id: int) -> str:
-    """Buyer state from their default active address; fall back to the seller state
-    (treated as intra-state) when no address is on file."""
+async def _place_of_supply(db: AsyncSession, order: DeliveryOrder) -> str:
+    """Place of supply for a delivery: the shop's own state (most accurate), else the
+    account's default-address state, else the seller state (intra-state) as last resort."""
+    shop = await db.get(Shop, order.shop_id)
+    if shop is not None and shop.state:
+        return shop.state
     state = await db.scalar(
         select(Address.state)
         .where(
-            Address.account_id == account_id,
+            Address.account_id == order.account_id,
             Address.status == "active",
             Address.is_default.is_(True),
         )
@@ -77,7 +80,7 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
     if existing is not None:
         return existing
 
-    place = await _place_of_supply(db, order.account_id)
+    place = await _place_of_supply(db, order)
     interstate = place.strip().lower() != settings.SELLER_STATE.strip().lower()
     today = dt.datetime.now(dt.UTC).date()
     fy = fy_for_date(today)

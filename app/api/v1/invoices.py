@@ -31,6 +31,25 @@ async def _detail(db: AsyncSession, inv: Invoice) -> InvoiceOut:
     return out
 
 
+async def _details(db: AsyncSession, invoices: list[Invoice]) -> list[InvoiceOut]:
+    """Build invoice views with a single batched line query (no N+1)."""
+    if not invoices:
+        return []
+    ids = [i.id for i in invoices]
+    rows = (
+        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id.in_(ids)))
+    ).scalars().all()
+    by_inv: dict[int, list[InvoiceLineOut]] = {}
+    for ln in rows:
+        by_inv.setdefault(ln.invoice_id, []).append(InvoiceLineOut.model_validate(ln))
+    views = []
+    for inv in invoices:
+        v = InvoiceOut.model_validate(inv)
+        v.lines = by_inv.get(inv.id, [])
+        views.append(v)
+    return views
+
+
 @router.get("/invoices", response_model=list[InvoiceOut], operation_id="list_invoices")
 async def list_invoices(
     user: User = Depends(get_current_user),
@@ -46,7 +65,7 @@ async def list_invoices(
     invoices = (
         await db.execute(query.limit(page.limit).offset(page.offset))
     ).scalars().all()
-    return [await _detail(db, inv) for inv in invoices]
+    return await _details(db, list(invoices))
 
 
 @router.get("/invoices/{invoice_id}", response_model=InvoiceOut, operation_id="get_invoice")

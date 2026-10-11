@@ -3,9 +3,12 @@ from conftest import auth, login
 DATE = "2034-07-07"
 
 
-async def _delivered_ghee_order(client, admin_h):
+async def _delivered_ghee_order(client, admin_h, state=None):
     """Admin sets up a shop+subscription for the 12% ghee product, cuts off, delivers."""
-    shop = await client.post("/api/v1/shops", json={"name": "Invoice Shop"}, headers=admin_h)
+    payload = {"name": "Invoice Shop"}
+    if state is not None:
+        payload["state"] = state
+    shop = await client.post("/api/v1/shops", json=payload, headers=admin_h)
     shop_id = shop.json()["id"]
     sub = await client.post("/api/v1/subscriptions", json={"shop_id": shop_id}, headers=admin_h)
     sid = sub.json()["id"]
@@ -48,6 +51,19 @@ async def test_generate_invoice_gst_split(client):
     assert inv["is_interstate"] is False
     assert inv["invoice_no"].startswith("DRS/")
     assert inv["lines"][0]["hsn_code"] == "04059020"
+
+
+async def test_interstate_invoice_uses_igst(client):
+    admin = await login(client, "9999900001")
+    h = auth(admin)
+    # Shop in a different state than the seller (Rajasthan) -> IGST, no CGST/SGST.
+    do_id = await _delivered_ghee_order(client, h, state="Maharashtra")
+    inv = (
+        await client.post(f"/api/v1/admin/invoices/generate?delivery_order_id={do_id}", headers=h)
+    ).json()
+    assert inv["is_interstate"] is True
+    assert inv["igst"] == 120.0  # 1000 @ 12%
+    assert inv["cgst"] == 0.0 and inv["sgst"] == 0.0
 
 
 async def test_invoice_idempotent(client):
