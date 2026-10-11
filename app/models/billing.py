@@ -33,6 +33,27 @@ class WalletTransaction(Base):
     )
 
 
+class WithdrawalRequest(Base):
+    """Customer-initiated wallet payout; admin approves (debits wallet) or rejects."""
+
+    __tablename__ = "withdrawal_requests"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_accounts.id"), index=True, nullable=False
+    )
+    amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(12), default="requested", nullable=False
+    )  # requested|paid|rejected
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class CreditLedger(Base):
     """Append-only postpaid (B2B) receivables ledger."""
 

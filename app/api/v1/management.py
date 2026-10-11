@@ -1,14 +1,16 @@
 """Admin management CRUD: delivery-staff assignment, price tiers/prices, tier
-assignment. All admin-gated."""
+assignment, account finance, shop mgmt, coupons, users, withdrawals. All admin-gated."""
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_delete
 from app.core.db import get_db
-from app.deps.auth import require_role
+from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
-from app.models.billing import CreditLedger, Wallet
+from app.models.billing import CreditLedger, Wallet, WithdrawalRequest
 from app.models.coupon import Coupon
 from app.models.delivery import DeliveryOrder
 from app.models.order import Order
@@ -334,6 +336,68 @@ async def admin_update_shop(shop_id: int, data: ShopPatch, db: AsyncSession = De
     await db.commit()
     await db.refresh(shop)
     return shop
+
+
+# ---------- Wallet withdrawals (approval) ----------
+@router.get("/withdrawals", operation_id="admin_list_withdrawals")
+async def admin_list_withdrawals(
+    status_filter: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    q = select(WithdrawalRequest).order_by(WithdrawalRequest.id.desc())
+    if status_filter:
+        q = q.where(WithdrawalRequest.status == status_filter)
+    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return [
+        {"id": w.id, "account_id": w.account_id, "amount": float(w.amount), "status": w.status}
+        for w in rows
+    ]
+
+
+@router.post("/withdrawals/{wd_id}/approve", operation_id="approve_withdrawal")
+async def approve_withdrawal(
+    wd_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await db.execute(
+        select(WithdrawalRequest).where(WithdrawalRequest.id == wd_id).with_for_update()
+    )
+    wd = res.scalar_one_or_none()
+    if wd is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Withdrawal not found")
+    if wd.status != "requested":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Withdrawal is {wd.status}")
+    try:
+        await billing_svc.wallet_adjust(
+            db, wd.account_id, -float(wd.amount), "withdrawal", "withdrawal", wd.id
+        )
+    except billing_svc.InsufficientBalance:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Insufficient wallet balance") from None
+    wd.status = "paid"
+    wd.decided_by = user.id
+    wd.decided_at = dt.datetime.now(dt.UTC)
+    await db.commit()
+    return {"id": wd.id, "status": wd.status}
+
+
+@router.post("/withdrawals/{wd_id}/reject", operation_id="reject_withdrawal")
+async def reject_withdrawal(
+    wd_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    wd = await db.get(WithdrawalRequest, wd_id)
+    if wd is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Withdrawal not found")
+    if wd.status != "requested":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Withdrawal is {wd.status}")
+    wd.status = "rejected"
+    wd.decided_by = user.id
+    wd.decided_at = dt.datetime.now(dt.UTC)
+    await db.commit()
+    return {"id": wd.id, "status": wd.status}
 
 
 # ---------- Reports ----------

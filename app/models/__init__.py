@@ -1,6 +1,6 @@
 from app.models.auth_session import AuthSession
 from app.models.base import Base
-from app.models.billing import CreditLedger, Wallet, WalletTransaction
+from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
@@ -19,6 +19,7 @@ from app.models.profile import (
     PaymentMethod,
     UserProfile,
 )
+from app.models.rating import Rating
 from app.models.refund import Refund, WebhookEvent
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
@@ -50,6 +51,7 @@ __all__ = [
     "Product",
     "ProductPrice",
     "ProofOfDelivery",
+    "Rating",
     "Refund",
     "Return",
     "ScheduleRun",
@@ -65,4 +67,5 @@ __all__ = [
     "Wallet",
     "WalletTransaction",
     "WebhookEvent",
+    "WithdrawalRequest",
 ]
