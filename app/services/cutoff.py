@@ -9,6 +9,7 @@ Per order we take a row lock and refuse to clobber anything already past
 'generated'/'frozen' (i.e. assigned/dispatched/delivered).
 """
 import datetime as dt
+from dataclasses import dataclass
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,14 +19,64 @@ from app.models.shop import CustomerAccount, Shop
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.services import notifications as notify
-from app.services.pricing import resolve_tier_id, resolve_unit_price
+from app.services.pricing import PriceBook, load_price_book
 from app.services.subscription import compute_plan
 
 _LOCK_NS = 424242
 CHUNK = 200
 
 
-async def _materialize_one(db: AsyncSession, sub: Subscription, delivery_date: dt.date, run_id: int) -> bool:
+@dataclass
+class _Ctx:
+    """Reference data preloaded once per run so per-subscription work does no
+    shop/account/user/price lookups (eliminates the cutoff's N+1)."""
+
+    shops: dict[int, Shop]
+    accounts: dict[int, CustomerAccount]
+    owners: dict[int, User | None]  # keyed by account_id
+    book: PriceBook
+
+
+async def _load_ctx(db: AsyncSession) -> _Ctx:
+    rows = (
+        await db.execute(
+            select(Subscription.shop_id, Subscription.account_id).where(
+                Subscription.status == "active"
+            )
+        )
+    ).all()
+    shop_ids = {r[0] for r in rows}
+    account_ids = {r[1] for r in rows}
+    shops = (
+        {s.id: s for s in (await db.execute(select(Shop).where(Shop.id.in_(shop_ids)))).scalars()}
+        if shop_ids
+        else {}
+    )
+    accounts = (
+        {
+            a.id: a
+            for a in (
+                await db.execute(
+                    select(CustomerAccount).where(CustomerAccount.id.in_(account_ids))
+                )
+            ).scalars()
+        }
+        if account_ids
+        else {}
+    )
+    owner_ids = {a.owner_user_id for a in accounts.values()}
+    users = (
+        {u.id: u for u in (await db.execute(select(User).where(User.id.in_(owner_ids)))).scalars()}
+        if owner_ids
+        else {}
+    )
+    owners = {a.id: users.get(a.owner_user_id) for a in accounts.values()}
+    return _Ctx(shops, accounts, owners, await load_price_book(db))
+
+
+async def _materialize_one(
+    db: AsyncSession, sub: Subscription, delivery_date: dt.date, run_id: int, ctx: _Ctx
+) -> bool:
     lines = await compute_plan(db, sub, delivery_date)
     if not lines:
         return False
@@ -59,11 +110,12 @@ async def _materialize_one(db: AsyncSession, sub: Subscription, delivery_date: d
             delete(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
         )
 
-    shop = await db.get(Shop, sub.shop_id)
-    tier_id = await resolve_tier_id(db, shop)
+    shop = ctx.shops.get(sub.shop_id)
+    account = ctx.accounts.get(sub.account_id)
+    tier_id = ctx.book.tier_for(shop, account) if shop is not None else None
     subtotal = 0.0
     for line in lines:
-        unit_price = await resolve_unit_price(db, line["product_id"], tier_id, line["qty"])
+        unit_price = ctx.book.unit_price(line["product_id"], tier_id, line["qty"])
         line_total = round(unit_price * line["qty"], 2)
         subtotal += line_total
         db.add(
@@ -82,8 +134,7 @@ async def _materialize_one(db: AsyncSession, sub: Subscription, delivery_date: d
 
     # Tell the account owner tomorrow's order is set (idempotent per delivery_order;
     # a cutoff re-run hits the dedupe savepoint and skips silently).
-    account = await db.get(CustomerAccount, sub.account_id)
-    owner = await db.get(User, account.owner_user_id) if account else None
+    owner = ctx.owners.get(sub.account_id)
     if owner is not None:
         await notify.emit_event(
             db,
@@ -113,6 +164,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
         run_id = run.id
         await db.commit()  # persist the run row up front
 
+        ctx = await _load_ctx(db)  # reference data preloaded once (no per-sub N+1)
         ids = (
             await db.execute(
                 select(Subscription.id)
@@ -128,7 +180,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
                 await db.execute(select(Subscription).where(Subscription.id.in_(chunk_ids)))
             ).scalars().all()
             for sub in subs:
-                if await _materialize_one(db, sub, delivery_date, run_id):
+                if await _materialize_one(db, sub, delivery_date, run_id, ctx):
                     count += 1
             await db.commit()  # commit per chunk
 

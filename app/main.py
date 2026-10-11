@@ -17,6 +17,7 @@ from app.core.observability import (
     init_sentry,
     metrics_response,
 )
+from app.core.ratelimit import RateLimitMiddleware
 from app.core.redis import redis_client
 
 configure_logging()
@@ -57,6 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(IdempotencyMiddleware)
+app.add_middleware(RateLimitMiddleware)  # reject abusive IPs before heavy work
 app.add_middleware(RequestContextMiddleware)  # outermost: times & tags every request
 
 

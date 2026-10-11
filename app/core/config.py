@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     # Cache
     CACHE_TTL_SECONDS: int = 300
+
+    # Global per-IP rate limit (fixed window). Fail-open if Redis is down.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MIN: int = 300
     JWT_SECRET: str = "dev-only-change-me-to-a-long-random-32plus-byte-string"
     JWT_ALG: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 15

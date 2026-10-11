@@ -37,3 +37,40 @@ async def resolve_unit_price(db: AsyncSession, product_id: int, tier_id: int | N
     )
     price = res.scalars().first()
     return float(price.unit_price) if price else 0.0
+
+
+class PriceBook:
+    """All active prices + tiers preloaded once, resolved in memory — lets the
+    nightly cutoff price thousands of lines with zero per-line queries."""
+
+    def __init__(self, today: dt.date, prices: list[ProductPrice], retail_tier_id: int | None):
+        self.retail_tier_id = retail_tier_id
+        self._by_key: dict[tuple[int, int], list[ProductPrice]] = {}
+        for p in prices:
+            if p.valid_from <= today and (p.valid_to is None or p.valid_to >= today):
+                self._by_key.setdefault((p.price_tier_id, p.product_id), []).append(p)
+        # Highest min_qty first so the first match <= qty is the applicable break.
+        for rows in self._by_key.values():
+            rows.sort(key=lambda r: (float(r.min_qty), str(r.valid_from)), reverse=True)
+
+    def tier_for(self, shop: Shop, account: CustomerAccount | None) -> int | None:
+        if shop.price_tier_id:
+            return shop.price_tier_id
+        if account and account.price_tier_id:
+            return account.price_tier_id
+        return self.retail_tier_id
+
+    def unit_price(self, product_id: int, tier_id: int | None, qty: float) -> float:
+        if tier_id is None:
+            return 0.0
+        for p in self._by_key.get((tier_id, product_id), ()):
+            if float(p.min_qty) <= qty:
+                return float(p.unit_price)
+        return 0.0
+
+
+async def load_price_book(db: AsyncSession, today: dt.date | None = None) -> PriceBook:
+    today = today or dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+    prices = (await db.execute(select(ProductPrice))).scalars().all()
+    retail = await db.scalar(select(PriceTier.id).where(PriceTier.code == "RETAIL"))
+    return PriceBook(today, list(prices), retail)

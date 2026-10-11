@@ -15,6 +15,7 @@ os.environ["ENV"] = "dev"
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://drs:drs@localhost:5432/drs_test"
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["DB_POOL_MODE"] = "pgbouncer"  # NullPool for tests
+os.environ["RATE_LIMIT_ENABLED"] = "false"  # the suite's rapid calls must not self-throttle
 
 import asyncpg
 import pytest
