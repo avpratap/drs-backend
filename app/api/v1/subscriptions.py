@@ -198,6 +198,42 @@ async def set_override(
     }
 
 
+async def _set_status(user, db, sub_id, new_status, allowed_from):
+    sub = await _sub_or_404(user, db, sub_id)
+    if sub.status == new_status:
+        return sub
+    if sub.status not in allowed_from:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Cannot {new_status} a {sub.status} subscription"
+        )
+    sub.status = new_status
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+@router.post("/{sub_id}/pause", response_model=SubscriptionOut, operation_id="pause_subscription")
+async def pause_subscription(
+    sub_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    return await _set_status(user, db, sub_id, "paused", {"active"})
+
+
+@router.post("/{sub_id}/resume", response_model=SubscriptionOut, operation_id="resume_subscription")
+async def resume_subscription(
+    sub_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    return await _set_status(user, db, sub_id, "active", {"paused"})
+
+
+@router.post("/{sub_id}/cancel", response_model=SubscriptionOut, operation_id="cancel_subscription")
+async def cancel_subscription(
+    sub_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    # Terminal: cancelled subscriptions are never materialized by the cutoff again.
+    return await _set_status(user, db, sub_id, "cancelled", {"active", "paused"})
+
+
 @router.get("/{sub_id}/plan", response_model=PlanOut, operation_id="get_subscription_plan")
 async def get_plan(
     sub_id: int,

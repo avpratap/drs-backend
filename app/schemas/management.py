@@ -1,0 +1,54 @@
+import datetime as dt
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class DeliveryAssignmentIn(BaseModel):
+    delivery_id: int
+    shop_id: int
+
+
+class DeliveryAssignmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    delivery_id: int
+    shop_id: int
+    active: bool
+
+
+class PriceTierIn(BaseModel):
+    code: str = Field(min_length=2, max_length=32)
+    name: str = Field(min_length=1, max_length=64)
+    tier_type: str = Field(default="retail", pattern="^(retail|b2b)$")
+
+
+class PriceTierOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    code: str
+    name: str
+    tier_type: str
+
+
+class ProductPriceIn(BaseModel):
+    product_id: int
+    price_tier_id: int
+    unit_price: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
+    min_qty: float = Field(default=1, gt=0, le=1_000_000, allow_inf_nan=False)
+    valid_from: dt.date
+    valid_to: dt.date | None = None
+
+
+class ProductPriceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    product_id: int
+    price_tier_id: int
+    unit_price: float
+    min_qty: float
+    valid_from: dt.date
+    valid_to: dt.date | None = None
+
+
+class TierAssignIn(BaseModel):
+    price_tier_id: int
