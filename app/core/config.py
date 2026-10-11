@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # Subscriptions / daily cutoff
     TIMEZONE: str = "Asia/Kolkata"
     CUTOFF_HOUR: int = 23  # local hour after which tomorrow's order is frozen
+    WALLET_LOW_THRESHOLD: float = 100.0  # notify when prepaid wallet drops below this
 
     # Razorpay (payments). Empty keys -> dev stub (verify accepts signature "dev").
     RAZORPAY_KEY_ID: str = ""

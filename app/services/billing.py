@@ -7,9 +7,12 @@ a delivery is idempotent (one ledger entry per delivery_order).
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.billing import CreditLedger, Wallet, WalletTransaction
 from app.models.delivery import DeliveryOrder
 from app.models.shop import CustomerAccount
+from app.models.user import User
+from app.services import notifications as notify
 
 
 class InsufficientBalance(Exception):
@@ -127,7 +130,18 @@ async def bill_delivery(db: AsyncSession, order: DeliveryOrder, amount: float) -
     if account.billing_mode == "postpaid_credit":
         await credit_entry(db, account.id, amount, "charge", "delivery_order", order.id)
     else:
-        await wallet_adjust(
+        wallet = await wallet_adjust(
             db, order.account_id, -amount, "debit_order", "delivery_order", order.id,
             allow_negative=True,
         )
+        if float(wallet.balance) < settings.WALLET_LOW_THRESHOLD:
+            owner = await db.get(User, account.owner_user_id)
+            if owner is not None:
+                await notify.emit_event(
+                    db,
+                    "wallet.low",
+                    owner,
+                    {"balance": float(wallet.balance)},
+                    account_id=account.id,
+                    dedupe_key=f"wallet.low:{order.id}",
+                )

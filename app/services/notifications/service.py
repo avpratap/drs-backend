@@ -128,13 +128,14 @@ async def emit_event(
             scheduled_for=scheduled_for,
             dedupe_key=dedupe_key,
         )
-        db.add(row)
         try:
-            await db.flush()
+            # Savepoint: a dedupe collision rolls back only this insert, never the
+            # caller's outer transaction (cutoff / delivery billing).
+            async with db.begin_nested():
+                db.add(row)
+                await db.flush()
         except IntegrityError:
-            # Duplicate (dedupe_key, channel) — someone already emitted this.
-            await db.rollback()
-            continue
+            continue  # duplicate (dedupe_key, channel) — already emitted
         rows.append(row)
     return rows
 

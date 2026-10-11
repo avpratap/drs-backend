@@ -14,8 +14,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
-from app.models.shop import Shop
+from app.models.shop import CustomerAccount, Shop
 from app.models.subscription import Subscription
+from app.models.user import User
+from app.services import notifications as notify
 from app.services.pricing import resolve_tier_id, resolve_unit_price
 from app.services.subscription import compute_plan
 
@@ -77,6 +79,20 @@ async def _materialize_one(db: AsyncSession, sub: Subscription, delivery_date: d
     order.subtotal = subtotal
     order.total = subtotal
     order.amount_due = subtotal
+
+    # Tell the account owner tomorrow's order is set (idempotent per delivery_order;
+    # a cutoff re-run hits the dedupe savepoint and skips silently).
+    account = await db.get(CustomerAccount, sub.account_id)
+    owner = await db.get(User, account.owner_user_id) if account else None
+    if owner is not None:
+        await notify.emit_event(
+            db,
+            "order.generated",
+            owner,
+            {"date": str(delivery_date), "summary": f"{len(lines)} item(s)", "total": subtotal},
+            account_id=sub.account_id,
+            dedupe_key=f"order.generated:{order.id}",
+        )
     return True
 
 

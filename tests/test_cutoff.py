@@ -40,3 +40,16 @@ async def test_cutoff_generates_then_no_clobber(client):
         await client.get(f"/api/v1/delivery/orders?date={DATE}", headers=auth(delivery))
     ).json()
     assert after[0]["status"] == "delivered"
+
+
+async def test_cutoff_emits_order_generated(client):
+    admin = await login(client, "9999900001")
+    date = "2032-02-02"
+    await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
+    # The seeded subscription owner (subscriber) should get an order.generated notice.
+    notes = (
+        await client.get("/api/v1/admin/notifications", headers=auth(admin))
+    ).json()
+    gen = [n for n in notes if n["event_type"] == "order.generated"]
+    assert gen, "cutoff should emit order.generated"
+    assert any(n["channel"] == "whatsapp" for n in gen)
