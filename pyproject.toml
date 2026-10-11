@@ -20,6 +20,7 @@ dependencies = [
     "tzdata>=2024.1",
     "arq>=0.25",
     "reportlab>=5.0.1",
+    "anthropic>=1.13.0",
 ]
 
 [dependency-groups]
@@ -59,6 +60,10 @@ extend-immutable-calls = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+filterwarnings = [
+    # Starlette-internal use of the renamed 422 constant — not ours to fix.
+    "ignore:.*HTTP_422_UNPROCESSABLE_ENTITY.*",
+]
 
 [tool.coverage.run]
 # SQLAlchemy async dispatches through greenlets; without this, service code that

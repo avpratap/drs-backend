@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     account,
     admin,
+    ai,
     auth,
     billing,
     delivery,
@@ -30,3 +31,4 @@ api_router.include_router(account.router)
 api_router.include_router(invoices.router)
 api_router.include_router(management.router)
 api_router.include_router(inventory.router)
+api_router.include_router(ai.router)

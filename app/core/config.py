@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     GUPSHUP_SOURCE: str = ""  # the WABA sender number (e.g. 919999999999)
     GUPSHUP_SRC_NAME: str = ""  # registered src.name / app display name
 
+    # AI/LLM (Claude). Empty key -> dev stub (templated answers, no external call).
+    ANTHROPIC_API_KEY: str = ""
+    CLAUDE_MODEL: str = "claude-opus-4-8"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
