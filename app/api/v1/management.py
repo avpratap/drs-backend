@@ -9,6 +9,7 @@ from app.core.db import get_db
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
 from app.models.billing import CreditLedger, Wallet
+from app.models.coupon import Coupon
 from app.models.delivery import DeliveryOrder
 from app.models.order import Order
 from app.models.pricing import PriceTier, ProductPrice
@@ -16,6 +17,8 @@ from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.schemas.management import (
+    CouponIn,
+    CouponOut,
     DeliveryAssignmentIn,
     DeliveryAssignmentOut,
     PriceTierIn,
@@ -216,6 +219,45 @@ async def admin_erase_user(user_id: int, db: AsyncSession = Depends(get_db)):
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     return await dpdp.erase_user(db, user)
+
+
+# ---------- Coupons ----------
+@router.post("/coupons", response_model=CouponOut, operation_id="create_coupon")
+async def create_coupon(data: CouponIn, db: AsyncSession = Depends(get_db)):
+    if await db.scalar(select(Coupon).where(Coupon.code == data.code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Coupon code already exists")
+    if data.valid_to and data.valid_from and data.valid_to < data.valid_from:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    if data.discount_type == "percent" and data.value > 100:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "percent value must be <= 100")
+    coupon = Coupon(**data.model_dump())
+    db.add(coupon)
+    await db.commit()
+    await db.refresh(coupon)
+    return coupon
+
+
+@router.get("/coupons", response_model=list[CouponOut], operation_id="list_coupons")
+async def list_coupons(
+    active: bool | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    q = select(Coupon).order_by(Coupon.id.desc())
+    if active is not None:
+        q = q.where(Coupon.active == active)
+    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+
+
+@router.post("/coupons/{coupon_id}/deactivate", response_model=CouponOut, operation_id="deactivate_coupon")
+async def deactivate_coupon(coupon_id: int, db: AsyncSession = Depends(get_db)):
+    coupon = await db.get(Coupon, coupon_id)
+    if coupon is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Coupon not found")
+    coupon.active = False
+    await db.commit()
+    await db.refresh(coupon)
+    return coupon
 
 
 # ---------- Reports ----------

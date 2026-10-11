@@ -53,7 +53,9 @@ async def create_order(
 ):
     if not data.items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Order must have items")
-    order = await order_service.create_order(db, user, data.items, data.address)
+    order = await order_service.create_order(
+        db, user, data.items, data.address, data.coupon_code
+    )
     return await _detail(db, order)
 
 

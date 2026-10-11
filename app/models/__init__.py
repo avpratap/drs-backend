@@ -1,6 +1,7 @@
 from app.models.auth_session import AuthSession
 from app.models.base import Base
 from app.models.billing import CreditLedger, Wallet, WalletTransaction
+from app.models.coupon import Coupon, CouponRedemption
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.idempotency import IdempotencyKey
@@ -29,6 +30,8 @@ __all__ = [
     "Base",
     "CashCollection",
     "Consent",
+    "Coupon",
+    "CouponRedemption",
     "CreditLedger",
     "CustomerAccount",
     "DeliveryAssignment",

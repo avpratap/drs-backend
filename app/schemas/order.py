@@ -9,6 +9,7 @@ class OrderItemIn(BaseModel):
 class OrderCreate(BaseModel):
     items: list[OrderItemIn]
     address: str | None = None
+    coupon_code: str | None = Field(default=None, max_length=32)
 
 
 class OrderItemOut(BaseModel):
@@ -27,6 +28,8 @@ class OrderOut(BaseModel):
     order_type: str
     status: str
     subtotal: float
+    discount: float = 0
+    coupon_code: str | None = None
     total: float
     payment_status: str
     items: list[OrderItemOut] = []

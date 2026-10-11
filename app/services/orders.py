@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.order import Order, OrderItem
 from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
+from app.services import coupons as coupon_svc
 from app.services.pricing import resolve_tier_id, resolve_unit_price
 
 
@@ -34,7 +35,9 @@ async def _get_or_create_home_shop(db: AsyncSession, account: CustomerAccount, a
     return shop
 
 
-async def create_order(db: AsyncSession, user: User, items, address: str | None) -> Order:
+async def create_order(
+    db: AsyncSession, user: User, items, address: str | None, coupon_code: str | None = None
+) -> Order:
     account = await _get_or_create_account(db, user)
     shop = await _get_or_create_home_shop(db, account, address)
     tier_id = await resolve_tier_id(db, shop)
@@ -67,7 +70,17 @@ async def create_order(db: AsyncSession, user: User, items, address: str | None)
         )
 
     order.subtotal = subtotal
-    order.total = subtotal
+    discount = 0.0
+    coupon = None
+    if coupon_code:
+        discount, coupon = await coupon_svc.validate_and_reserve(
+            db, coupon_code, account.id, subtotal
+        )
+        order.coupon_code = coupon_code
+    order.discount = discount
+    order.total = round(subtotal - discount, 2)
+    if coupon is not None:
+        await coupon_svc.record_redemption(db, coupon, account.id, order.id, discount)
     await db.commit()
     await db.refresh(order)
     return order

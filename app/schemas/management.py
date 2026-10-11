@@ -67,3 +67,31 @@ class UserAdminOut(BaseModel):
 class UserPatch(BaseModel):
     role: str | None = Field(default=None, pattern="^(admin|customer|subscriber|delivery)$")
     status: str | None = Field(default=None, pattern="^(active|suspended)$")
+
+
+class CouponIn(BaseModel):
+    code: str = Field(min_length=3, max_length=32)
+    discount_type: str = Field(pattern="^(percent|flat)$")
+    value: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
+    min_order_value: float = Field(default=0, ge=0, le=1_000_000, allow_inf_nan=False)
+    max_discount: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    valid_from: dt.date | None = None
+    valid_to: dt.date | None = None
+    usage_limit: int | None = Field(default=None, ge=1)
+    per_user_limit: int | None = Field(default=None, ge=1)
+
+
+class CouponOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    code: str
+    discount_type: str
+    value: float
+    min_order_value: float
+    max_discount: float | None = None
+    valid_from: dt.date | None = None
+    valid_to: dt.date | None = None
+    usage_limit: int | None = None
+    used_count: int
+    per_user_limit: int | None = None
+    active: bool

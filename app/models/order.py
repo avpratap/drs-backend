@@ -16,6 +16,8 @@ class Order(Base, TimestampMixin):
     order_type: Mapped[str] = mapped_column(String(20), default="one_time", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="created", nullable=False)
     subtotal: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    discount: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    coupon_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
 
