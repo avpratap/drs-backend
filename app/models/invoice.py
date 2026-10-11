@@ -56,6 +56,7 @@ class Invoice(Base):
         ForeignKey("invoices.id"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(12), default="issued", nullable=False)
+    pdf_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -1,10 +1,12 @@
 import datetime as dt
+import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.core.storage import put_object
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
@@ -15,6 +17,27 @@ from app.services import delivery as delivery_service
 from app.services.subscription import today_ist
 
 router = APIRouter(prefix="/delivery", tags=["delivery"])
+
+_MAX_UPLOAD = 5 * 1024 * 1024  # 5 MB
+_ALLOWED_UPLOAD = {"image/jpeg", "image/png", "image/webp"}
+
+
+@router.post("/uploads", operation_id="upload_pod_asset")
+async def upload_pod_asset(
+    file: UploadFile = File(...), user: User = Depends(get_current_user)
+):
+    """Upload a POD photo/signature; returns a URL to pass as pod.photo_url/signature_url."""
+    if user.role not in ("delivery", "admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only delivery staff can upload POD assets")
+    if file.content_type not in _ALLOWED_UPLOAD:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Only JPEG/PNG/WEBP allowed")
+    data = await file.read()
+    if len(data) > _MAX_UPLOAD:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 5 MB)")
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[file.content_type]
+    key = f"pod/{user.id}/{secrets.token_hex(8)}.{ext}"
+    url = put_object(key, data, file.content_type)
+    return {"url": url}
 
 
 async def _order_detail(db: AsyncSession, order: DeliveryOrder) -> DeliveryOrderOut:

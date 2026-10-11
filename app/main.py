@@ -104,6 +104,26 @@ async def metrics():
     return metrics_response()
 
 
+# Dev-stub object retrieval. In prod, R2/CDN serves these instead.
+from app.core.storage import enabled as _storage_enabled  # noqa: E402
+
+if not _storage_enabled():
+    import os
+
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    @app.get("/files/{key:path}", include_in_schema=False)
+    async def serve_file(key: str):
+        safe = os.path.normpath(key).replace("\\", "/")
+        if safe.startswith("..") or os.path.isabs(safe):
+            raise HTTPException(status_code=404)
+        path = os.path.join(settings.STORAGE_DIR, safe)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404)
+        return FileResponse(path)
+
+
 @app.get("/")
 async def root():
     return {"app": "DRS API", "env": settings.ENV, "docs": "/docs"}

@@ -10,7 +10,7 @@ from app.models.invoice import Invoice, InvoiceLine
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.schemas.invoice import CreditNoteIn, InvoiceLineOut, InvoiceOut
-from app.services import invoicing
+from app.services import invoice_pdf, invoicing
 
 router = APIRouter(tags=["invoices"])
 
@@ -80,6 +80,21 @@ async def get_invoice(
     if user.role != "admin" and inv.account_id not in await _my_account_ids(db, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invoice not found")
     return await _detail(db, inv)
+
+
+@router.get("/invoices/{invoice_id}/pdf", operation_id="get_invoice_pdf")
+async def get_invoice_pdf(
+    invoice_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    inv = await db.get(Invoice, invoice_id)
+    if inv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invoice not found")
+    if user.role != "admin" and inv.account_id not in await _my_account_ids(db, user):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invoice not found")
+    url = await invoice_pdf.get_or_create_pdf(db, inv)
+    return {"invoice_no": inv.invoice_no, "pdf_url": url}
 
 
 @router.post(

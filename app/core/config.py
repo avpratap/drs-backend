@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""  # empty -> dev stub accepts unsigned webhooks
 
+    # Object storage (Cloudflare R2 / S3-compatible). Empty -> local dev-stub.
+    R2_ENDPOINT: str = ""
+    R2_ACCESS_KEY: str = ""
+    R2_SECRET_KEY: str = ""
+    R2_BUCKET: str = ""
+    R2_PUBLIC_BASE: str = ""  # public CDN base URL for stored objects
+    STORAGE_DIR: str = ".storage"  # dev-stub local directory
+
     # WhatsApp (Gupshup BSP). Empty key -> dev stub (messages logged, not sent).
     WHATSAPP_PROVIDER: str = "gupshup"
     GUPSHUP_API_KEY: str = ""
