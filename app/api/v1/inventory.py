@@ -1,14 +1,19 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.deps.auth import require_role
+from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
+from app.models.batch import StockBatch
 from app.models.inventory import StockItem, StockMovement
 from app.models.product import Product
+from app.models.user import User
 from app.models.warehouse import Location
+from app.services import batches as batch_svc
 from app.services import inventory
 
 router = APIRouter(
@@ -158,6 +163,80 @@ async def set_reorder(data: ReorderIn, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(item)
     return item
+
+
+class BatchIn(BaseModel):
+    product_id: int
+    batch_no: str = Field(min_length=1, max_length=64)
+    qty: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
+    location_id: int | None = None
+    mfg_date: dt.date | None = None
+    expiry_date: dt.date | None = None
+
+
+class BatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    product_id: int
+    location_id: int
+    batch_no: str
+    mfg_date: dt.date | None = None
+    expiry_date: dt.date | None = None
+    qty: float
+    status: str
+
+
+@router.post("/stock/batches", response_model=BatchOut, operation_id="receive_batch")
+async def receive_batch(
+    data: BatchIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    await _require_product(db, data.product_id)
+    if data.expiry_date and data.mfg_date and data.expiry_date < data.mfg_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "expiry before mfg date")
+    batch = await batch_svc.receive_batch(
+        db, data.product_id, data.batch_no, data.qty,
+        location_id=data.location_id, mfg_date=data.mfg_date, expiry_date=data.expiry_date,
+        created_by=user.id,
+    )
+    await db.commit()
+    await db.refresh(batch)
+    return batch
+
+
+@router.get("/stock/batches", response_model=list[BatchOut], operation_id="list_batches")
+async def list_batches(
+    product_id: int | None = None,
+    expiring_before: dt.date | None = None,
+    active_only: bool = True,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    q = select(StockBatch).order_by(
+        StockBatch.expiry_date.asc().nulls_last(), StockBatch.id.asc()
+    )
+    if product_id is not None:
+        q = q.where(StockBatch.product_id == product_id)
+    if active_only:
+        q = q.where(StockBatch.status == "active", StockBatch.qty > 0)
+    if expiring_before is not None:
+        q = q.where(
+            StockBatch.expiry_date.is_not(None), StockBatch.expiry_date < expiring_before
+        )
+    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+
+
+@router.post("/stock/expire", operation_id="expire_batches")
+async def expire_batches(
+    as_of: dt.date | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Write off batches past their expiry date (as_of defaults to today)."""
+    result = await batch_svc.expire_batches(
+        db, as_of or dt.datetime.now(dt.UTC).date(), created_by=user.id
+    )
+    await db.commit()
+    return result
 
 
 @router.get(

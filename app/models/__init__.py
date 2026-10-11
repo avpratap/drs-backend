@@ -1,5 +1,6 @@
 from app.models.auth_session import AuthSession
 from app.models.base import Base
+from app.models.batch import StockBatch
 from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
@@ -58,6 +59,7 @@ __all__ = [
     "Return",
     "ScheduleRun",
     "Shop",
+    "StockBatch",
     "StockItem",
     "StockMovement",
     "Subscription",

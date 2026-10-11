@@ -8,7 +8,7 @@ from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.inventory import StockMovement
 from app.models.shop import CustomerAccount
 from app.models.user import User
-from app.services import inventory
+from app.services import batches, inventory
 from app.services import notifications as notify
 from app.services.billing import bill_delivery
 
@@ -104,9 +104,14 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             returned_qty[r.product_id] = returned_qty.get(r.product_id, 0.0) + float(r.qty_returned)
         for pid, it in items.items():
             out_qty = round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3)
-            if out_qty:
+            if out_qty > 0:  # FEFO: deplete earliest-expiry batches first
+                await batches.consume_fefo(
+                    db, pid, out_qty, "delivery", location_id=loc,
+                    ref_type="delivery_order", ref_id=order.id, created_by=user.id,
+                )
+            elif out_qty < 0:  # net return back into stock
                 await inventory.adjust_stock(
-                    db, pid, -out_qty, "delivery", location_id=loc,
+                    db, pid, -out_qty, "return", location_id=loc,
                     ref_type="delivery_order", ref_id=order.id, created_by=user.id,
                 )
 
