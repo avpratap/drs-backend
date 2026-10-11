@@ -17,4 +17,6 @@ class Product(Base, TimestampMixin):
     perishable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     hsn_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
     gst_rate: Mapped[float] = mapped_column(Numeric(4, 2), default=0, nullable=False)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
