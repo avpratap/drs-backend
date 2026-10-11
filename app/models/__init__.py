@@ -16,6 +16,7 @@ from app.models.profile import (
     PaymentMethod,
     UserProfile,
 )
+from app.models.refund import Refund, WebhookEvent
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.user import User, UserRole
@@ -42,6 +43,7 @@ __all__ = [
     "Product",
     "ProductPrice",
     "ProofOfDelivery",
+    "Refund",
     "Return",
     "ScheduleRun",
     "Shop",
@@ -53,4 +55,5 @@ __all__ = [
     "UserRole",
     "Wallet",
     "WalletTransaction",
+    "WebhookEvent",
 ]

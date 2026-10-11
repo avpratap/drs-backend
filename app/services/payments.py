@@ -39,3 +39,30 @@ def verify_signature(order_id: str, payment_id: str, signature: str) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+async def create_gateway_refund(gateway_payment_id: str | None, amount: float) -> str:
+    """Issue a refund against a captured payment. Dev stub returns a synthetic id."""
+    if not gateway_enabled() or not gateway_payment_id:
+        return "rfnd_dev_" + secrets.token_hex(8)
+    paise = round(amount * 100)
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"https://api.razorpay.com/v1/payments/{gateway_payment_id}/refund",
+            auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
+            json={"amount": paise},
+        )
+    resp.raise_for_status()
+    return resp.json()["id"]
+
+
+def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
+    """Razorpay signs webhook bodies with the webhook secret (HMAC-SHA256)."""
+    if not settings.RAZORPAY_WEBHOOK_SECRET:
+        return True  # dev stub: accept unsigned
+    if not signature:
+        return False
+    expected = hmac.new(
+        settings.RAZORPAY_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)

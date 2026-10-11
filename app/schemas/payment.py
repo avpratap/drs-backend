@@ -19,3 +19,9 @@ class PaymentVerify(BaseModel):
     gateway_order_id: str
     gateway_payment_id: str
     signature: str  # use "dev" in dev stub mode
+
+
+class RefundIn(BaseModel):
+    # None -> refund the full remaining amount.
+    amount: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    reason: str | None = Field(default=None, max_length=255)

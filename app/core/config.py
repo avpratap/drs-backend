@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Razorpay (payments). Empty keys -> dev stub (verify accepts signature "dev").
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""  # empty -> dev stub accepts unsigned webhooks
 
     # WhatsApp (Gupshup BSP). Empty key -> dev stub (messages logged, not sent).
     WHATSAPP_PROVIDER: str = "gupshup"

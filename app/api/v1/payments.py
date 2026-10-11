@@ -1,15 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+import hashlib
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db
-from app.deps.auth import get_current_user
+from app.deps.auth import get_current_user, require_role
 from app.models.order import Order
 from app.models.payment import Payment
+from app.models.refund import Refund, WebhookEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
-from app.schemas.payment import PaymentCreate, PaymentCreateOut, PaymentVerify
+from app.schemas.payment import PaymentCreate, PaymentCreateOut, PaymentVerify, RefundIn
 from app.services import billing as billing_service
 from app.services import notifications as notify
 from app.services import payments as pay_service
@@ -19,7 +24,34 @@ async def _owner_user(db: AsyncSession, account_id: int) -> User | None:
     account = await db.get(CustomerAccount, account_id)
     return await db.get(User, account.owner_user_id) if account else None
 
+
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+async def _finalize_payment(db: AsyncSession, payment: Payment, gateway_payment_id: str) -> None:
+    """Mark a payment successful + apply its effect (wallet credit / order paid).
+    Caller must hold a row lock on `payment` and guarantee status == 'initiated'."""
+    payment.status = "success"
+    payment.gateway_payment_id = gateway_payment_id
+    if payment.payment_type == "wallet_topup":
+        wallet = await billing_service.wallet_adjust(
+            db, payment.account_id, float(payment.amount), "topup", "payment", payment.id
+        )
+        owner = await _owner_user(db, payment.account_id)
+        if owner is not None:
+            await notify.emit_event(
+                db,
+                "payment.success",
+                owner,
+                {"amount": float(payment.amount), "balance": float(wallet.balance)},
+                account_id=payment.account_id,
+                dedupe_key=f"payment.success:{payment.id}",
+            )
+    elif payment.payment_type == "order_payment" and payment.ref_id:
+        order = await db.get(Order, payment.ref_id)
+        if order is not None and order.account_id == payment.account_id:
+            order.payment_status = "paid"
+            order.status = "confirmed"
 
 
 async def _account(db: AsyncSession, user: User) -> CustomerAccount:
@@ -130,26 +162,134 @@ async def verify_payment(
         await db.commit()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Signature verification failed")
 
-    payment.status = "success"
-    payment.gateway_payment_id = data.gateway_payment_id
-    if payment.payment_type == "wallet_topup":
-        wallet = await billing_service.wallet_adjust(
-            db, payment.account_id, float(payment.amount), "topup", "payment", payment.id
-        )
-        owner = await _owner_user(db, payment.account_id)
-        if owner is not None:
-            await notify.emit_event(
-                db,
-                "payment.success",
-                owner,
-                {"amount": float(payment.amount), "balance": float(wallet.balance)},
-                account_id=payment.account_id,
-                dedupe_key=f"payment.success:{payment.id}",
-            )
-    elif payment.payment_type == "order_payment" and payment.ref_id:
-        order = await db.get(Order, payment.ref_id)
-        if order is not None and order.account_id == payment.account_id:
-            order.payment_status = "paid"
-            order.status = "confirmed"
+    await _finalize_payment(db, payment, data.gateway_payment_id)
     await db.commit()
     return {"detail": "payment successful", "payment_id": payment.id, "status": payment.status}
+
+
+@router.post(
+    "/{payment_id}/refund",
+    operation_id="refund_payment",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def refund_payment(
+    payment_id: int, data: RefundIn, db: AsyncSession = Depends(get_db)
+):
+    """Refund a successful payment (full or partial). Idempotency-Key recommended.
+    Top-up refunds reverse the wallet credit; order-payment refunds return store
+    credit to the wallet and mark the order refunded."""
+    res = await db.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
+    payment = res.scalar_one_or_none()
+    if payment is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+    if payment.status != "success":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only successful payments can be refunded")
+
+    already = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(Refund.amount), 0)).where(
+                Refund.payment_id == payment.id, Refund.status == "processed"
+            )
+        )
+        or 0
+    )
+    remaining = round(float(payment.amount) - already, 2)
+    amount = round(float(data.amount), 2) if data.amount is not None else remaining
+    if amount <= 0 or amount > remaining:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Refund amount must be in (0, {remaining}]",
+        )
+
+    refund = Refund(
+        payment_id=payment.id,
+        account_id=payment.account_id,
+        amount=amount,
+        reason=data.reason,
+        status="initiated",
+    )
+    db.add(refund)
+    await db.flush()
+    refund.gateway_refund_id = await pay_service.create_gateway_refund(
+        payment.gateway_payment_id, amount
+    )
+    refund.status = "processed"
+
+    if payment.payment_type == "wallet_topup":
+        # Reverse the top-up: pull the money back out of the wallet.
+        await billing_service.wallet_adjust(
+            db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
+            allow_negative=True,
+        )
+    else:  # order_payment -> store credit back to the wallet
+        await billing_service.wallet_adjust(
+            db, payment.account_id, amount, "refund", "refund", refund.id
+        )
+        if payment.ref_id:
+            order = await db.get(Order, payment.ref_id)
+            if order is not None:
+                order.payment_status = (
+                    "refunded" if already + amount >= float(payment.amount) else "partially_refunded"
+                )
+    await db.commit()
+    return {
+        "refund_id": refund.id,
+        "payment_id": payment.id,
+        "amount": amount,
+        "status": refund.status,
+    }
+
+
+@router.post("/webhook", operation_id="razorpay_webhook")
+async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Gateway callback. Signature-verified, idempotent by event id. Unknown events
+    are acknowledged. Finalizes a captured payment that the client never verified."""
+    raw = await request.body()
+    sig = request.headers.get("X-Razorpay-Signature")
+    if not pay_service.verify_webhook_signature(raw, sig):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook signature")
+    try:
+        payload = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON") from None
+
+    event_type = payload.get("event")
+    event_id = (
+        request.headers.get("X-Razorpay-Event-Id")
+        or payload.get("id")
+        or hashlib.sha256(raw or b"").hexdigest()
+    )
+    # Idempotent: a duplicate delivery is recorded once and acknowledged.
+    db.add(WebhookEvent(event_id=event_id, event_type=event_type, payload=payload))
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return {"status": "duplicate"}
+
+    await _handle_webhook_event(db, event_type, payload)
+    return {"status": "ok"}
+
+
+def _payment_ids_from_payload(payload: dict) -> tuple[str | None, str | None]:
+    """Pull (order_id, payment_id) from the Razorpay nested shape or a flat test shape."""
+    try:
+        entity = payload["payload"]["payment"]["entity"]
+        return entity.get("order_id"), entity.get("id")
+    except (KeyError, TypeError):
+        return payload.get("order_id"), payload.get("payment_id")
+
+
+async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payload: dict) -> None:
+    if event_type not in ("payment.captured", "payment.authorized"):
+        return  # other events are logged only (MVP)
+    order_id, gpid = _payment_ids_from_payload(payload)
+    if not order_id:
+        return
+    res = await db.execute(
+        select(Payment).where(Payment.gateway_order_id == order_id).with_for_update()
+    )
+    payment = res.scalar_one_or_none()
+    if payment is not None and payment.status == "initiated":
+        await _finalize_payment(db, payment, gpid or "webhook")
+        await db.commit()
