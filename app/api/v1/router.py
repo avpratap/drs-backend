@@ -6,6 +6,7 @@ from app.api.v1 import (
     auth,
     billing,
     delivery,
+    inventory,
     invoices,
     management,
     orders,
@@ -28,3 +29,4 @@ api_router.include_router(products.router)
 api_router.include_router(account.router)
 api_router.include_router(invoices.router)
 api_router.include_router(management.router)
+api_router.include_router(inventory.router)

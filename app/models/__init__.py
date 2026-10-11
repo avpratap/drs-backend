@@ -4,6 +4,7 @@ from app.models.billing import CreditLedger, Wallet, WalletTransaction
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.idempotency import IdempotencyKey
+from app.models.inventory import StockItem, StockMovement
 from app.models.invoice import Invoice, InvoiceLine
 from app.models.notification import Notification
 from app.models.order import Order, OrderItem
@@ -50,6 +51,8 @@ __all__ = [
     "Return",
     "ScheduleRun",
     "Shop",
+    "StockItem",
+    "StockMovement",
     "Subscription",
     "SubscriptionItem",
     "SubscriptionOverride",
