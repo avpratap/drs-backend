@@ -1,28 +1,35 @@
 from conftest import auth, login
 
 
+async def _fresh_product(client, h, sku) -> int:
+    return (
+        await client.post("/api/v1/products", json={"sku": sku, "name": sku}, headers=h)
+    ).json()["id"]
+
+
 async def test_stock_receipt_wastage_and_movements(client):
     admin = await login(client, "9999900001")
     h = auth(admin)
+    # Dedicated product so other tests' stock activity can't skew the absolute math.
+    pid = await _fresh_product(client, h, "STK-WASTE-1")
 
-    # Receipt 100, then wastage 15 -> on-hand 85.
     r1 = await client.post(
         "/api/v1/admin/stock/adjust",
-        json={"product_id": 1, "change": 100, "reason": "receipt"},
+        json={"product_id": pid, "change": 100, "reason": "receipt"},
         headers=h,
     )
     assert r1.status_code == 200 and r1.json()["qty_on_hand"] == 100.0
     r2 = await client.post(
         "/api/v1/admin/stock/wastage",
-        json={"product_id": 1, "qty": 15, "note": "spoilage"},
+        json={"product_id": pid, "qty": 15, "note": "spoilage"},
         headers=h,
     )
     assert r2.json()["qty_on_hand"] == 85.0
 
     lst = await client.get("/api/v1/admin/stock", headers=h)
-    assert any(s["product_id"] == 1 and s["qty_on_hand"] == 85.0 for s in lst.json())
+    assert any(s["product_id"] == pid and s["qty_on_hand"] == 85.0 for s in lst.json())
 
-    moves = (await client.get("/api/v1/admin/stock/1/movements", headers=h)).json()
+    moves = (await client.get(f"/api/v1/admin/stock/{pid}/movements", headers=h)).json()
     reasons = {m["reason"] for m in moves}
     assert "receipt" in reasons and "wastage" in reasons
 

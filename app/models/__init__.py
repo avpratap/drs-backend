@@ -24,6 +24,7 @@ from app.models.refund import Refund, WebhookEvent
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.user import User, UserRole
+from app.models.warehouse import Location
 
 __all__ = [
     "Address",
@@ -41,6 +42,7 @@ __all__ = [
     "IdempotencyKey",
     "Invoice",
     "InvoiceLine",
+    "Location",
     "Notification",
     "Order",
     "OrderItem",

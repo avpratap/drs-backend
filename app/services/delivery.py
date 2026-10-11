@@ -1,12 +1,14 @@
 """Delivery execution at a stop: partial delivery, POD, returns, cash."""
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
+from app.models.inventory import StockMovement
 from app.models.shop import CustomerAccount
 from app.models.user import User
+from app.services import inventory
 from app.services import notifications as notify
 from app.services.billing import bill_delivery
 
@@ -87,6 +89,26 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     )
     net = round(delivered_total - returns_total, 2)
     await bill_delivery(db, order, net)
+
+    # Decrement stock for what actually went out (delivered - returned), once per
+    # delivery_order so a corrected re-submit never double-depletes inventory.
+    already_stocked = await db.scalar(
+        select(func.count())
+        .select_from(StockMovement)
+        .where(StockMovement.ref_type == "delivery_order", StockMovement.ref_id == order.id)
+    )
+    if not already_stocked:
+        loc = await inventory.default_location_id(db)
+        returned_qty: dict[int, float] = {}
+        for r in data.returns:
+            returned_qty[r.product_id] = returned_qty.get(r.product_id, 0.0) + float(r.qty_returned)
+        for pid, it in items.items():
+            out_qty = round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3)
+            if out_qty:
+                await inventory.adjust_stock(
+                    db, pid, -out_qty, "delivery", location_id=loc,
+                    ref_type="delivery_order", ref_id=order.id, created_by=user.id,
+                )
 
     # Notify the account owner that their stop is done (idempotent per order).
     account = await db.get(CustomerAccount, order.account_id)
