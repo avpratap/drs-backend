@@ -61,10 +61,12 @@ async def _buyer_gstin(db: AsyncSession, account_id: int) -> str | None:
 
 
 def _split(taxable: float, rate: float, interstate: bool) -> tuple[float, float, float]:
+    total_tax = round(taxable * rate / 100, 2)
     if interstate:
-        return 0.0, 0.0, round(taxable * rate / 100, 2)
-    half = round(taxable * rate / 200, 2)
-    return half, half, 0.0
+        return 0.0, 0.0, total_tax
+    # Halve from the single rounded total so CGST+SGST always equals it (no paisa drift).
+    cgst = round(total_tax / 2, 2)
+    return cgst, round(total_tax - cgst, 2), 0.0
 
 
 async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:

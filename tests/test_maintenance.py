@@ -1,6 +1,8 @@
 import datetime as dt
 
-from sqlalchemy import select
+import pytest
+from conftest import auth, login
+from sqlalchemy import select, text
 
 from app.core.db import SessionLocal
 from app.models.idempotency import IdempotencyKey
@@ -27,3 +29,19 @@ async def test_prune_removes_old_idempotency_keys():
             k.key for k in (await db.execute(select(IdempotencyKey))).scalars()
         }
         assert "old" not in remaining and "fresh" in remaining
+
+
+async def test_wallet_ledger_is_append_only(client):
+    admin = await login(client, "9999900001")
+    sub = await login(client, "9999900002")
+    acct = (await client.get("/api/v1/billing/me", headers=auth(sub))).json()["account_id"]
+    await client.post(
+        "/api/v1/billing/admin/topup",
+        json={"account_id": acct, "amount": 10},
+        headers=auth(admin),
+    )
+    # The DB trigger must reject any UPDATE/DELETE on the ledger.
+    async with SessionLocal() as db:
+        with pytest.raises(Exception):  # noqa: B017 — asyncpg raises on the trigger
+            await db.execute(text("UPDATE wallet_transactions SET amount = amount + 1"))
+            await db.commit()
