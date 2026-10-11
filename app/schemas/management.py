@@ -95,3 +95,29 @@ class CouponOut(BaseModel):
     used_count: int
     per_user_limit: int | None = None
     active: bool
+
+
+class CreditSettleIn(BaseModel):
+    amount: float = Field(gt=0, le=10_000_000, allow_inf_nan=False)
+    note: str | None = Field(default=None, max_length=255)
+
+
+class WalletAdjustIn(BaseModel):
+    amount: float = Field(le=10_000_000, ge=-10_000_000, allow_inf_nan=False)  # signed
+    reason: str = Field(min_length=2, max_length=32)
+    note: str | None = Field(default=None, max_length=255)
+
+
+class AccountBillingOut(BaseModel):
+    account_id: int
+    billing_mode: str
+    wallet_balance: float
+    credit_outstanding: float
+
+
+class ShopPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    address: str | None = None
+    state: str | None = Field(default=None, max_length=120)
+    pincode: str | None = Field(default=None, max_length=10)
+    status: str | None = Field(default=None, pattern="^(active|inactive)$")

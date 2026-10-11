@@ -17,18 +17,24 @@ from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.schemas.management import (
+    AccountBillingOut,
     CouponIn,
     CouponOut,
+    CreditSettleIn,
     DeliveryAssignmentIn,
     DeliveryAssignmentOut,
     PriceTierIn,
     PriceTierOut,
     ProductPriceIn,
     ProductPriceOut,
+    ShopPatch,
     TierAssignIn,
     UserAdminOut,
     UserPatch,
+    WalletAdjustIn,
 )
+from app.schemas.shop import ShopOut
+from app.services import billing as billing_svc
 from app.services import dpdp
 
 router = APIRouter(
@@ -258,6 +264,76 @@ async def deactivate_coupon(coupon_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(coupon)
     return coupon
+
+
+# ---------- Account financial controls ----------
+@router.get(
+    "/accounts/{account_id}/billing",
+    response_model=AccountBillingOut,
+    operation_id="admin_account_billing",
+)
+async def admin_account_billing(account_id: int, db: AsyncSession = Depends(get_db)):
+    account = await db.get(CustomerAccount, account_id)
+    if account is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    wallet = await billing_svc.get_or_create_wallet(db, account_id)
+    await db.commit()
+    return AccountBillingOut(
+        account_id=account_id,
+        billing_mode=account.billing_mode,
+        wallet_balance=float(wallet.balance),
+        credit_outstanding=await billing_svc.credit_outstanding(db, account_id),
+    )
+
+
+@router.post("/accounts/{account_id}/wallet/adjust", operation_id="admin_wallet_adjust")
+async def admin_wallet_adjust(
+    account_id: int, data: WalletAdjustIn, db: AsyncSession = Depends(get_db)
+):
+    """Admin wallet correction/goodwill (signed). Negative is allowed (override)."""
+    if data.amount == 0:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount must be non-zero")
+    if await db.get(CustomerAccount, account_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    wallet = await billing_svc.wallet_adjust(
+        db, account_id, data.amount, f"admin_{data.reason}"[:20], "admin", None,
+        allow_negative=True,
+    )
+    await db.commit()
+    return {"account_id": account_id, "wallet_balance": float(wallet.balance)}
+
+
+@router.post("/accounts/{account_id}/credit/settle", operation_id="admin_settle_credit")
+async def admin_settle_credit(
+    account_id: int, data: CreditSettleIn, db: AsyncSession = Depends(get_db)
+):
+    """Record a payment received against a B2B postpaid account's outstanding credit."""
+    if await db.get(CustomerAccount, account_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    new_balance = await billing_svc.credit_entry(
+        db, account_id, -data.amount, "payment", "settlement", None
+    )
+    await db.commit()
+    return {"account_id": account_id, "credit_outstanding": new_balance}
+
+
+# ---------- Shop management ----------
+@router.get("/shops", response_model=list[ShopOut], operation_id="admin_list_shops")
+async def admin_list_shops(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
+    res = await db.execute(select(Shop).order_by(Shop.id).limit(page.limit).offset(page.offset))
+    return res.scalars().all()
+
+
+@router.patch("/shops/{shop_id}", response_model=ShopOut, operation_id="admin_update_shop")
+async def admin_update_shop(shop_id: int, data: ShopPatch, db: AsyncSession = Depends(get_db)):
+    shop = await db.get(Shop, shop_id)
+    if shop is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Shop not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(shop, field, value)
+    await db.commit()
+    await db.refresh(shop)
+    return shop
 
 
 # ---------- Reports ----------
