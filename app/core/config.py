@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     DB_POOL_MODE: str = "direct"
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
+    DB_SSL: bool = False  # require TLS to Postgres (set true for managed prod DB)
 
     # Observability
     SENTRY_DSN: str = ""

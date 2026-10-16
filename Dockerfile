@@ -21,6 +21,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev
 
+# Drop root: run as an unprivileged user in production.
+RUN useradd -r -m -u 10001 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 
 # Container-level healthcheck hits the liveness probe.

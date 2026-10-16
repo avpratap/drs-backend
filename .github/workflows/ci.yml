@@ -47,14 +47,30 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check .
 
-      - name: Migrations apply cleanly
+      - name: Dependency vulnerability scan (pip-audit)
+        run: uvx pip-audit || true  # advisory; surfaces CVEs without blocking MVP builds
+
+      - name: Static security scan (bandit)
+        run: uvx bandit -r app -ll || true  # advisory; high-confidence issues only
+
+      - name: Migrations apply + round-trip cleanly
         env:
           DATABASE_URL: postgresql+asyncpg://drs:drs@localhost:5432/drs
-        run: uv run alembic upgrade head
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade -1
+          uv run alembic upgrade head
 
-      - name: Run tests
+      - name: Run tests (with coverage gate)
         env:
           # conftest recreates drs_test from the drs maintenance DB on localhost.
           DATABASE_URL: postgresql+asyncpg://drs:drs@localhost:5432/drs
           REDIS_URL: redis://localhost:6379/0
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=app --cov-report=term-missing --cov-fail-under=80
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (validates Dockerfile)
+        run: docker build -t drs-api:ci .

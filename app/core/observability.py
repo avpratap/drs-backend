@@ -9,6 +9,7 @@ Counters are per-process; behind multiple workers a scraper aggregates them.
 """
 import json
 import logging
+import re
 import secrets
 import time
 from collections import defaultdict
@@ -54,13 +55,34 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?91)?[6-9]\d{9}(?!\d)")  # Indian mobile, optional +91
+
+
+def _scrub_pii(value):
+    """Recursively redact emails / phone numbers from a Sentry event (DPDP)."""
+    if isinstance(value, str):
+        return _PHONE_RE.sub("[redacted-phone]", _EMAIL_RE.sub("[redacted-email]", value))
+    if isinstance(value, dict):
+        return {k: _scrub_pii(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_pii(v) for v in value]
+    return value
+
+
 def init_sentry() -> None:
     if not settings.SENTRY_DSN:
         return
     try:
         import sentry_sdk
 
-        sentry_sdk.init(dsn=settings.SENTRY_DSN, traces_sample_rate=0.1, environment=settings.ENV)
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            traces_sample_rate=0.1,
+            environment=settings.ENV,
+            send_default_pii=False,
+            before_send=lambda event, _hint: _scrub_pii(event),
+        )
         log.info("Sentry initialised")
     except Exception as exc:
         log.warning("Sentry not initialised: %s", exc)

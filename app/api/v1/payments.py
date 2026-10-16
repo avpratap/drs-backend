@@ -332,7 +332,7 @@ def _payment_ids_from_payload(payload: dict) -> tuple[str | None, str | None]:
 
 
 async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payload: dict) -> None:
-    if event_type not in ("payment.captured", "payment.authorized"):
+    if event_type not in ("payment.captured", "payment.authorized", "payment.failed"):
         return  # other events are logged only (MVP)
     order_id, gpid = _payment_ids_from_payload(payload)
     if not order_id:
@@ -341,6 +341,19 @@ async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payloa
         select(Payment).where(Payment.gateway_order_id == order_id).with_for_update()
     )
     payment = res.scalar_one_or_none()
-    if payment is not None and payment.status == "initiated":
-        await _finalize_payment(db, payment, gpid or "webhook")
+    if payment is None or payment.status != "initiated":
+        return
+    if event_type == "payment.failed":
+        # Server-side failure the client never surfaced: mark failed + notify so the
+        # order isn't left stuck 'initiated'. The key is released for a fresh attempt.
+        payment.status = "failed"
+        owner = await _owner_user(db, payment.account_id)
+        if owner is not None:
+            await notify.emit_event(
+                db, "payment.failed", owner, {"amount": float(payment.amount)},
+                account_id=payment.account_id, dedupe_key=f"payment.failed:{payment.id}",
+            )
         await db.commit()
+        return
+    await _finalize_payment(db, payment, gpid or "webhook")
+    await db.commit()

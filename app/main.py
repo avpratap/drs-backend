@@ -1,10 +1,12 @@
 import math
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
@@ -90,11 +92,30 @@ def _sanitize(obj):
     return obj
 
 
+def _error_code(status_code: int) -> str:
+    """Stable machine-readable code, e.g. 404 -> 'not_found'."""
+    try:
+        return HTTPStatus(status_code).name.lower()
+    except ValueError:
+        return "error"
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": _sanitize(exc.errors())},
+        content={"detail": _sanitize(exc.errors()), "error_code": "unprocessable_entity"},
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    # Consistent error envelope ({detail, error_code}) across the whole API while
+    # preserving the existing `detail` key and any auth headers (e.g. WWW-Authenticate).
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error_code": _error_code(exc.status_code)},
+        headers=getattr(exc, "headers", None),
     )
 
 

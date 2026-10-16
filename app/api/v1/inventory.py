@@ -92,8 +92,10 @@ async def create_location(data: LocationIn, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/locations", response_model=list[LocationOut], operation_id="list_locations")
-async def list_locations(db: AsyncSession = Depends(get_db)):
-    return (await db.execute(select(Location).order_by(Location.id))).scalars().all()
+async def list_locations(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
+    return (
+        await db.execute(select(Location).order_by(Location.id).limit(page.limit).offset(page.offset))
+    ).scalars().all()
 
 
 # ---------- Stock ----------
@@ -115,12 +117,12 @@ async def list_stock(
 
 
 @router.get("/stock/low", response_model=list[StockItemOut], operation_id="list_low_stock")
-async def list_low_stock(db: AsyncSession = Depends(get_db)):
+async def list_low_stock(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
     """Items at or below their reorder point (reorder_point > 0)."""
     q = select(StockItem).where(
         StockItem.reorder_point > 0, StockItem.qty_on_hand <= StockItem.reorder_point
-    )
-    return (await db.execute(q)).scalars().all()
+    ).order_by(StockItem.product_id)
+    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
 
 
 class ReorderSuggestionOut(BaseModel):
@@ -136,15 +138,21 @@ class ReorderSuggestionOut(BaseModel):
     response_model=list[ReorderSuggestionOut],
     operation_id="list_reorder_suggestions",
 )
-async def list_reorder_suggestions(db: AsyncSession = Depends(get_db)):
+async def list_reorder_suggestions(
+    db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)
+):
     """For each item at/below its reorder point, suggest a replenishment qty that
     tops it back up to 2x the reorder point (a starting point for a purchase order)."""
     rows = (
         await db.execute(
-            select(StockItem).where(
+            select(StockItem)
+            .where(
                 StockItem.reorder_point > 0,
                 StockItem.qty_on_hand <= StockItem.reorder_point,
             )
+            .order_by(StockItem.product_id)
+            .limit(page.limit)
+            .offset(page.offset)
         )
     ).scalars().all()
     out = []

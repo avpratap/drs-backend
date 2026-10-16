@@ -1,0 +1,63 @@
+# DRS Backend — Deploy & Operations Runbook
+
+Target: **Railway (MVP)** → **Fly.io Mumbai (scale)**. One image runs both the API
+(default `CMD`) and the ARQ worker (override `CMD` → `uv run arq app.worker.WorkerSettings`).
+
+## Prerequisites (prod env vars)
+Set these as platform secrets — never commit. The app **fails to boot** in prod
+without the required ones (see `app/main.py`):
+
+- `ENV=prod`
+- `JWT_SECRET` (≥32 random bytes) — **required**
+- `CORS_ORIGINS` (explicit allow-list, no `*`) — **required**
+- `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` — **required**
+- `SELLER_GSTIN` — **required** (GST tax invoices are invalid without it)
+- `DATABASE_URL`, `REDIS_URL`
+- `DB_POOL_MODE=pgbouncer` (behind PgBouncer transaction pooling) and `DB_SSL=true`
+  (managed Postgres requires TLS)
+- Integration keys as they come online: `MSG91_*`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,
+  `R2_*`, `SENTRY_DSN`.
+
+## Health probes
+- **Liveness**: `GET /healthz` — always 200 if the process is up. Used by the
+  Docker `HEALTHCHECK`.
+- **Readiness**: `GET /readyz` — checks Postgres + Redis. **Point the platform's
+  traffic gate at `/readyz`**, not `/healthz`, so a booting/degraded instance
+  doesn't receive traffic.
+
+## Migrations on deploy (zero-downtime)
+Run migrations as a **release/pre-deploy step before** the new app version starts,
+never from app startup:
+
+```
+uv run alembic upgrade head
+```
+
+Rules that keep this safe for rolling deploys:
+1. Migrations are **backward-compatible** (additive): new nullable columns / new
+   tables first; make NOT-NULL or drop columns only in a *later* release once no
+   running code references the old shape. (0029 followed this: backfill → NOT NULL.)
+2. The app drains cleanly on `SIGTERM` (FastAPI lifespan disposes the DB engine and
+   Redis pool), so Railway/Fly rolling restarts don't cut in-flight requests.
+3. CI already runs `upgrade → downgrade -1 → upgrade` to prove every migration
+   round-trips before merge.
+
+## Backups / disaster recovery
+- Use the managed provider's **automated daily backups + PITR** (Railway Postgres
+  / Fly Postgres / AWS RDS). Verify retention ≥ 7 days and test a restore quarterly.
+- Financial tables are append-only (`wallet_transactions`, `credit_ledger`,
+  `consents`) and `webhook_events` is immutable (block-UPDATE trigger) — a restore
+  reconstructs an accurate ledger.
+- Keep `uv.lock` committed so any point-in-time image is byte-reproducible.
+
+## Scaling notes
+See `SCALING.md`. In short: PgBouncer transaction pooling (`DB_POOL_MODE=pgbouncer`,
+NullPool app-side), Redis in-region, cutoff is a chunked idempotent ARQ batch, and
+`/metrics` is per-process (aggregate at the Prometheus scraper across instances).
+
+## Worker (ARQ) crons
+- `scheduled_cutoff` — 17:35 UTC (23:05 IST): materialize tomorrow's delivery orders.
+- `drain_outbox` — every minute: send queued notifications.
+- `housekeeping` — 01:00 UTC: prune idempotency keys / webhook events / old notifications.
+
+If `CUTOFF_HOUR` changes, recompute the UTC cron time in `app/worker.py`.

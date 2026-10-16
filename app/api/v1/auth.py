@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.core.phone import normalize_phone
 from app.deps.auth import get_current_user
 from app.models.user import User
 from app.schemas.auth import (
@@ -31,7 +32,7 @@ def _client_meta(request: Request) -> dict:
 async def request_otp(data: OTPRequest, request: Request):
     ip = request.client.host if request.client else None
     try:
-        dev_otp = await otp_service.request_otp(data.phone, ip=ip)
+        dev_otp = await otp_service.request_otp(normalize_phone(data.phone), ip=ip)
     except ValueError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
     return OTPRequestResponse(detail="OTP sent", dev_otp=dev_otp)
@@ -39,9 +40,10 @@ async def request_otp(data: OTPRequest, request: Request):
 
 @router.post("/otp/verify", response_model=TokenPair, operation_id="verify_otp")
 async def verify_otp(data: OTPVerify, request: Request, db: AsyncSession = Depends(get_db)):
-    if not await otp_service.verify_otp(data.phone, data.otp):
+    phone = normalize_phone(data.phone)
+    if not await otp_service.verify_otp(phone, data.otp):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired OTP")
-    user = await auth_service.get_or_create_user(db, data.phone)
+    user = await auth_service.get_or_create_user(db, phone)
     access, refresh, _ = await auth_service.issue_tokens(db, user, **_client_meta(request))
     await db.commit()
     return TokenPair(access_token=access, refresh_token=refresh)
