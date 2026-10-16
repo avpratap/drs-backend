@@ -56,6 +56,55 @@ async def test_webhook_events_immutable(client):
         await conn.execute(sa.text("DELETE FROM webhook_events WHERE event_id='evt_t2'"))
 
 
+async def test_stock_floor_check(client):
+    """stock_items.qty_on_hand has a floor (can go slightly negative, not unbounded)."""
+    from app.core.db import engine
+
+    async with engine.begin() as conn:
+        pid = (await conn.execute(sa.text("SELECT id FROM products LIMIT 1"))).scalar()
+        loc = (await conn.execute(sa.text("SELECT id FROM locations LIMIT 1"))).scalar()
+    with pytest.raises(Exception) as ei:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "INSERT INTO stock_items (product_id, location_id, qty_on_hand, reorder_point, updated_at) "
+                    "VALUES (:p, :l, -2000000, 0, now())"
+                ),
+                {"p": pid, "l": loc},
+            )
+    assert "ck_stock_qty_floor" in str(ei.value) or "check" in str(ei.value).lower()
+
+
+async def test_negative_balance_blocked(client):
+    """wallet_adjust rejects an over-debit unless allow_negative is set."""
+    from app.core.db import SessionLocal
+    from app.models.shop import CustomerAccount
+    from app.models.user import User
+    from app.services import billing
+
+    async with SessionLocal() as db:
+        # Fresh user+account => guaranteed zero wallet (no cross-test funding).
+        user = User(phone="9100000099", role="customer", status="active")
+        db.add(user)
+        await db.flush()
+        acct = CustomerAccount(
+            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+        )
+        db.add(acct)
+        await db.flush()
+        await billing.wallet_adjust(db, acct.id, 50, "topup", "test", 1)
+        with pytest.raises(Exception):  # noqa: B017 - overdraw must be refused
+            await billing.wallet_adjust(db, acct.id, -100, "debit", "test", 2)
+        await db.rollback()  # never commit test rows
+
+
+async def test_metrics_exposes_latency_histogram(client):
+    await client.get("/api/v1/products")  # generate a timed request
+    body = (await client.get("/metrics")).text
+    assert "http_request_duration_ms_bucket" in body
+    assert 'le="+Inf"' in body
+
+
 async def test_money_check_blocks_negative_unit_price(client):
     from app.core.db import engine
 

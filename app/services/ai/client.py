@@ -46,7 +46,9 @@ async def complete(system: str, user_text: str, *, max_tokens: int | None = None
                     thinking={"type": "adaptive"},
                     messages=[{"role": "user", "content": user_text}],
                 )
-            return "".join(b.text for b in resp.content if b.type == "text").strip()
+            text = "".join(b.text for b in resp.content if b.type == "text").strip()
+            # Output validation: never return an empty answer or an unbounded blob.
+            return text[:8000] if text else _UNAVAILABLE
         except Exception as exc:
             last_exc = exc
             if attempt < settings.AI_MAX_RETRIES:

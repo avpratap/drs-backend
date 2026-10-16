@@ -26,6 +26,9 @@ log = logging.getLogger("drs.request")
 _req_total: dict[tuple[str, int], int] = defaultdict(int)
 _latency_sum_ms: float = 0.0
 _latency_count: int = 0
+# Prometheus-style latency histogram (cumulative buckets, in ms).
+_LATENCY_BUCKETS_MS = (5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000)
+_latency_buckets: dict[float, int] = defaultdict(int)
 
 
 def configure_logging() -> None:
@@ -106,6 +109,9 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         _req_total[(request.method, response.status_code)] += 1
         _latency_sum_ms += dur_ms
         _latency_count += 1
+        for b in _LATENCY_BUCKETS_MS:
+            if dur_ms <= b:
+                _latency_buckets[b] += 1
         response.headers["X-Request-ID"] = rid
         response.headers["X-Response-Time-ms"] = f"{dur_ms:.1f}"
         log.info(
@@ -129,11 +135,14 @@ def metrics_response() -> Response:
     for (method, status_code), count in sorted(_req_total.items()):
         lines.append(f'http_requests_total{{method="{method}",status="{status_code}"}} {count}')
     lines += [
-        "# HELP http_request_duration_ms_sum Sum of request durations in ms.",
-        "# TYPE http_request_duration_ms_sum counter",
+        "# HELP http_request_duration_ms Request latency histogram (ms).",
+        "# TYPE http_request_duration_ms histogram",
+    ]
+    for b in _LATENCY_BUCKETS_MS:
+        lines.append(f'http_request_duration_ms_bucket{{le="{b}"}} {_latency_buckets[b]}')
+    lines += [
+        f'http_request_duration_ms_bucket{{le="+Inf"}} {_latency_count}',
         f"http_request_duration_ms_sum {_latency_sum_ms:.1f}",
-        "# HELP http_request_duration_ms_count Number of timed requests.",
-        "# TYPE http_request_duration_ms_count counter",
         f"http_request_duration_ms_count {_latency_count}",
     ]
     return PlainTextResponse("\n".join(lines) + "\n")
