@@ -12,6 +12,7 @@ from app.models.notification import Notification
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.pricing import PriceTier, ProductPrice
+from app.models.procurement import PurchaseOrder, PurchaseOrderItem, Supplier
 from app.models.product import Product
 from app.models.profile import (
     Address,
@@ -54,6 +55,8 @@ __all__ = [
     "Product",
     "ProductPrice",
     "ProofOfDelivery",
+    "PurchaseOrder",
+    "PurchaseOrderItem",
     "Rating",
     "Refund",
     "Return",
@@ -65,6 +68,7 @@ __all__ = [
     "Subscription",
     "SubscriptionItem",
     "SubscriptionOverride",
+    "Supplier",
     "User",
     "UserProfile",
     "UserRole",
