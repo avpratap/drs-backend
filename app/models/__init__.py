@@ -25,6 +25,7 @@ from app.models.rating import Rating
 from app.models.refund import Refund, WebhookEvent
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
+from app.models.transfer import StockTransfer, StockTransferItem, StockTransferLot
 from app.models.user import User, UserRole
 from app.models.warehouse import Location
 
@@ -65,6 +66,9 @@ __all__ = [
     "StockBatch",
     "StockItem",
     "StockMovement",
+    "StockTransfer",
+    "StockTransferItem",
+    "StockTransferLot",
     "Subscription",
     "SubscriptionItem",
     "SubscriptionOverride",

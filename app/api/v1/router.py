@@ -16,6 +16,7 @@ from app.api.v1 import (
     products,
     shops,
     subscriptions,
+    transfers,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -33,4 +34,5 @@ api_router.include_router(invoices.router)
 api_router.include_router(management.router)
 api_router.include_router(inventory.router)
 api_router.include_router(procurement.router)
+api_router.include_router(transfers.router)
 api_router.include_router(ai.router)

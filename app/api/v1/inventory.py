@@ -206,6 +206,7 @@ async def receive_batch(
 @router.get("/stock/batches", response_model=list[BatchOut], operation_id="list_batches")
 async def list_batches(
     product_id: int | None = None,
+    location_id: int | None = None,
     expiring_before: dt.date | None = None,
     active_only: bool = True,
     db: AsyncSession = Depends(get_db),
@@ -216,6 +217,8 @@ async def list_batches(
     )
     if product_id is not None:
         q = q.where(StockBatch.product_id == product_id)
+    if location_id is not None:
+        q = q.where(StockBatch.location_id == location_id)
     if active_only:
         q = q.where(StockBatch.status == "active", StockBatch.qty > 0)
     if expiring_before is not None:
