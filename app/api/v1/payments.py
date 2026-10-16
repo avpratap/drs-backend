@@ -2,6 +2,7 @@ import hashlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,23 @@ async def _owner_user(db: AsyncSession, account_id: int) -> User | None:
 
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+class PaymentVerifyOut(BaseModel):
+    detail: str
+    payment_id: int
+    status: str
+
+
+class RefundOut(BaseModel):
+    refund_id: int
+    payment_id: int
+    amount: float
+    status: str
+
+
+class WebhookAck(BaseModel):
+    status: str
 
 
 async def _finalize_payment(db: AsyncSession, payment: Payment, gateway_payment_id: str) -> None:
@@ -142,7 +160,7 @@ async def create_payment(
     )
 
 
-@router.post("/verify", operation_id="verify_payment")
+@router.post("/verify", operation_id="verify_payment", response_model=PaymentVerifyOut)
 async def verify_payment(
     data: PaymentVerify,
     user: User = Depends(get_current_user),
@@ -189,6 +207,7 @@ async def verify_payment(
 @router.post(
     "/{payment_id}/refund",
     operation_id="refund_payment",
+    response_model=RefundOut,
     dependencies=[Depends(require_role("admin"))],
 )
 async def refund_payment(
@@ -196,7 +215,8 @@ async def refund_payment(
 ):
     """Refund a successful payment (full or partial). Idempotency-Key recommended.
     Top-up refunds reverse the wallet credit; order-payment refunds return store
-    credit to the wallet and mark the order refunded."""
+    credit to the wallet and mark the order refunded. The payment row is locked
+    FOR UPDATE, so concurrent refunds for the same payment serialize."""
     res = await db.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
     payment = res.scalar_one_or_none()
     if payment is None:
@@ -229,9 +249,21 @@ async def refund_payment(
     )
     db.add(refund)
     await db.flush()
-    refund.gateway_refund_id = await pay_service.create_gateway_refund(
-        payment.gateway_payment_id, amount
-    )
+    # The gateway call can time out. If it fails, persist the refund as 'failed'
+    # (audit trail, no wallet effect — it never counts toward `already`) and surface
+    # 502 so an admin can retry with a fresh refund, rather than a silent stuck row.
+    try:
+        refund.gateway_refund_id = await pay_service.create_gateway_refund(
+            payment.gateway_payment_id, amount
+        )
+    except Exception as exc:
+        refund.status = "failed"
+        refund.reason = (refund.reason or "") + f" [gateway error: {str(exc)[:80]}]"
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Refund could not be processed by the gateway; no money moved. Please retry.",
+        ) from exc
     refund.status = "processed"
 
     if payment.payment_type == "wallet_topup":
@@ -259,7 +291,7 @@ async def refund_payment(
     }
 
 
-@router.post("/webhook", operation_id="razorpay_webhook")
+@router.post("/webhook", operation_id="razorpay_webhook", response_model=WebhookAck)
 async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Gateway callback. Signature-verified, idempotent by event id. Unknown events
     are acknowledged. Finalizes a captured payment that the client never verified."""

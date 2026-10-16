@@ -35,6 +35,9 @@ if settings.ENV == "prod":
         raise RuntimeError("RAZORPAY_KEY_ID/SECRET required in prod")
     if not settings.RAZORPAY_WEBHOOK_SECRET:
         raise RuntimeError("RAZORPAY_WEBHOOK_SECRET required in prod")
+    # GST tax invoices are not legally valid without the seller's GSTIN.
+    if not settings.SELLER_GSTIN:
+        raise RuntimeError("SELLER_GSTIN required in prod (GST tax invoices)")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):

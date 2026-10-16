@@ -136,7 +136,25 @@ async def list_pos(
     if status_filter:
         q = q.where(PurchaseOrder.status == status_filter)
     pos = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _po_out(db, po) for po in pos]
+    if not pos:
+        return []
+    # Batch all line items in one query (no N+1 across the page).
+    items = (
+        await db.execute(
+            select(PurchaseOrderItem).where(
+                PurchaseOrderItem.purchase_order_id.in_([p.id for p in pos])
+            )
+        )
+    ).scalars().all()
+    by_po: dict[int, list[PurchaseOrderItem]] = {}
+    for it in items:
+        by_po.setdefault(it.purchase_order_id, []).append(it)
+    out = []
+    for po in pos:
+        o = POOut.model_validate(po)
+        o.items = [POItemOut.model_validate(i) for i in by_po.get(po.id, [])]
+        out.append(o)
+    return out
 
 
 @router.get("/purchase-orders/{po_id}", response_model=POOut, operation_id="get_purchase_order")

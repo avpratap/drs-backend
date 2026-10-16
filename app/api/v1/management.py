@@ -3,6 +3,7 @@ assignment, account finance, shop mgmt, coupons, users, withdrawals. All admin-g
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from app.models.pricing import PriceTier, ProductPrice
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription
 from app.models.user import User
+from app.schemas.common import EraseResultOut, IdStatusOut
 from app.schemas.management import (
     AccountBillingOut,
     CouponIn,
@@ -42,6 +44,44 @@ from app.services import dpdp
 router = APIRouter(
     prefix="/admin", tags=["management"], dependencies=[Depends(require_role("admin"))]
 )
+
+
+class TierSetShopOut(BaseModel):
+    detail: str
+    shop_id: int
+    price_tier_id: int
+
+
+class TierSetAccountOut(BaseModel):
+    detail: str
+    account_id: int
+    price_tier_id: int
+
+
+class WalletBalanceOut(BaseModel):
+    account_id: int
+    wallet_balance: float
+
+
+class CreditOutstandingOut(BaseModel):
+    account_id: int
+    credit_outstanding: float
+
+
+class WithdrawalAdminOut(BaseModel):
+    id: int
+    account_id: int
+    amount: float
+    status: str
+
+
+class ReportsSummaryOut(BaseModel):
+    paid_order_revenue: float
+    wallet_float: float
+    credit_outstanding: float
+    active_subscriptions: int
+    shops: int
+    delivered_orders: int
 
 
 # ---------- Delivery-staff assignment ----------
@@ -163,7 +203,7 @@ async def list_product_prices(
 
 
 # ---------- Tier assignment ----------
-@router.post("/shops/{shop_id}/tier", operation_id="set_shop_tier")
+@router.post("/shops/{shop_id}/tier", operation_id="set_shop_tier", response_model=TierSetShopOut)
 async def set_shop_tier(shop_id: int, data: TierAssignIn, db: AsyncSession = Depends(get_db)):
     shop = await db.get(Shop, shop_id)
     if shop is None:
@@ -175,7 +215,9 @@ async def set_shop_tier(shop_id: int, data: TierAssignIn, db: AsyncSession = Dep
     return {"detail": "tier set", "shop_id": shop_id, "price_tier_id": data.price_tier_id}
 
 
-@router.post("/accounts/{account_id}/tier", operation_id="set_account_tier")
+@router.post(
+    "/accounts/{account_id}/tier", operation_id="set_account_tier", response_model=TierSetAccountOut
+)
 async def set_account_tier(account_id: int, data: TierAssignIn, db: AsyncSession = Depends(get_db)):
     account = await db.get(CustomerAccount, account_id)
     if account is None:
@@ -221,7 +263,7 @@ async def update_user(user_id: int, data: UserPatch, db: AsyncSession = Depends(
     return user
 
 
-@router.post("/users/{user_id}/erase", operation_id="admin_erase_user")
+@router.post("/users/{user_id}/erase", operation_id="admin_erase_user", response_model=EraseResultOut)
 async def admin_erase_user(user_id: int, db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
     if user is None:
@@ -288,7 +330,11 @@ async def admin_account_billing(account_id: int, db: AsyncSession = Depends(get_
     )
 
 
-@router.post("/accounts/{account_id}/wallet/adjust", operation_id="admin_wallet_adjust")
+@router.post(
+    "/accounts/{account_id}/wallet/adjust",
+    operation_id="admin_wallet_adjust",
+    response_model=WalletBalanceOut,
+)
 async def admin_wallet_adjust(
     account_id: int, data: WalletAdjustIn, db: AsyncSession = Depends(get_db)
 ):
@@ -305,7 +351,11 @@ async def admin_wallet_adjust(
     return {"account_id": account_id, "wallet_balance": float(wallet.balance)}
 
 
-@router.post("/accounts/{account_id}/credit/settle", operation_id="admin_settle_credit")
+@router.post(
+    "/accounts/{account_id}/credit/settle",
+    operation_id="admin_settle_credit",
+    response_model=CreditOutstandingOut,
+)
 async def admin_settle_credit(
     account_id: int, data: CreditSettleIn, db: AsyncSession = Depends(get_db)
 ):
@@ -339,7 +389,9 @@ async def admin_update_shop(shop_id: int, data: ShopPatch, db: AsyncSession = De
 
 
 # ---------- Wallet withdrawals (approval) ----------
-@router.get("/withdrawals", operation_id="admin_list_withdrawals")
+@router.get(
+    "/withdrawals", operation_id="admin_list_withdrawals", response_model=list[WithdrawalAdminOut]
+)
 async def admin_list_withdrawals(
     status_filter: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -355,7 +407,7 @@ async def admin_list_withdrawals(
     ]
 
 
-@router.post("/withdrawals/{wd_id}/approve", operation_id="approve_withdrawal")
+@router.post("/withdrawals/{wd_id}/approve", operation_id="approve_withdrawal", response_model=IdStatusOut)
 async def approve_withdrawal(
     wd_id: int,
     user: User = Depends(get_current_user),
@@ -382,7 +434,7 @@ async def approve_withdrawal(
     return {"id": wd.id, "status": wd.status}
 
 
-@router.post("/withdrawals/{wd_id}/reject", operation_id="reject_withdrawal")
+@router.post("/withdrawals/{wd_id}/reject", operation_id="reject_withdrawal", response_model=IdStatusOut)
 async def reject_withdrawal(
     wd_id: int,
     user: User = Depends(get_current_user),
@@ -401,7 +453,7 @@ async def reject_withdrawal(
 
 
 # ---------- Reports ----------
-@router.get("/reports/summary", operation_id="reports_summary")
+@router.get("/reports/summary", operation_id="reports_summary", response_model=ReportsSummaryOut)
 async def reports_summary(db: AsyncSession = Depends(get_db)):
     """At-a-glance operational + financial counters for the admin dashboard."""
     paid_revenue = await db.scalar(

@@ -33,7 +33,7 @@ class Return(Base):
         ForeignKey("delivery_orders.id"), index=True, nullable=False
     )
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
-    qty_returned: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    qty_returned: Mapped[float] = mapped_column(Numeric(12, 3), nullable=False)
     reason: Mapped[str] = mapped_column(String(32), nullable=False)  # damaged|expired|wrong_item|excess|refused
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(

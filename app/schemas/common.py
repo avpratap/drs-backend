@@ -1,0 +1,40 @@
+"""Shared response schemas for routes that return small status/result dicts.
+
+These exist so the OpenAPI spec is fully typed (drives Dart/Orval client codegen).
+Each matches the exact keys the corresponding route already returns — no behaviour
+change, only an explicit contract.
+"""
+from pydantic import BaseModel
+
+
+class DetailOut(BaseModel):
+    detail: str
+
+
+class IdStatusOut(BaseModel):
+    id: int
+    status: str
+
+
+class EraseResultOut(BaseModel):
+    detail: str
+    user_id: int
+    retained: str
+
+
+class OutboxFlushOut(BaseModel):
+    processed: int
+    sent: int
+    failed: int
+
+
+class DataExportOut(BaseModel):
+    """DPDP data export. Values are intentionally loose (dict/list) — this is a
+    portability dump, not a stable typed resource."""
+    user: dict
+    profile: dict | None = None
+    addresses: list[dict]
+    payment_methods: list[dict]
+    orders: list[dict]
+    invoices: list[dict]
+    consents: list[dict]

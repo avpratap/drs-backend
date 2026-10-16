@@ -116,7 +116,23 @@ async def list_boms(
     if product_id is not None:
         q = q.where(BillOfMaterials.product_id == product_id)
     boms = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _bom_out(db, b) for b in boms]
+    if not boms:
+        return []
+    # Batch all components in one query (no N+1 across the page).
+    comps = (
+        await db.execute(
+            select(BomComponent).where(BomComponent.bom_id.in_([b.id for b in boms]))
+        )
+    ).scalars().all()
+    by_bom: dict[int, list[BomComponent]] = {}
+    for c in comps:
+        by_bom.setdefault(c.bom_id, []).append(c)
+    out = []
+    for b in boms:
+        o = BomOut.model_validate(b)
+        o.components = [BomComponentOut.model_validate(c) for c in by_bom.get(b.id, [])]
+        out.append(o)
+    return out
 
 
 @router.get("/boms/{bom_id}", response_model=BomOut, operation_id="get_bom")

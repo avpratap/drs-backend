@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # AI/LLM (Claude). Empty key -> dev stub (templated answers, no external call).
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-opus-4-8"
+    AI_TIMEOUT_SECONDS: float = 30.0  # hard cap per Claude call
+    AI_MAX_RETRIES: int = 2  # transient-failure retries (exponential backoff)
+    AI_MAX_TOKENS: int = 1024  # output token ceiling per call
+    AI_DAILY_CALLS_PER_USER: int = 50  # cost/abuse guard on customer-facing AI
 
     @property
     def cors_origins_list(self) -> list[str]:

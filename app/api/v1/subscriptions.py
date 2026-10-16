@@ -1,6 +1,7 @@
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,13 @@ from app.schemas.subscription import (
 from app.services import subscription as sub_service
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
+
+
+class OverrideSavedOut(BaseModel):
+    detail: str
+    product_id: int
+    for_date: str
+    qty: float
 
 
 async def _owned_shop_or_404(user: User, db: AsyncSession, shop_id: int) -> Shop:
@@ -147,7 +155,7 @@ async def set_items(
     return await _detail(db, sub)
 
 
-@router.post("/{sub_id}/overrides", operation_id="set_override")
+@router.post("/{sub_id}/overrides", operation_id="set_override", response_model=OverrideSavedOut)
 async def set_override(
     sub_id: int,
     data: OverrideIn,

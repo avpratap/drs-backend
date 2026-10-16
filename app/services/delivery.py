@@ -14,6 +14,13 @@ from app.services.billing import bill_delivery
 
 
 async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, data) -> None:
+    # Only an open order may be delivered; refuse to clobber a terminal one so a
+    # second (concurrent or stale) submission can't overwrite the first.
+    if order.status not in ("generated", "frozen"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Order is {order.status}; only generated/frozen orders can be delivered",
+        )
     res = await db.execute(
         select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
     )
@@ -25,6 +32,11 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 f"Product {di.product_id} is not in this order",
+            )
+        if di.qty_delivered < 0:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"qty_delivered must be >= 0 for product {di.product_id}",
             )
         it.qty_delivered = di.qty_delivered
         planned = float(it.qty_planned)

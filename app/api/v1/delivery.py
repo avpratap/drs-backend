@@ -2,6 +2,7 @@ import datetime as dt
 import secrets
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +23,11 @@ _MAX_UPLOAD = 5 * 1024 * 1024  # 5 MB
 _ALLOWED_UPLOAD = {"image/jpeg", "image/png", "image/webp"}
 
 
-@router.post("/uploads", operation_id="upload_pod_asset")
+class UploadOut(BaseModel):
+    url: str
+
+
+@router.post("/uploads", operation_id="upload_pod_asset", response_model=UploadOut)
 async def upload_pod_asset(
     file: UploadFile = File(...), user: User = Depends(get_current_user)
 ):

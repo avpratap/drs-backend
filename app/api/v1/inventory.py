@@ -268,7 +268,12 @@ async def list_batches(
     return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
 
 
-@router.post("/stock/expire", operation_id="expire_batches")
+class ExpireResultOut(BaseModel):
+    batches_expired: int
+    qty_written_off: float
+
+
+@router.post("/stock/expire", operation_id="expire_batches", response_model=ExpireResultOut)
 async def expire_batches(
     as_of: dt.date | None = None,
     user: User = Depends(get_current_user),

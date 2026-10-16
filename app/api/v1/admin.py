@@ -9,6 +9,7 @@ from app.core.db import get_db
 from app.deps.auth import require_role
 from app.models.notification import Notification
 from app.models.user import User
+from app.schemas.common import OutboxFlushOut
 from app.schemas.delivery import CutoffResult
 from app.services import forecasting
 from app.services import notifications as notify
@@ -32,7 +33,39 @@ class NotifyTestIn(BaseModel):
     dedupe_key: str | None = None
 
 
-@router.post("/notifications/test", operation_id="emit_test_notification")
+class NotifyRowOut(BaseModel):
+    id: int
+    channel: str
+    status: str
+    skip_reason: str | None = None
+
+
+class NotifyTestOut(BaseModel):
+    created: list[NotifyRowOut]
+
+
+class ForecastOut(BaseModel):
+    for_date: str
+    history_days: int
+    plan: list[dict]
+
+
+class NotificationOut(BaseModel):
+    id: int
+    user_id: int
+    event_type: str
+    channel: str
+    category: str | None = None
+    status: str
+    skip_reason: str | None = None
+    provider_message_id: str | None = None
+    body: str | None = None
+    attempts: int
+
+
+@router.post(
+    "/notifications/test", operation_id="emit_test_notification", response_model=NotifyTestOut
+)
 async def emit_test_notification(body: NotifyTestIn, db: AsyncSession = Depends(get_db)):
     """Emit an event for one user (gating applies) and return the rows created."""
     user = await db.get(User, body.user_id)
@@ -50,7 +83,7 @@ async def emit_test_notification(body: NotifyTestIn, db: AsyncSession = Depends(
     }
 
 
-@router.get("/forecast", operation_id="demand_forecast")
+@router.get("/forecast", operation_id="demand_forecast", response_model=ForecastOut)
 async def demand_forecast(
     date: dt.date | None = None,
     history_days: int = 28,
@@ -64,13 +97,17 @@ async def demand_forecast(
     return {"for_date": str(for_date), "history_days": history_days, "plan": plan}
 
 
-@router.post("/notifications/flush", operation_id="flush_notifications")
+@router.post(
+    "/notifications/flush", operation_id="flush_notifications", response_model=OutboxFlushOut
+)
 async def flush_notifications(limit: int = 100, db: AsyncSession = Depends(get_db)):
     """Drain due queued notifications (also runs automatically in the ARQ worker)."""
     return await notify.process_outbox(db, limit=limit)
 
 
-@router.get("/notifications", operation_id="list_notifications")
+@router.get(
+    "/notifications", operation_id="list_notifications", response_model=list[NotificationOut]
+)
 async def list_notifications(
     user_id: int | None = None,
     status_filter: str | None = None,

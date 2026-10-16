@@ -19,6 +19,12 @@ class WithdrawalIn(BaseModel):
     note: str | None = Field(default=None, max_length=255)
 
 
+class TopupOut(BaseModel):
+    detail: str
+    account_id: int
+    amount: float
+
+
 class WithdrawalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -64,7 +70,12 @@ async def my_billing(user: User = Depends(get_current_user), db: AsyncSession = 
     )
 
 
-@router.post("/admin/topup", dependencies=[Depends(require_role("admin"))], operation_id="wallet_topup")
+@router.post(
+    "/admin/topup",
+    dependencies=[Depends(require_role("admin"))],
+    operation_id="wallet_topup",
+    response_model=TopupOut,
+)
 async def topup(data: TopupIn, db: AsyncSession = Depends(get_db)):
     await billing_service.wallet_adjust(db, data.account_id, data.amount, "topup", "manual", None)
     await db.commit()

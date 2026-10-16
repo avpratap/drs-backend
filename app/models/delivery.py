@@ -61,8 +61,8 @@ class DeliveryOrderItem(Base):
         ForeignKey("delivery_orders.id", ondelete="CASCADE"), index=True, nullable=False
     )
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
-    qty_planned: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    qty_delivered: Mapped[float] = mapped_column(Numeric(10, 2), default=0, nullable=False)
+    qty_planned: Mapped[float] = mapped_column(Numeric(12, 3), nullable=False)
+    qty_delivered: Mapped[float] = mapped_column(Numeric(12, 3), default=0, nullable=False)
     unit_price: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     line_total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="planned", nullable=False)

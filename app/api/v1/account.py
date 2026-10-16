@@ -8,6 +8,7 @@ from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.models.profile import Address, PaymentMandate, PaymentMethod
 from app.models.user import User
+from app.schemas.common import DataExportOut, EraseResultOut
 from app.schemas.profile import (
     AddressIn,
     AddressOut,
@@ -113,7 +114,7 @@ async def update_profile(
 
 
 # ---------- DPDP data rights ----------
-@router.get("/account/export", operation_id="export_my_data")
+@router.get("/account/export", operation_id="export_my_data", response_model=DataExportOut)
 async def export_my_data(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
@@ -121,7 +122,7 @@ async def export_my_data(
     return await dpdp.export_user_data(db, user)
 
 
-@router.post("/account/erase", operation_id="erase_my_account")
+@router.post("/account/erase", operation_id="erase_my_account", response_model=EraseResultOut)
 async def erase_my_account(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
@@ -130,7 +131,7 @@ async def erase_my_account(
 
 
 # ---------- Consent ----------
-@router.get("/consents", operation_id="get_consents")
+@router.get("/consents", operation_id="get_consents", response_model=dict[str, str])
 async def get_consents(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     return await svc.current_consents(db, user.id)
 

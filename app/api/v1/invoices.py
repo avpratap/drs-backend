@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +14,11 @@ from app.schemas.invoice import CreditNoteIn, InvoiceLineOut, InvoiceOut
 from app.services import invoice_pdf, invoicing
 
 router = APIRouter(tags=["invoices"])
+
+
+class InvoicePdfOut(BaseModel):
+    invoice_no: str
+    pdf_url: str
 
 
 async def _my_account_ids(db: AsyncSession, user: User) -> set[int]:
@@ -82,7 +88,7 @@ async def get_invoice(
     return await _detail(db, inv)
 
 
-@router.get("/invoices/{invoice_id}/pdf", operation_id="get_invoice_pdf")
+@router.get("/invoices/{invoice_id}/pdf", operation_id="get_invoice_pdf", response_model=InvoicePdfOut)
 async def get_invoice_pdf(
     invoice_id: int,
     user: User = Depends(get_current_user),

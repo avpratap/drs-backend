@@ -12,6 +12,7 @@ from app.schemas.auth import (
     TokenPair,
     UserOut,
 )
+from app.schemas.common import DetailOut
 from app.services import auth as auth_service
 from app.services import otp as otp_service
 
@@ -59,7 +60,7 @@ async def refresh_token(data: RefreshRequest, request: Request, db: AsyncSession
     return TokenPair(access_token=access, refresh_token=refresh)
 
 
-@router.post("/logout", operation_id="logout")
+@router.post("/logout", operation_id="logout", response_model=DetailOut)
 async def logout(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
     await auth_service.revoke_family_by_refresh(db, data.refresh_token)
     await db.commit()

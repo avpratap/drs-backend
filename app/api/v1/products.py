@@ -31,6 +31,13 @@ class RatingOut(BaseModel):
     comment: str | None = None
 
 
+class ProductRatingsOut(BaseModel):
+    product_id: int
+    count: int
+    average: float
+    ratings: list[RatingOut]
+
+
 @router.get("", response_model=list[ProductOut], operation_id="list_products")
 async def list_products(
     category: str | None = None,
@@ -141,7 +148,9 @@ async def rate_product(
     return row
 
 
-@router.get("/{product_id}/ratings", operation_id="list_product_ratings")
+@router.get(
+    "/{product_id}/ratings", operation_id="list_product_ratings", response_model=ProductRatingsOut
+)
 async def list_product_ratings(
     product_id: int, db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)
 ):

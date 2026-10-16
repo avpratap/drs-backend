@@ -39,7 +39,7 @@ class SubscriptionItem(Base, TimestampMixin):
         ForeignKey("subscriptions.id"), index=True, nullable=False
     )
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
-    default_qty: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    default_qty: Mapped[float] = mapped_column(Numeric(12, 3), nullable=False)
     frequency: Mapped[str] = mapped_column(String(16), default="daily", nullable=False)  # daily|alternate|weekly
     interval_days: Mapped[int | None] = mapped_column(Integer, nullable=True)  # for alternate
     days_of_week: Mapped[str | None] = mapped_column(String(32), nullable=True)  # csv "1,3,5" (Mon=1)
@@ -59,6 +59,6 @@ class SubscriptionOverride(Base, TimestampMixin):
         ForeignKey("subscription_items.id"), index=True, nullable=False
     )
     for_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
-    override_qty: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)  # 0 = skip
+    override_qty: Mapped[float] = mapped_column(Numeric(12, 3), nullable=False)  # 0 = skip
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

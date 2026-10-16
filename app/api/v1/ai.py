@@ -34,13 +34,19 @@ class AskIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
 
-@router.post("/ai/support", operation_id="ai_support")
+class AiAnswerOut(BaseModel):
+    answer: str
+    ai_live: bool
+
+
+@router.post("/ai/support", operation_id="ai_support", response_model=AiAnswerOut)
 async def ai_support(
     data: AskIn,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Customer support bot grounded in the caller's own recent orders."""
+    await ai.check_and_increment(user.id, scope="support")
     account_ids = set(
         (
             await db.execute(
@@ -73,10 +79,18 @@ async def ai_support(
 
 
 @router.post(
-    "/admin/ai/ask", operation_id="admin_ai_copilot", dependencies=[Depends(require_role("admin"))]
+    "/admin/ai/ask",
+    operation_id="admin_ai_copilot",
+    response_model=AiAnswerOut,
+    dependencies=[Depends(require_role("admin"))],
 )
-async def admin_ai_copilot(data: AskIn, db: AsyncSession = Depends(get_db)):
+async def admin_ai_copilot(
+    data: AskIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Admin copilot grounded in live aggregate metrics (sanitized, no PII)."""
+    await ai.check_and_increment(user.id, scope="copilot")
     paid_revenue = await db.scalar(
         select(func.coalesce(func.sum(Order.total), 0)).where(Order.payment_status == "paid")
     )
