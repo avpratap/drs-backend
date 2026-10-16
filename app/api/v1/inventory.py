@@ -123,6 +123,46 @@ async def list_low_stock(db: AsyncSession = Depends(get_db)):
     return (await db.execute(q)).scalars().all()
 
 
+class ReorderSuggestionOut(BaseModel):
+    product_id: int
+    location_id: int
+    qty_on_hand: float
+    reorder_point: float
+    suggested_qty: float
+
+
+@router.get(
+    "/stock/reorder-suggestions",
+    response_model=list[ReorderSuggestionOut],
+    operation_id="list_reorder_suggestions",
+)
+async def list_reorder_suggestions(db: AsyncSession = Depends(get_db)):
+    """For each item at/below its reorder point, suggest a replenishment qty that
+    tops it back up to 2x the reorder point (a starting point for a purchase order)."""
+    rows = (
+        await db.execute(
+            select(StockItem).where(
+                StockItem.reorder_point > 0,
+                StockItem.qty_on_hand <= StockItem.reorder_point,
+            )
+        )
+    ).scalars().all()
+    out = []
+    for it in rows:
+        target = float(it.reorder_point) * 2
+        suggested = round(max(target - float(it.qty_on_hand), 0.0), 3)
+        out.append(
+            ReorderSuggestionOut(
+                product_id=it.product_id,
+                location_id=it.location_id,
+                qty_on_hand=float(it.qty_on_hand),
+                reorder_point=float(it.reorder_point),
+                suggested_qty=suggested,
+            )
+        )
+    return out
+
+
 @router.post("/stock/adjust", response_model=StockItemOut, operation_id="adjust_stock")
 async def adjust(data: StockAdjustIn, db: AsyncSession = Depends(get_db)):
     if data.change == 0:
