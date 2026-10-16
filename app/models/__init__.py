@@ -14,6 +14,7 @@ from app.models.payment import Payment
 from app.models.pricing import PriceTier, ProductPrice
 from app.models.procurement import PurchaseOrder, PurchaseOrderItem, Supplier
 from app.models.product import Product
+from app.models.production import BillOfMaterials, BomComponent, ProductionOrder
 from app.models.profile import (
     Address,
     Consent,
@@ -33,6 +34,8 @@ __all__ = [
     "Address",
     "AuthSession",
     "Base",
+    "BillOfMaterials",
+    "BomComponent",
     "CashCollection",
     "Consent",
     "Coupon",
@@ -55,6 +58,7 @@ __all__ = [
     "PriceTier",
     "Product",
     "ProductPrice",
+    "ProductionOrder",
     "ProofOfDelivery",
     "PurchaseOrder",
     "PurchaseOrderItem",

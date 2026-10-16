@@ -13,6 +13,7 @@ from app.api.v1 import (
     orders,
     payments,
     procurement,
+    production,
     products,
     shops,
     subscriptions,
@@ -35,4 +36,5 @@ api_router.include_router(management.router)
 api_router.include_router(inventory.router)
 api_router.include_router(procurement.router)
 api_router.include_router(transfers.router)
+api_router.include_router(production.router)
 api_router.include_router(ai.router)
