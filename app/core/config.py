@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     GUPSHUP_SOURCE: str = ""  # the WABA sender number (e.g. 919999999999)
     GUPSHUP_SRC_NAME: str = ""  # registered src.name / app display name
 
+    # Shipping (Shiprocket). Empty creds -> dev stub (fake AWBs/serviceability, no calls).
+    SHIPROCKET_EMAIL: str = ""
+    SHIPROCKET_PASSWORD: str = ""
+    SHIPROCKET_PICKUP_LOCATION: str = "Primary"  # pickup nickname registered in Shiprocket
+    SHIPROCKET_CHANNEL_ID: str = ""
+    SHIPROCKET_WEBHOOK_TOKEN: str = ""  # shared secret echoed in the tracking webhook
+    SHIPROCKET_BASE_URL: str = "https://apiv2.shiprocket.in/v1/external"
+    PICKUP_PINCODE: str = "302001"  # seller origin pincode (Jaipur) for serviceability
+
     # AI/LLM (Claude). Empty key -> dev stub (templated answers, no external call).
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-opus-4-8"

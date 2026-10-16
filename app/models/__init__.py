@@ -24,6 +24,7 @@ from app.models.profile import (
 )
 from app.models.rating import Rating
 from app.models.refund import Refund, WebhookEvent
+from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.transfer import StockTransfer, StockTransferItem, StockTransferLot
@@ -66,6 +67,8 @@ __all__ = [
     "Refund",
     "Return",
     "ScheduleRun",
+    "Shipment",
+    "ShipmentTrackingEvent",
     "Shop",
     "StockBatch",
     "StockItem",

@@ -20,3 +20,8 @@ class Product(Base, TimestampMixin):
     category: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+    # Courier shipping metadata (one-time e-commerce orders).
+    weight_kg: Mapped[float | None] = mapped_column(Numeric(8, 3), nullable=True)
+    length_cm: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    width_cm: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    height_cm: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
