@@ -175,12 +175,44 @@ async def _notify_delivered(db: AsyncSession, ship: Shipment) -> None:
         )
 
 
-async def cancel_shipment(db: AsyncSession, ship: Shipment) -> Shipment:
+async def cancel_shipment(db: AsyncSession, shipment_id: int) -> Shipment:
+    """Cancel a shipment WITHOUT holding a DB row lock across the courier HTTP call (#74).
+
+    Three phases: (A) lock + validate + claim 'cancelling' + commit (releases the lock),
+    (B) call the courier with no lock held, (C) re-lock + finalize to 'cancelled' (or
+    revert to the prior status on courier failure) + commit.
+    """
+    # Phase A — claim under a short lock, then release it.
+    ship = (
+        await db.execute(
+            select(Shipment).where(Shipment.id == shipment_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if ship is None:
+        raise HTTPException(http.HTTP_404_NOT_FOUND, "Shipment not found")
     if ship.status in _TERMINAL:
         raise HTTPException(http.HTTP_409_CONFLICT, f"Shipment is {ship.status}, cannot cancel")
-    ok = await client.cancel_shipment(ship.gateway_shipment_id or "")
+    if ship.status == "cancelling":
+        raise HTTPException(http.HTTP_409_CONFLICT, "A cancel is already in progress")
+    prior_status = ship.status
+    gsid = ship.gateway_shipment_id or ""
+    ship.status = "cancelling"
+    await db.commit()  # releases the FOR UPDATE lock before the network call
+
+    # Phase B — courier call with NO DB lock/transaction held open.
+    ok = await client.cancel_shipment(gsid)
+
+    # Phase C — re-lock and record the outcome.
+    ship = (
+        await db.execute(
+            select(Shipment).where(Shipment.id == shipment_id).with_for_update()
+        )
+    ).scalar_one()
     if not ok:
+        ship.status = prior_status  # revert the claim so it can be retried
+        await db.commit()
         raise HTTPException(http.HTTP_502_BAD_GATEWAY, "Courier cancel failed; try again")
     ship.status = "cancelled"
     db.add(ShipmentTrackingEvent(shipment_id=ship.id, status="cancelled", note="Cancelled by admin"))
+    await db.commit()
     return ship

@@ -127,14 +127,9 @@ async def create_shipment(data: ShipmentCreateIn, db: AsyncSession = Depends(get
 @router.post("/admin/shipments/{shipment_id}/cancel", response_model=ShipmentOut,
              operation_id="cancel_shipment", dependencies=[Depends(require_role("admin"))])
 async def cancel_shipment(shipment_id: int, db: AsyncSession = Depends(get_db)):
-    ship = (
-        await db.execute(select(Shipment).where(Shipment.id == shipment_id).with_for_update())
-    ).scalar_one_or_none()
-    if ship is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Shipment not found")
-    await ship_svc.cancel_shipment(db, ship)
-    await db.commit()
-    await db.refresh(ship)
+    # The service manages its own locking/commits (claim -> courier call -> finalize) so
+    # no DB row lock is held across the courier HTTP call (#74).
+    ship = await ship_svc.cancel_shipment(db, shipment_id)
     return await _shipment_out(db, ship)
 
 
