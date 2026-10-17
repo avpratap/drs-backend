@@ -8,6 +8,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -69,11 +70,26 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
         return StatusOut(email=email, status="subscribed")  # already confirmed
     token = secrets.token_urlsafe(24)
     if row is None:
-        row = NewsletterSubscriber(
-            email=email, name=data.name, status="pending", source="web", confirm_token=token
-        )
-        db.add(row)
-    else:  # re-subscribe (was pending/unsubscribed) — issue a fresh confirmation
+        # Two concurrent first-subscribes for the same email would collide on
+        # UNIQUE(email). Insert in a savepoint; on collision fall through to the
+        # re-subscribe path on the row the other request committed.
+        try:
+            async with db.begin_nested():
+                row = NewsletterSubscriber(
+                    email=email, name=data.name, status="pending", source="web",
+                    confirm_token=token,
+                )
+                db.add(row)
+                await db.flush()
+        except IntegrityError:
+            row = await db.scalar(
+                select(NewsletterSubscriber).where(NewsletterSubscriber.email == email)
+            )
+            if row is not None and row.status == "subscribed":
+                return StatusOut(email=email, status="subscribed")  # lost race to a confirm
+    if row.status != "pending" or row.confirm_token != token:
+        # Re-subscribe (was pending/unsubscribed, or lost the insert race) — issue a
+        # fresh confirmation so consent is always re-confirmed by the email owner.
         row.status = "pending"
         row.confirm_token = token
         if data.name:

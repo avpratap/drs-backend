@@ -92,3 +92,23 @@ async def test_cart_item_idor_404(client):
     # B cannot touch A's cart item — it isn't in B's cart.
     assert (await client.patch(f"/api/v1/cart/items/{a_item}", json={"qty": 9}, headers=auth(b))).status_code == 404
     assert (await client.delete(f"/api/v1/cart/items/{a_item}", headers=auth(b))).status_code == 404
+
+
+async def test_concurrent_first_cart_touch_no_500(client):
+    """#70: two concurrent first-touches on the active cart must not 500 on the partial
+    unique index — the get-or-create collision is caught and re-selected."""
+    import asyncio
+
+    cust = await login(client, "9000000654")  # a user with no cart yet
+    h = auth(cust)
+    pid = await _milk_id(client, h)
+    results = await asyncio.gather(
+        client.post("/api/v1/cart/items", json={"product_id": pid, "qty": 1}, headers=h),
+        client.post("/api/v1/cart/items", json={"product_id": pid, "qty": 1}, headers=h),
+        return_exceptions=True,
+    )
+    codes = [r.status_code for r in results if not isinstance(r, Exception)]
+    assert all(c == 200 for c in codes), [getattr(r, "text", r) for r in results]
+    # Exactly one active cart exists afterward (the view reflects a single cart).
+    view = (await client.get("/api/v1/cart", headers=h)).json()
+    assert view["items"][0]["product_id"] == pid

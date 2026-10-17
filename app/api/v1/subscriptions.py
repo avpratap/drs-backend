@@ -3,6 +3,7 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -81,11 +82,20 @@ async def _retail_home_shop(db: AsyncSession, user: User, data: SubscriptionCrea
         select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
     )
     if acct is None:
-        acct = CustomerAccount(
-            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
-        )
-        db.add(acct)
-        await db.flush()
+        # Two concurrent first-subscriptions would both insert and collide on
+        # UNIQUE(owner_user_id). Create in a savepoint; on collision re-select.
+        try:
+            async with db.begin_nested():
+                acct = CustomerAccount(
+                    owner_user_id=user.id, account_type="retail",
+                    billing_mode="prepaid_wallet",
+                )
+                db.add(acct)
+                await db.flush()
+        except IntegrityError:
+            acct = await db.scalar(
+                select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+            )
     shop = await db.scalar(
         select(Shop).where(Shop.account_id == acct.id).order_by(Shop.id).limit(1)
     )

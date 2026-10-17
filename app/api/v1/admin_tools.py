@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -135,9 +136,18 @@ async def list_feature_flags(db: AsyncSession = Depends(get_db)):
 async def upsert_feature_flag(data: FeatureFlagIn, db: AsyncSession = Depends(get_db)):
     flag = await db.scalar(select(FeatureFlag).where(FeatureFlag.key == data.key))
     if flag is None:
-        flag = FeatureFlag(key=data.key, enabled=data.enabled, description=data.description)
-        db.add(flag)
-    else:
+        # Concurrent first-upserts for the same key collide on UNIQUE(key); create in a
+        # savepoint and re-select on collision so the second request updates, not 500s.
+        try:
+            async with db.begin_nested():
+                flag = FeatureFlag(
+                    key=data.key, enabled=data.enabled, description=data.description
+                )
+                db.add(flag)
+                await db.flush()
+        except IntegrityError:
+            flag = await db.scalar(select(FeatureFlag).where(FeatureFlag.key == data.key))
+    if flag is not None and (flag.enabled != data.enabled or data.description is not None):
         flag.enabled = data.enabled
         if data.description is not None:
             flag.description = data.description

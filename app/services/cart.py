@@ -5,6 +5,7 @@ redemption all go through one authoritative path, then flips the cart to 'conver
 """
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cart import Cart, CartItem
@@ -26,9 +27,22 @@ async def get_or_create_active_cart(db: AsyncSession, account_id: int) -> Cart:
         )
     ).scalar_one_or_none()
     if cart is None:
-        cart = Cart(account_id=account_id, status="active")
-        db.add(cart)
-        await db.flush()
+        # Two concurrent first-touches would both insert and collide on the partial
+        # unique index (one active cart per account). Create in a savepoint; on
+        # collision re-select the row the other transaction committed instead of 500ing.
+        try:
+            async with db.begin_nested():
+                cart = Cart(account_id=account_id, status="active")
+                db.add(cart)
+                await db.flush()
+        except IntegrityError:
+            cart = (
+                await db.execute(
+                    select(Cart).where(
+                        Cart.account_id == account_id, Cart.status == "active"
+                    )
+                )
+            ).scalar_one()
     return cart
 
 
