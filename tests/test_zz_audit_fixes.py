@@ -349,17 +349,53 @@ async def test_sensitive_admin_mutations_write_audit_log(client):
         for row in logs
     )
 
-    # User role change (identity) -> audit "user_update".
-    other = (
+    # User role change (identity) -> audit "user_update". Target a KNOWN user by phone
+    # (not list[0], which is order-dependent and could land on an erased throwaway).
+    users = (
         await client.get("/api/v1/admin/users?role=customer", headers=auth(admin))
-    ).json()[0]
+    ).json()
+    target = next(u for u in users if u["phone"] == "9876543210")
     r = await client.patch(
-        f"/api/v1/admin/users/{other['id']}",
-        json={"status": other["status"]},  # no-op status write still records the change
+        f"/api/v1/admin/users/{target['id']}",
+        json={"status": target["status"]},  # no-op status write still records the change
         headers=auth(admin),
     )
     assert r.status_code == 200
     logs = (
         await client.get("/api/v1/admin/audit-log?action=user_update", headers=auth(admin))
     ).json()
-    assert any(row["resource_id"] == str(other["id"]) for row in logs)
+    assert any(row["resource_id"] == str(target["id"]) for row in logs)
+
+
+async def test_full_credit_note_nets_out_prior_partial(client):
+    """Money P3: a full refund-to-source credit note must NOT double-reverse GST already
+    reversed by a prior partial RMA credit note. Sum of all CNs for the invoice == -invoice."""
+    cust = await login(client, "9876543210")
+    admin = await login(client, "9999900001")
+    ghee = await _pid(client, cust, "GHEE-1KG")  # 12% GST, ₹500
+    oid, pay_id, _ = await _paid_order(client, cust, ghee, qty=3)  # ₹1500
+    inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=auth(cust))).json()
+    assert inv["total"] == 1500.0
+
+    # Partial RMA: return 1 unit -> a PARTIAL credit note (~₹500) against the invoice.
+    rid = (await client.post(
+        "/api/v1/returns",
+        json={"order_id": oid, "items": [{"product_id": ghee, "qty": 1, "reason": "spoiled"}]},
+        headers=auth(cust),
+    )).json()["id"]
+    await client.post(f"/api/v1/admin/returns/{rid}/approve", headers=auth(admin))
+    await client.post(f"/api/v1/admin/returns/{rid}/refund", json={"amount": 500}, headers=auth(admin))
+
+    # Now a FULL refund-to-source of the payment. One CN per invoice is enforced
+    # (uq_credit_note_original), so the existing PARTIAL CN is UPGRADED in place to the
+    # full reversal — no second CN, and no GST double-reversal.
+    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
+    assert r.status_code == 200
+
+    invoices = (await client.get("/api/v1/invoices", headers=auth(admin))).json()
+    cns = [i for i in invoices if i["is_credit_note"] and i["original_invoice_id"] == inv["id"]]
+    assert len(cns) == 1, f"exactly one credit note per invoice, got {len(cns)}: {cns}"
+    cn = cns[0]
+    assert cn["is_partial"] is False  # upgraded from the partial RMA CN
+    assert cn["total"] == -1500.0
+    assert cn["cgst"] == -inv["cgst"] and cn["sgst"] == -inv["sgst"] and cn["igst"] == -inv["igst"]

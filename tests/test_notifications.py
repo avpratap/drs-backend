@@ -46,17 +46,20 @@ async def test_consent_then_flush_delivers(client):
         json={"purpose": "whatsapp_optin", "action": "granted"},
         headers=auth(cust),
     )
-    await client.post(
+    created = (await client.post(
         "/api/v1/admin/notifications/test",
         json={"user_id": cid, "event_type": "marketing.promo", "data": {"message": "hi"}},
         headers=auth(admin),
-    )
-    flush = await client.post("/api/v1/admin/notifications/flush", headers=auth(admin))
-    assert flush.json()["sent"] >= 1
-    queued = await client.get(
-        "/api/v1/admin/notifications?status_filter=queued", headers=auth(admin)
-    )
-    assert queued.json() == []
+    )).json()["created"]
+    # The whatsapp channel must be QUEUED (consent granted), not skipped.
+    wa = next(c for c in created if c["channel"] == "whatsapp")
+    assert wa["status"] == "queued", wa
+    await client.post("/api/v1/admin/notifications/flush", headers=auth(admin))
+    # That specific row reached 'sent' (not merely a global flush count > 0).
+    sent = (await client.get(
+        "/api/v1/admin/notifications?status_filter=sent", headers=auth(admin)
+    )).json()
+    assert any(n["id"] == wa["id"] for n in sent), "the consented marketing.promo must be sent"
 
 
 async def test_marketing_optout_keeps_transactional_sms(client):
@@ -74,17 +77,17 @@ async def test_marketing_optout_keeps_transactional_sms(client):
         json={"purpose": "marketing_sms", "action": "revoked"},
         headers=auth(cust),
     )
-    # A TRANSACTIONAL event must still queue on the SMS channel.
+    # A TRANSACTIONAL event that TARGETS sms (payment.failed → whatsapp/sms/push) must
+    # still queue on the SMS channel after the marketing-sms opt-out.
     r = await client.post(
         "/api/v1/admin/notifications/test",
-        json={"user_id": cid, "event_type": "payment.success",
+        json={"user_id": cid, "event_type": "payment.failed",
               "data": {"amount": 200, "balance": 200}},
         headers=auth(admin),
     )
     created = r.json()["created"]
-    sms = [c for c in created if c["channel"] == "sms"]
-    if sms:  # only assert if this event targets SMS
-        assert sms[0]["status"] != "skipped" or sms[0].get("skip_reason") != "channel_off"
+    sms = next(c for c in created if c["channel"] == "sms")
+    assert sms["status"] == "queued", sms  # NOT skipped channel_off
     # And the profile's SMS channel toggle is untouched by the marketing opt-out.
     prof = (await client.get("/api/v1/profile", headers=auth(cust))).json()
     assert prof["notify_sms"] is True
