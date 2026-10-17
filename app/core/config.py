@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
     DB_SSL: bool = False  # require TLS to Postgres (set true for managed prod DB)
+    # Optional CA bundle (PEM) to verify the DB server cert against — managed providers
+    # (e.g. AWS RDS) use their own CA not in the system trust store. Empty -> default
+    # verifying context (system CAs). Only consulted when DB_SSL is true.
+    DB_SSL_ROOT_CERT: str = ""
 
     # Observability
     SENTRY_DSN: str = ""

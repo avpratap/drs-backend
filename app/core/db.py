@@ -20,8 +20,18 @@ def _engine_kwargs() -> dict:
         kw["pool_recycle"] = 1800
     if settings.DB_SSL:
         # Require TLS to the database (managed Postgres in prod). asyncpg accepts a
-        # bool/str/SSLContext here; True uses the default verifying context.
-        connect_args["ssl"] = True
+        # bool/str/SSLContext here; True uses the default (system-CA) verifying context.
+        if settings.DB_SSL_ROOT_CERT:
+            # Verify the server cert against an explicit CA bundle (e.g. the AWS RDS CA).
+            # Fails fast at import if the path is missing/unreadable — a clear boot error
+            # beats silently falling back to an unverified connection.
+            import ssl
+
+            connect_args["ssl"] = ssl.create_default_context(
+                cafile=settings.DB_SSL_ROOT_CERT
+            )
+        else:
+            connect_args["ssl"] = True
     if connect_args:
         kw["connect_args"] = connect_args
     return kw
