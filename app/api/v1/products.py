@@ -29,7 +29,10 @@ class RatingIn(BaseModel):
 class RatingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    user_id: int
+    # Reviewer identity is PII: only populated for the review's own author or an admin.
+    # Public listings get None + `mine=False` so other users can't be enumerated.
+    user_id: int | None = None
+    mine: bool = False
     product_id: int
     stars: int
     comment: str | None = None
@@ -203,6 +206,10 @@ async def rate_product(
         existing.stars = data.stars
         existing.comment = data.comment
         existing.verified_purchase = verified
+        # Editing a review an admin REJECTED must not quietly keep the old verdict on new
+        # text — send it back to moderation (hidden from public) instead of auto-publishing.
+        if existing.status == "rejected":
+            existing.status = "pending"
         row = existing
         await db.flush()
     else:
@@ -321,12 +328,23 @@ async def list_product_ratings(
         Rating.helpful_count.desc() if sort == "helpful" else Rating.id.desc()
     )
     rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    is_admin = user is not None and user.role == "admin"
+
+    def _out(r: Rating) -> dict:
+        o = RatingOut.model_validate(r)
+        mine = user is not None and r.user_id == user.id
+        o.mine = mine
+        # Hide other reviewers' user_id from everyone but admins.
+        if not (mine or is_admin):
+            o.user_id = None
+        return o.model_dump()
+
     return {
         "product_id": product_id,
         "count": total,
         "average": average,
         "distribution": distribution,
-        "ratings": [RatingOut.model_validate(r).model_dump() for r in rows],
+        "ratings": [_out(r) for r in rows],
     }
 
 

@@ -1,10 +1,12 @@
 """Content/CMS helpers: publish lifecycle, published listings, sitemap data."""
 import datetime as dt
 import os
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.content import Article, Banner, StaticPage
 
 # Public site origin used to build absolute sitemap URLs (web app domain).
@@ -26,7 +28,9 @@ def unpublish(obj) -> None:
 
 
 async def active_banners(db: AsyncSession) -> list[Banner]:
-    today = dt.date.today()
+    # Gate on the business-local (IST) date, not the server's UTC date — a banner set to
+    # start/end "today" must flip at local midnight, not at 05:30 IST.
+    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
     rows = (
         await db.execute(
             select(Banner)

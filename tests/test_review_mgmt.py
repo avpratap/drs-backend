@@ -101,6 +101,28 @@ async def test_sort_by_helpful(client):
     assert {r["id"] for r in listing["ratings"]} == {r1, r2}
 
 
+async def test_public_listing_hides_other_reviewers_user_id(client):
+    """#41: a reviewer's user_id is PII — public/other viewers get null + mine=False,
+    the author sees their own id with mine=True, admins see it."""
+    ah = auth(await login(client, "9999900001"))
+    author = await login(client, "9876543210")
+    pid = await _product(client, ah, "REV-PRIV")
+    await _rate(client, auth(author), pid, 4)
+
+    # Anonymous public viewer: user_id masked.
+    pub = (await client.get(f"/api/v1/products/{pid}/ratings")).json()["ratings"]
+    assert pub and pub[0]["user_id"] is None and pub[0]["mine"] is False
+
+    # A DIFFERENT logged-in customer still can't see the author's id.
+    other = auth(await login(client, "9000000456"))
+    seen = (await client.get(f"/api/v1/products/{pid}/ratings", headers=other)).json()["ratings"]
+    assert seen[0]["user_id"] is None and seen[0]["mine"] is False
+
+    # The author sees their own id and mine=True.
+    own = (await client.get(f"/api/v1/products/{pid}/ratings", headers=auth(author))).json()["ratings"]
+    assert own[0]["user_id"] is not None and own[0]["mine"] is True
+
+
 async def test_moderation_requires_admin(client):
     cust = await login(client, "9876543210")
     ch = auth(cust)

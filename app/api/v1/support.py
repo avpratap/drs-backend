@@ -1,6 +1,6 @@
 """Support tickets: customer inbox + admin console."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,9 +21,25 @@ class TicketCreateIn(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
 
 
+def _safe_attachment_url(v: str | None) -> str | None:
+    """Attachments are shown in the admin console and the customer inbox, so a
+    `javascript:`/`data:` URL would be stored-XSS. Allow only an absolute https URL
+    (our CDN) or a same-origin relative path (not protocol-relative `//host`)."""
+    if v is None:
+        return v
+    s = v.strip()
+    if s.lower().startswith("https://"):
+        return v
+    if s.startswith("/") and not s.startswith(("//", "/\\")):
+        return v
+    raise ValueError("attachment_url must be an absolute https URL or a same-origin path")
+
+
 class MessageIn(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
     attachment_url: str | None = Field(default=None, max_length=512)
+
+    _v_attach = field_validator("attachment_url")(lambda v: _safe_attachment_url(v))
 
 
 class StatusIn(BaseModel):

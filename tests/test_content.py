@@ -71,6 +71,19 @@ async def test_banner_active_window(client):
     assert "Diwali" in titles and "Old Sale" not in titles
 
 
+async def test_banner_rejects_offsite_protocol_relative_url(client):
+    """#content-7: `//evil.com` (protocol-relative) must be rejected, not stored as an
+    off-site image/redirect; `javascript:` too."""
+    h = auth(await login(client, "9999900001"))
+    for bad in ("//evil.com/x.jpg", "/\\evil.com/x.jpg", "javascript:alert(1)"):
+        r = await client.post(
+            "/api/v1/admin/content/banners",
+            json={"title": "Bad", "image_url": bad},
+            headers=h,
+        )
+        assert r.status_code == 422, bad
+
+
 async def test_sitemap_and_robots(client):
     admin = await login(client, "9999900001")
     h = auth(admin)

@@ -23,12 +23,19 @@ from app.services import content as content_svc
 
 
 def _safe_web_url(v: str | None) -> str | None:
-    """Reject javascript:/data: (stored-XSS) — allow only http(s) or a relative path."""
+    """Reject javascript:/data: (stored-XSS) and protocol-relative `//host` / `/\\host`
+    (which browsers resolve off-site → open-redirect / off-site asset). Allow only an
+    absolute http(s) URL or a same-origin relative path (single leading slash)."""
     if v is None:
         return v
-    if v.strip().lower().startswith(("http://", "https://", "/")):
+    s = v.strip()
+    low = s.lower()
+    if low.startswith(("http://", "https://")):
         return v
-    raise ValueError("URL must be http(s) or a relative path")
+    # A relative path must be same-origin: one leading slash, not `//` or `/\`.
+    if s.startswith("/") and not s.startswith(("//", "/\\")):
+        return v
+    raise ValueError("URL must be absolute http(s) or a same-origin relative path")
 
 router = APIRouter(prefix="/admin/content", tags=["content"], dependencies=[Depends(require_role("admin"))])
 public_router = APIRouter(prefix="/content", tags=["content-public"])
@@ -54,6 +61,8 @@ class ArticleIn(BaseModel):
     meta_description: str | None = Field(default=None, max_length=320)
     cover_image_url: str | None = Field(default=None, max_length=512)
 
+    _v_cover = field_validator("cover_image_url")(lambda v: _safe_web_url(v))
+
 
 class ArticleUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
@@ -65,6 +74,8 @@ class ArticleUpdate(BaseModel):
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
     cover_image_url: str | None = Field(default=None, max_length=512)
+
+    _v_cover = field_validator("cover_image_url")(lambda v: _safe_web_url(v))
 
 
 class ArticleOut(BaseModel):
