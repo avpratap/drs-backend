@@ -154,8 +154,13 @@ async def list_accounts(
 ):
     query = select(CustomerAccount, User).join(User, User.id == CustomerAccount.owner_user_id)
     if q:
-        like = f"%{q}%"
-        query = query.where((User.phone.ilike(like)) | (User.full_name.ilike(like)))
+        # Escape LIKE metacharacters so a `%`/`_` in the search is matched literally
+        # (otherwise `q=%` matches every account and forces a full scan).
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        query = query.where(
+            User.phone.ilike(like, escape="\\") | User.full_name.ilike(like, escape="\\")
+        )
     query = query.order_by(CustomerAccount.id.desc()).limit(page.limit).offset(page.offset)
     rows = (await db.execute(query)).all()
     out = []

@@ -102,6 +102,7 @@ async def demand_forecast(
 )
 async def flush_notifications(limit: int = 100, db: AsyncSession = Depends(get_db)):
     """Drain due queued notifications (also runs automatically in the ARQ worker)."""
+    limit = max(1, min(limit, 500))  # bound a manual flush so it can't load an unbounded batch
     return await notify.process_outbox(db, limit=limit)
 
 
@@ -123,6 +124,7 @@ async def resend_notification(notif_id: int, db: AsyncSession = Depends(get_db))
             status.HTTP_409_CONFLICT, "Skipped notifications can't be resent (gating applied)"
         )
     notif.status = "queued"
+    notif.attempts = 0  # reset so a notification that hit max-attempts is actually retried
     notif.next_attempt_at = None
     notif.scheduled_for = None
     notif.error = None
