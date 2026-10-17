@@ -9,6 +9,7 @@ intermittent SKUs, plus a service-level safety buffer). It implements the interf
 the separate ML service will later back with statsforecast (AutoARIMA/ETS/Croston).
 Runs on our own infra on aggregate quantities only — no PII leaves the box.
 """
+import asyncio
 import datetime as dt
 import statistics
 
@@ -132,7 +133,9 @@ async def production_plan(
     plan = []
     for pid in sorted(product_ids):
         series = [history.get(pid, {}).get(d, 0.0) for d in dates]
-        fc = forecast_variable(series)
+        # forecast_variable may invoke statsforecast (CPU-bound) when the optional lib
+        # is installed — run it off the event loop (golden rule #2).
+        fc = await asyncio.to_thread(forecast_variable, series)
         committed_qty = round(committed.get(pid, 0.0), 2)
         variable = fc["point"] + fc["safety"]
         plan.append(

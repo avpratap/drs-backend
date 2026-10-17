@@ -26,12 +26,18 @@ without the required ones (see `app/main.py`):
   doesn't receive traffic.
 
 ## Migrations on deploy (zero-downtime)
-Run migrations as a **release/pre-deploy step before** the new app version starts,
-never from app startup:
+At **multi-instance scale** (Fly.io), run migrations as a **release/pre-deploy step
+before** the new app version starts, never from each app instance's startup — otherwise
+N booting instances race `alembic upgrade head`:
 
 ```
 uv run alembic upgrade head
 ```
+
+`fly.toml` does this via `release_command`. On **Railway MVP we run a single instance**
+(`numReplicas: 1` in `railway.json`), so migrating inside `startCommand` is safe there —
+but **before scaling Railway past one instance, move the migration to a Railway
+Pre-Deploy Command** and drop it from `startCommand`, matching the Fly approach.
 
 Rules that keep this safe for rolling deploys:
 1. Migrations are **backward-compatible** (additive): new nullable columns / new

@@ -135,6 +135,12 @@ async def _notify_delivered(db: AsyncSession, ship: Shipment) -> None:
             db, "shipment.delivered", owner, {"shipment_no": ship.shipment_no},
             account_id=ship.account_id, dedupe_key=f"shipment.delivered:{ship.id}",
         )
+        # Post-delivery review prompt (marketing-gated by the notification router, so
+        # it's quiet for users without consent). One per order.
+        await notify.emit_event(
+            db, "review.request", owner, {"order_id": ship.order_id},
+            account_id=ship.account_id, dedupe_key=f"review.request:{ship.order_id}",
+        )
 
 
 async def cancel_shipment(db: AsyncSession, ship: Shipment) -> Shipment:

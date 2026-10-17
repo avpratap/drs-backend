@@ -8,13 +8,13 @@ from app.core.redis import redis_client
 router = APIRouter(tags=["health"])
 
 
-@router.get("/healthz")
+@router.get("/healthz", operation_id="healthz")
 async def healthz():
     """Liveness — the process is up."""
     return {"status": "ok"}
 
 
-@router.get("/readyz")
+@router.get("/readyz", operation_id="readyz")
 async def readyz(db: AsyncSession = Depends(get_db)):
     """Readiness — can reach Postgres + Redis."""
     checks: dict[str, str] = {}
