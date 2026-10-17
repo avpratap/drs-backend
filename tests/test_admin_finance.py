@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _subscriber_account(client, admin_h, sub_h) -> int:
@@ -23,12 +23,12 @@ async def test_admin_wallet_adjust_signed(client):
     up = await client.post(
         f"/api/v1/admin/accounts/{acct}/wallet/adjust",
         json={"amount": 250, "reason": "goodwill"},
-        headers=auth(admin),
+        headers=idem(auth(admin)),
     )
     assert up.status_code == 200
     assert round(up.json()["wallet_balance"] - before, 2) == 250.0
     # zero rejected
-    assert (await client.post(f"/api/v1/admin/accounts/{acct}/wallet/adjust", json={"amount": 0, "reason": "x"}, headers=auth(admin))).status_code == 422
+    assert (await client.post(f"/api/v1/admin/accounts/{acct}/wallet/adjust", json={"amount": 0, "reason": "x"}, headers=idem(auth(admin)))).status_code == 422
 
 
 async def test_admin_credit_settlement_reduces_outstanding(client):
@@ -52,7 +52,7 @@ async def test_admin_credit_settlement_reduces_outstanding(client):
     settle = await client.post(
         f"/api/v1/admin/accounts/{acct}/credit/settle",
         json={"amount": outstanding, "note": "NEFT recd"},
-        headers=auth(admin),
+        headers=idem(auth(admin)),
     )
     assert settle.status_code == 200
     assert round(settle.json()["credit_outstanding"], 2) == 0.0
@@ -75,4 +75,4 @@ async def test_admin_shop_management(client):
 async def test_admin_finance_requires_admin(client):
     cust = await login(client, "9876543210")
     assert (await client.get("/api/v1/admin/shops", headers=auth(cust))).status_code == 403
-    assert (await client.post("/api/v1/admin/accounts/1/credit/settle", json={"amount": 1}, headers=auth(cust))).status_code == 403
+    assert (await client.post("/api/v1/admin/accounts/1/credit/settle", json={"amount": 1}, headers=idem(auth(cust)))).status_code == 403

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import cache_delete
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.billing import CreditLedger, Wallet, WithdrawalRequest
 from app.models.coupon import Coupon
@@ -41,6 +42,7 @@ from app.schemas.management import (
     WalletAdjustIn,
 )
 from app.schemas.shop import ShopOut
+from app.services import admin_tools as audit_svc
 from app.services import billing as billing_svc
 from app.services import dpdp
 
@@ -368,33 +370,52 @@ async def list_users(
 
 
 @router.patch("/users/{user_id}", response_model=UserAdminOut, operation_id="update_user")
-async def update_user(user_id: int, data: UserPatch, db: AsyncSession = Depends(get_db)):
+async def update_user(
+    user_id: int,
+    data: UserPatch,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     patch = data.model_dump(exclude_unset=True)
+    changed: dict = {}
     if "role" in patch:
         if patch["role"] not in _VALID_ROLES:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 f"role must be one of: {', '.join(sorted(_VALID_ROLES))}",
             )
+        changed["role"] = {"from": user.role, "to": patch["role"]}
         user.role = patch["role"]
         user.token_version += 1  # force re-auth so the new role takes effect
     if "status" in patch:
+        changed["status"] = {"from": user.status, "to": patch["status"]}
         user.status = patch["status"]
         if patch["status"] == "suspended":
             user.token_version += 1  # kick existing sessions
+    if changed:
+        await audit_svc.record_audit(
+            db, actor.id, "user_update", "user", user_id, detail=changed
+        )
     await db.commit()
     await db.refresh(user)
     return user
 
 
 @router.post("/users/{user_id}/erase", operation_id="admin_erase_user", response_model=EraseResultOut)
-async def admin_erase_user(user_id: int, db: AsyncSession = Depends(get_db)):
+async def admin_erase_user(
+    user_id: int,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    # Record the audit BEFORE erasure so the actor/target are captured even though
+    # erase_user commits internally (the audit row is flushed into that same txn).
+    await audit_svc.record_audit(db, actor.id, "user_erase", "user", user_id)
     return await dpdp.erase_user(db, user)
 
 
@@ -486,9 +507,13 @@ async def admin_account_billing(account_id: int, db: AsyncSession = Depends(get_
     "/accounts/{account_id}/wallet/adjust",
     operation_id="admin_wallet_adjust",
     response_model=WalletBalanceOut,
+    dependencies=[Depends(require_idempotency_key)],
 )
 async def admin_wallet_adjust(
-    account_id: int, data: WalletAdjustIn, db: AsyncSession = Depends(get_db)
+    account_id: int,
+    data: WalletAdjustIn,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Admin wallet correction/goodwill (signed). Negative is allowed (override)."""
     if data.amount == 0:
@@ -499,6 +524,10 @@ async def admin_wallet_adjust(
         db, account_id, data.amount, f"admin_{data.reason}"[:20], "admin", None,
         allow_negative=True,
     )
+    await audit_svc.record_audit(
+        db, actor.id, "wallet_adjust", "customer_account", account_id,
+        detail={"amount": float(data.amount), "reason": data.reason},
+    )
     await db.commit()
     return {"account_id": account_id, "wallet_balance": float(wallet.balance)}
 
@@ -507,15 +536,23 @@ async def admin_wallet_adjust(
     "/accounts/{account_id}/credit/settle",
     operation_id="admin_settle_credit",
     response_model=CreditOutstandingOut,
+    dependencies=[Depends(require_idempotency_key)],
 )
 async def admin_settle_credit(
-    account_id: int, data: CreditSettleIn, db: AsyncSession = Depends(get_db)
+    account_id: int,
+    data: CreditSettleIn,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Record a payment received against a B2B postpaid account's outstanding credit."""
     if await db.get(CustomerAccount, account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     new_balance = await billing_svc.credit_entry(
         db, account_id, -data.amount, "payment", "settlement", None
+    )
+    await audit_svc.record_audit(
+        db, actor.id, "credit_settle", "customer_account", account_id,
+        detail={"amount": float(data.amount)},
     )
     await db.commit()
     return {"account_id": account_id, "credit_outstanding": new_balance}
@@ -582,6 +619,10 @@ async def approve_withdrawal(
     wd.status = "paid"
     wd.decided_by = user.id
     wd.decided_at = dt.datetime.now(dt.UTC)
+    await audit_svc.record_audit(
+        db, user.id, "withdrawal_approve", "withdrawal", wd.id,
+        detail={"account_id": wd.account_id, "amount": float(wd.amount)},
+    )
     await db.commit()
     return {"id": wd.id, "status": wd.status}
 
@@ -606,6 +647,10 @@ async def reject_withdrawal(
     wd.status = "rejected"
     wd.decided_by = user.id
     wd.decided_at = dt.datetime.now(dt.UTC)
+    await audit_svc.record_audit(
+        db, user.id, "withdrawal_reject", "withdrawal", wd.id,
+        detail={"account_id": wd.account_id, "amount": float(wd.amount)},
+    )
     await db.commit()
     return {"id": wd.id, "status": wd.status}
 

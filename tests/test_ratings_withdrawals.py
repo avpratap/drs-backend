@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def test_rate_product_upsert_and_aggregate(client):
@@ -25,7 +25,7 @@ async def test_withdrawal_request_and_admin_approval(client):
     admin = await login(client, "9999900001")
     sub = await login(client, "9999900002")
     acct = (await client.get("/api/v1/billing/me", headers=auth(sub))).json()["account_id"]
-    await client.post("/api/v1/billing/admin/topup", json={"account_id": acct, "amount": 1000}, headers=auth(admin))
+    await client.post("/api/v1/billing/admin/topup", json={"account_id": acct, "amount": 1000}, headers=idem(auth(admin)))
     bal0 = (await client.get("/api/v1/billing/me", headers=auth(sub))).json()["wallet_balance"]
 
     req = await client.post("/api/v1/billing/withdrawals", json={"amount": 400}, headers=auth(sub))
@@ -47,7 +47,7 @@ async def test_withdrawal_reject(client):
     admin = await login(client, "9999900001")
     sub = await login(client, "9999900002")
     acct = (await client.get("/api/v1/billing/me", headers=auth(sub))).json()["account_id"]
-    await client.post("/api/v1/billing/admin/topup", json={"account_id": acct, "amount": 50}, headers=auth(admin))
+    await client.post("/api/v1/billing/admin/topup", json={"account_id": acct, "amount": 50}, headers=idem(auth(admin)))
     wd_id = (await client.post("/api/v1/billing/withdrawals", json={"amount": 20}, headers=auth(sub))).json()["id"]
     rej = await client.post(f"/api/v1/admin/withdrawals/{wd_id}/reject", headers=auth(admin))
     assert rej.status_code == 200 and rej.json()["status"] == "rejected"

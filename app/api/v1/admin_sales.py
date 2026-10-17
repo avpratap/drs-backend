@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db
-from app.deps.auth import require_role
+from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
 from app.models.billing import Wallet
 from app.models.order import Order
@@ -18,6 +18,7 @@ from app.models.refund import Refund
 from app.models.shop import CustomerAccount
 from app.models.subscription import Subscription
 from app.models.user import User
+from app.services import admin_tools as audit_svc
 from app.services import billing as billing_svc
 from app.services import coupons
 
@@ -224,7 +225,11 @@ async def list_orders(
 
 
 @router.post("/orders/{order_id}/cancel", response_model=OrderAdminOut, operation_id="admin_cancel_order")
-async def cancel_order(order_id: int, db: AsyncSession = Depends(get_db)):
+async def cancel_order(
+    order_id: int,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     order = (
         await db.execute(select(Order).where(Order.id == order_id).with_for_update())
     ).scalar_one_or_none()
@@ -243,6 +248,7 @@ async def cancel_order(order_id: int, db: AsyncSession = Depends(get_db)):
         )
     order.status = "cancelled"
     await coupons.release_for_order(db, order.id)  # unburn the coupon on cancel
+    await audit_svc.record_audit(db, actor.id, "order_cancel", "order", order.id)
     await db.commit()
     await db.refresh(order)
     return order

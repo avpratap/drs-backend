@@ -1,7 +1,7 @@
 import datetime as dt
 
 import pytest
-from conftest import auth, login
+from conftest import auth, idem, login
 from sqlalchemy import select, text
 
 from app.core.db import SessionLocal
@@ -38,7 +38,7 @@ async def test_wallet_ledger_is_append_only(client):
     await client.post(
         "/api/v1/billing/admin/topup",
         json={"account_id": acct, "amount": 10},
-        headers=auth(admin),
+        headers=idem(auth(admin)),
     )
     # The DB trigger must reject any UPDATE/DELETE on the ledger.
     async with SessionLocal() as db:

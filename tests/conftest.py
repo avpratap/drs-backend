@@ -169,3 +169,11 @@ async def login(client: AsyncClient, phone: str) -> str:
 
 def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def idem(headers: dict) -> dict:
+    """Auth headers + a fresh Idempotency-Key, for endpoints that require one
+    (GRN receive, manual wallet/credit money writes)."""
+    from uuid import uuid4
+
+    return {**headers, "Idempotency-Key": uuid4().hex}

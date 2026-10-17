@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _account(client, token):
@@ -14,7 +14,7 @@ async def test_admin_topup_increases_wallet(client):
     r = await client.post(
         "/api/v1/billing/admin/topup",
         json={"account_id": acct_id, "amount": 500},
-        headers=auth(admin),
+        headers=idem(auth(admin)),
     )
     assert r.status_code == 200
     after = await _account(client, subscriber)
@@ -27,7 +27,7 @@ async def test_non_admin_topup_forbidden(client):
     r = await client.post(
         "/api/v1/billing/admin/topup",
         json={"account_id": acct_id, "amount": 10},
-        headers=auth(subscriber),
+        headers=idem(auth(subscriber)),
     )
     assert r.status_code == 403
 

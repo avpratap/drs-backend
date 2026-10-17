@@ -5,10 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
 from app.models.billing import WalletTransaction, WithdrawalRequest
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.schemas.billing import BillingSummary, TopupIn, WalletTxnOut
+from app.services import admin_tools as audit_svc
 from app.services import billing as billing_service
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -72,12 +74,18 @@ async def my_billing(user: User = Depends(get_current_user), db: AsyncSession = 
 
 @router.post(
     "/admin/topup",
-    dependencies=[Depends(require_role("admin"))],
+    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
     operation_id="wallet_topup",
     response_model=TopupOut,
 )
-async def topup(data: TopupIn, db: AsyncSession = Depends(get_db)):
+async def topup(
+    data: TopupIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
     await billing_service.wallet_adjust(db, data.account_id, data.amount, "topup", "manual", None)
+    await audit_svc.record_audit(
+        db, user.id, "wallet_topup", "customer_account", data.account_id,
+        detail={"amount": float(data.amount)},
+    )
     await db.commit()
     return {"detail": "wallet topped up", "account_id": data.account_id, "amount": data.amount}
 

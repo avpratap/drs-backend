@@ -3,7 +3,7 @@ credit notes, order cancellation guards, and input hardening.
 """
 from uuid import uuid4
 
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _pid(client, token, sku) -> int:
@@ -314,3 +314,43 @@ async def test_rma_aggregate_over_return_blocked(client):
         headers=auth(cust),
     )
     assert r2.status_code == 422
+
+
+async def test_sensitive_admin_mutations_write_audit_log(client):
+    """AD1: money/identity admin mutations leave an AdminAuditLog row naming the actor."""
+    admin = await login(client, "9999900001")
+    subscriber = await login(client, "9999900002")
+    acct = (await client.get("/api/v1/billing/me", headers=auth(subscriber))).json()["account_id"]
+    admin_id = (await client.get("/api/v1/auth/me", headers=auth(admin))).json()["id"]
+
+    # Wallet adjust (money) -> audit "wallet_adjust".
+    r = await client.post(
+        f"/api/v1/admin/accounts/{acct}/wallet/adjust",
+        json={"amount": 50, "reason": "goodwill"},
+        headers=idem(auth(admin)),
+    )
+    assert r.status_code == 200
+    logs = (
+        await client.get("/api/v1/admin/audit-log?action=wallet_adjust", headers=auth(admin))
+    ).json()
+    assert any(
+        row["admin_user_id"] == admin_id
+        and row["resource_type"] == "customer_account"
+        and row["resource_id"] == str(acct)
+        for row in logs
+    )
+
+    # User role change (identity) -> audit "user_update".
+    other = (
+        await client.get("/api/v1/admin/users?role=customer", headers=auth(admin))
+    ).json()[0]
+    r = await client.patch(
+        f"/api/v1/admin/users/{other['id']}",
+        json={"status": other["status"]},  # no-op status write still records the change
+        headers=auth(admin),
+    )
+    assert r.status_code == 200
+    logs = (
+        await client.get("/api/v1/admin/audit-log?action=user_update", headers=auth(admin))
+    ).json()
+    assert any(row["resource_id"] == str(other["id"]) for row in logs)
