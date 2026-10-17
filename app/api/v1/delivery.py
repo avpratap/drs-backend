@@ -242,27 +242,38 @@ async def delivery_summary(
     _require_delivery(user)
     for_date = date or today_ist()
     ids = await allowed_shop_ids(user, db)
-    q = select(DeliveryOrder).where(DeliveryOrder.delivery_date == for_date)
+    # Scope filter reused by both aggregates — never load the day's orders into Python.
+    scope = [DeliveryOrder.delivery_date == for_date]
     if ids is not ALL:
         if not ids:
             return SummaryOut(date=for_date, delivered=0, failed=0, pending=0, cash_collected=0)
-        q = q.where(DeliveryOrder.shop_id.in_(ids))
-    orders = (await db.execute(q)).scalars().all()
-    delivered = [o for o in orders if o.status in ("delivered", "partially_delivered")]
-    failed = sum(1 for o in orders if o.status == "failed")
-    pending = sum(1 for o in orders if o.status in ("generated", "frozen"))
-    cash = 0.0
-    if delivered:
-        cash = float(
-            await db.scalar(
-                select(func.coalesce(func.sum(CashCollection.amount_collected), 0)).where(
-                    CashCollection.delivery_order_id.in_([o.id for o in delivered])
-                )
-            )
-            or 0
+        scope.append(DeliveryOrder.shop_id.in_(ids))
+
+    status_rows = (
+        await db.execute(
+            select(DeliveryOrder.status, func.count())
+            .where(*scope)
+            .group_by(DeliveryOrder.status)
         )
+    ).all()
+    counts = {s: int(n) for s, n in status_rows}
+    delivered = counts.get("delivered", 0) + counts.get("partially_delivered", 0)
+    failed = counts.get("failed", 0)
+    pending = counts.get("generated", 0) + counts.get("frozen", 0)
+
+    # Cash collected over ALL the day's in-scope orders — a failed/partial stop that still
+    # took cash must count toward the day total (#delivery-3), not just 'delivered' ones.
+    cash = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(CashCollection.amount_collected), 0))
+            .select_from(CashCollection)
+            .join(DeliveryOrder, DeliveryOrder.id == CashCollection.delivery_order_id)
+            .where(*scope)
+        )
+        or 0
+    )
     return SummaryOut(
-        date=for_date, delivered=len(delivered), failed=failed, pending=pending, cash_collected=cash
+        date=for_date, delivered=delivered, failed=failed, pending=pending, cash_collected=cash
     )
 
 
