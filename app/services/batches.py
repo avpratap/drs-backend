@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -58,22 +59,36 @@ async def receive_batch(
         )
         .with_for_update()
     )
+    def _merge(b: StockBatch) -> None:
+        b.qty = round(float(b.qty) + qty, 3)
+        if b.mfg_date is None and mfg_date is not None:
+            b.mfg_date = mfg_date
+
     batch = (await db.execute(dup_q)).scalars().first()
     if batch is not None:
-        batch.qty = round(float(batch.qty) + qty, 3)
-        if batch.mfg_date is None and mfg_date is not None:
-            batch.mfg_date = mfg_date
+        _merge(batch)
+        await db.flush()
     else:
-        batch = StockBatch(
-            product_id=product_id,
-            location_id=location_id,
-            batch_no=batch_no,
-            mfg_date=mfg_date,
-            expiry_date=expiry_date,
-            qty=qty,
-        )
-        db.add(batch)
-    await db.flush()
+        # No existing lot: FOR UPDATE on zero rows takes no gap lock, so two concurrent
+        # first-receives both reach here. The partial unique index
+        # uq_stock_batch_active_identity (migration 0051) makes the second INSERT collide;
+        # catch it in a savepoint and merge into the row the winner committed.
+        try:
+            async with db.begin_nested():
+                batch = StockBatch(
+                    product_id=product_id,
+                    location_id=location_id,
+                    batch_no=batch_no,
+                    mfg_date=mfg_date,
+                    expiry_date=expiry_date,
+                    qty=qty,
+                )
+                db.add(batch)
+                await db.flush()
+        except IntegrityError:
+            batch = (await db.execute(dup_q)).scalars().one()
+            _merge(batch)
+            await db.flush()
     item = await _locked_item(db, product_id, location_id)
     item.qty_on_hand = round(float(item.qty_on_hand) + qty, 3)
     db.add(
