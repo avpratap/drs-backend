@@ -65,14 +65,21 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
     email owner confirms — so one can't subscribe or forge consent for someone else.
     Already-subscribed emails stay subscribed (idempotent)."""
     email = str(data.email).lower()
-    row = await db.scalar(select(NewsletterSubscriber).where(NewsletterSubscriber.email == email))
+    # Lock the existing row (if any) so a concurrent POST /newsletter/confirm serializes:
+    # otherwise this request could hold a stale 'pending' snapshot and overwrite a status
+    # the confirm just set to 'subscribed' (downgrading a just-confirmed user).
+    row = await db.scalar(
+        select(NewsletterSubscriber)
+        .where(NewsletterSubscriber.email == email)
+        .with_for_update()
+    )
     if row is not None and row.status == "subscribed":
         return StatusOut(email=email, status="subscribed")  # already confirmed
     token = secrets.token_urlsafe(24)
     if row is None:
         # Two concurrent first-subscribes for the same email would collide on
-        # UNIQUE(email). Insert in a savepoint; on collision fall through to the
-        # re-subscribe path on the row the other request committed.
+        # UNIQUE(email). Insert in a savepoint; on collision re-select UNDER LOCK and fall
+        # through to the re-subscribe path on the row the other request committed.
         try:
             async with db.begin_nested():
                 row = NewsletterSubscriber(
@@ -83,11 +90,14 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
                 await db.flush()
         except IntegrityError:
             row = await db.scalar(
-                select(NewsletterSubscriber).where(NewsletterSubscriber.email == email)
+                select(NewsletterSubscriber)
+                .where(NewsletterSubscriber.email == email)
+                .with_for_update()
             )
             if row is not None and row.status == "subscribed":
                 return StatusOut(email=email, status="subscribed")  # lost race to a confirm
-    if row.status != "pending" or row.confirm_token != token:
+    # Never downgrade a 'subscribed' row (defense-in-depth alongside the lock above).
+    if row.status != "subscribed" and (row.status != "pending" or row.confirm_token != token):
         # Re-subscribe (was pending/unsubscribed, or lost the insert race) — issue a
         # fresh confirmation so consent is always re-confirmed by the email owner.
         row.status = "pending"

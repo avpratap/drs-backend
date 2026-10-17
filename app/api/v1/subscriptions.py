@@ -93,11 +93,21 @@ async def _retail_home_shop(db: AsyncSession, user: User, data: SubscriptionCrea
                 db.add(acct)
                 await db.flush()
         except IntegrityError:
-            acct = await db.scalar(
-                select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
-            )
+            # The conflicting txn has committed its row (unique violation), so this
+            # re-select always finds it — use scalar_one (not scalar) so a surprising
+            # miss surfaces loudly instead of a later AttributeError on None.
+            acct = (
+                await db.execute(
+                    select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+                )
+            ).scalar_one()
+    # Match the D2C orders path: a retail account's single home shop is flagged is_home so
+    # a later one-time order reuses the SAME shop instead of provisioning a duplicate.
     shop = await db.scalar(
-        select(Shop).where(Shop.account_id == acct.id).order_by(Shop.id).limit(1)
+        select(Shop)
+        .where(Shop.account_id == acct.id, Shop.is_home.is_(True))
+        .order_by(Shop.id)
+        .limit(1)
     )
     if shop is None:
         shop = Shop(
@@ -106,6 +116,7 @@ async def _retail_home_shop(db: AsyncSession, user: User, data: SubscriptionCrea
             address=data.home_address,
             state=data.home_state,
             pincode=data.home_pincode,
+            is_home=True,
         )
         db.add(shop)
         await db.flush()

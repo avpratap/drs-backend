@@ -40,6 +40,10 @@ class Shop(Base, TimestampMixin):
     )
     price_tier_id: Mapped[int | None] = mapped_column(ForeignKey("price_tiers.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+    # The account's dedicated D2C delivery location, auto-provisioned at retail checkout.
+    # A flag (not the magic name "Home") so a B2B store literally named "Home" is never
+    # hijacked/clobbered by a D2C order.
+    is_home: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class DeliveryAssignment(Base, TimestampMixin):

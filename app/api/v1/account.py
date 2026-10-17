@@ -157,8 +157,16 @@ async def post_consent(
         # WhatsApp is different: the business may message the user on WhatsApp at all only
         # with an opt-in (Meta policy), so this toggle genuinely enables/disables the channel.
         prof.notify_whatsapp = granted
-    if data.purpose in ("marketing_sms", "marketing_email", "whatsapp_optin"):
-        prof.marketing_opt_in = granted
+    _MARKETING_PURPOSES = ("marketing_sms", "marketing_email", "whatsapp_optin")
+    if data.purpose in _MARKETING_PURPOSES:
+        # Derive the marketing master from ALL marketing consents (ON if ANY is granted),
+        # not last-write-wins — otherwise revoking one marketing channel would silently
+        # mute the others. The per-purpose consent still gates each channel individually.
+        consents = await svc.current_consents(db, user.id)
+        consents[data.purpose] = data.action  # reflect the action just recorded
+        prof.marketing_opt_in = any(
+            consents.get(p) == "granted" for p in _MARKETING_PURPOSES
+        )
     await db.commit()
     await db.refresh(c)
     return c

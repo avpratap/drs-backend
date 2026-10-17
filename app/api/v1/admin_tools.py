@@ -146,7 +146,11 @@ async def upsert_feature_flag(data: FeatureFlagIn, db: AsyncSession = Depends(ge
                 db.add(flag)
                 await db.flush()
         except IntegrityError:
-            flag = await db.scalar(select(FeatureFlag).where(FeatureFlag.key == data.key))
+            # Unique violation means the conflicting txn committed its row — re-select is
+            # guaranteed to find it; scalar_one so a miss fails loudly, not via refresh(None).
+            flag = (
+                await db.execute(select(FeatureFlag).where(FeatureFlag.key == data.key))
+            ).scalar_one()
     if flag is not None and (flag.enabled != data.enabled or data.description is not None):
         flag.enabled = data.enabled
         if data.description is not None:
