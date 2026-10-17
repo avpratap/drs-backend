@@ -42,15 +42,37 @@ async def receive_batch(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "expiry_date cannot be before mfg_date"
         )
     location_id = await require_location(db, location_id)
-    batch = StockBatch(
-        product_id=product_id,
-        location_id=location_id,
-        batch_no=batch_no,
-        mfg_date=mfg_date,
-        expiry_date=expiry_date,
-        qty=qty,
+    # Batch identity is (product, location, batch_no, expiry) — the SAME physical lot
+    # received twice (two GRNs, a re-stock, a transfer-in of an existing lot) must MERGE
+    # into one row, not create a duplicate that fragments FEFO and blurs lot identity (#26).
+    dup_q = (
+        select(StockBatch)
+        .where(
+            StockBatch.product_id == product_id,
+            StockBatch.location_id == location_id,
+            StockBatch.batch_no == batch_no,
+            StockBatch.status == "active",
+            StockBatch.expiry_date.is_(None)
+            if expiry_date is None
+            else StockBatch.expiry_date == expiry_date,
+        )
+        .with_for_update()
     )
-    db.add(batch)
+    batch = (await db.execute(dup_q)).scalars().first()
+    if batch is not None:
+        batch.qty = round(float(batch.qty) + qty, 3)
+        if batch.mfg_date is None and mfg_date is not None:
+            batch.mfg_date = mfg_date
+    else:
+        batch = StockBatch(
+            product_id=product_id,
+            location_id=location_id,
+            batch_no=batch_no,
+            mfg_date=mfg_date,
+            expiry_date=expiry_date,
+            qty=qty,
+        )
+        db.add(batch)
     await db.flush()
     item = await _locked_item(db, product_id, location_id)
     item.qty_on_hand = round(float(item.qty_on_hand) + qty, 3)

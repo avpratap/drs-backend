@@ -79,3 +79,20 @@ async def test_expire_batches_writeoff(client):
 async def test_batches_require_admin(client):
     cust = await login(client, "9876543210")
     assert (await client.get("/api/v1/admin/stock/batches", headers=auth(cust))).status_code == 403
+
+
+async def test_receive_same_batch_merges_not_duplicates(client):
+    """#26: re-receiving the same (product, location, batch_no, expiry) merges into one
+    lot (qty added) rather than creating a duplicate that fragments FEFO."""
+    h = auth(await login(client, "9999900001"))
+    pid = await _product(client, h, "BATCH-MERGE-1")
+    body = {"product_id": pid, "batch_no": "LOT-X", "qty": 10, "expiry_date": "2041-05-05"}
+    r1 = await client.post("/api/v1/admin/stock/batches", json=body, headers=h)
+    assert r1.status_code == 200
+    first_id = r1.json()["id"]
+    r2 = await client.post("/api/v1/admin/stock/batches", json={**body, "qty": 15}, headers=h)
+    assert r2.status_code == 200
+    # Same lot row reused, qty merged to 25; stock reflects the full 25.
+    assert r2.json()["id"] == first_id
+    assert r2.json()["qty"] == 25.0
+    assert await _stock(client, h, pid) == 25.0
