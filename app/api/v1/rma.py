@@ -25,7 +25,7 @@ class RMAItemIn(BaseModel):
 
 class RMACreateIn(BaseModel):
     order_id: int
-    items: list[RMAItemIn] = Field(min_length=1)
+    items: list[RMAItemIn] = Field(min_length=1, max_length=200)
     reason: str | None = Field(default=None, max_length=255)
 
 

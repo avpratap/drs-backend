@@ -3,6 +3,8 @@
 Admin creates shipments for one-time orders; customers track their own (IDOR-safe);
 Shiprocket posts tracking updates to the webhook. Dev-stubbed until creds are set.
 """
+import hmac
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -168,9 +170,12 @@ async def get_shipment(
 # ---------- Shiprocket tracking webhook ----------
 @router.post("/shipping/webhook", response_model=WebhookAck, operation_id="shipping_webhook")
 async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    # Shiprocket echoes a configured token in the x-api-key header.
+    # Shiprocket echoes a configured token in the x-api-key header. Compare in constant
+    # time so the token can't be recovered byte-by-byte via timing.
     if settings.SHIPROCKET_WEBHOOK_TOKEN:
-        if request.headers.get("x-api-key") != settings.SHIPROCKET_WEBHOOK_TOKEN:
+        if not hmac.compare_digest(
+            request.headers.get("x-api-key") or "", settings.SHIPROCKET_WEBHOOK_TOKEN
+        ):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook token")
     elif settings.ENV == "prod":
         # Fail closed in prod (defense in depth; the boot guard also requires the token).

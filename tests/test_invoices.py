@@ -42,12 +42,13 @@ async def test_generate_invoice_gst_split(client):
     )
     assert r.status_code == 200
     inv = r.json()
-    # ghee: 2 x 500 = 1000 taxable @ 12% intra-state -> CGST 60 + SGST 60.
-    assert inv["taxable_value"] == 1000.0
-    assert inv["cgst"] == 60.0
-    assert inv["sgst"] == 60.0
+    # Prices are GST-INCLUSIVE: ghee 2 x 500 = 1000 charged @ 12% intra-state ->
+    # taxable 1000/1.12 = 892.86, tax 107.14 split CGST 53.57 + SGST 53.57, total 1000.
+    assert inv["taxable_value"] == 892.86
+    assert inv["cgst"] == 53.57
+    assert inv["sgst"] == 53.57
     assert inv["igst"] == 0.0
-    assert inv["total"] == 1120.0
+    assert inv["total"] == 1000.0
     assert inv["is_interstate"] is False
     assert inv["invoice_no"].startswith("DRS/")
     assert inv["lines"][0]["hsn_code"] == "04059020"
@@ -62,8 +63,10 @@ async def test_interstate_invoice_uses_igst(client):
         await client.post(f"/api/v1/admin/invoices/generate?delivery_order_id={do_id}", headers=h)
     ).json()
     assert inv["is_interstate"] is True
-    assert inv["igst"] == 120.0  # 1000 @ 12%
+    assert inv["igst"] == 107.14  # GST-inclusive: 1000 - 1000/1.12
     assert inv["cgst"] == 0.0 and inv["sgst"] == 0.0
+    assert inv["taxable_value"] == 892.86
+    assert inv["total"] == 1000.0
 
 
 async def test_invoice_idempotent(client):

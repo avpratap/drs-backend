@@ -30,9 +30,17 @@ def fy_for_date(d: dt.date) -> str:
     return f"{start}-{(start + 1) % 100:02d}"
 
 
-async def _next_seq(db: AsyncSession, fy: str) -> int:
-    await db.execute(select(func.pg_advisory_xact_lock(_SEQ_LOCK_NS, int(fy[:4]))))
-    last = await db.scalar(select(func.max(Invoice.seq_no)).where(Invoice.fy == fy))
+async def _next_seq(db: AsyncSession, fy: str, is_credit_note: bool = False) -> int:
+    # Tax invoices and credit notes keep SEPARATE consecutive series (GST requires a
+    # gap-free serial per document type). Distinct lock keys so the two don't block
+    # each other, and the max() is filtered by document type.
+    key = int(fy[:4]) * 2 + (1 if is_credit_note else 0)
+    await db.execute(select(func.pg_advisory_xact_lock(_SEQ_LOCK_NS, key)))
+    last = await db.scalar(
+        select(func.max(Invoice.seq_no)).where(
+            Invoice.fy == fy, Invoice.is_credit_note.is_(is_credit_note)
+        )
+    )
     return (last or 0) + 1
 
 
@@ -62,13 +70,21 @@ async def _buyer_gstin(db: AsyncSession, account_id: int) -> str | None:
     return prof.gstin if prof else None
 
 
-def _split(taxable: float, rate: float, interstate: bool) -> tuple[float, float, float]:
-    total_tax = round(taxable * rate / 100, 2)
+def _inclusive_split(
+    charged: float, rate: float, interstate: bool
+) -> tuple[float, float, float, float]:
+    """Prices are GST-INCLUSIVE (MRP): the `charged` amount is what the customer paid.
+    Back out the taxable value and tax so taxable + all taxes == charged EXACTLY, and
+    the invoice line total equals the amount collected.
+
+    Returns (taxable_value, cgst, sgst, igst)."""
+    taxable = round(charged / (1 + rate / 100), 2)
+    total_tax = round(charged - taxable, 2)
     if interstate:
-        return 0.0, 0.0, total_tax
+        return taxable, 0.0, 0.0, total_tax
     # Halve from the single rounded total so CGST+SGST always equals it (no paisa drift).
     cgst = round(total_tax / 2, 2)
-    return cgst, round(total_tax - cgst, 2), 0.0
+    return taxable, cgst, round(total_tax - cgst, 2), 0.0
 
 
 async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:
@@ -118,9 +134,10 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
             continue
         product = await db.get(Product, it.product_id)
         rate = float(product.gst_rate) if product else 0.0
-        taxable = round(float(it.unit_price) * qty, 2)
-        c, s, i = _split(taxable, rate, interstate)
-        line_total = round(taxable + c + s + i, 2)
+        # unit_price is GST-inclusive (MRP); charged is what delivery billing collected.
+        charged = round(float(it.unit_price) * qty, 2)
+        taxable, c, s, i = _inclusive_split(charged, rate, interstate)
+        line_total = charged
         db.add(
             InvoiceLine(
                 invoice_id=inv.id,
@@ -196,21 +213,30 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
     db.add(inv)
     await db.flush()
 
-    rows = (
-        await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
-    ).scalars().all()
-    # Apportion any order-level discount across lines so taxable value matches what was
-    # actually charged (order.total is subtotal - discount).
+    rows = list(
+        (await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalars().all()
+    )
+    # Prices are GST-inclusive; order.total (subtotal - discount) is exactly what the
+    # customer paid. Apportion that charged total across lines by the discount factor,
+    # giving the LAST line the running remainder so the rounded line charges sum to
+    # order.total to the paisa (invoice.total == amount charged).
     subtotal = float(order.subtotal) or 0.0
     disc_factor = (float(order.total) / subtotal) if subtotal > 0 else 1.0
+    target = round(float(order.total), 2)
+    running = 0.0
+    n = len(rows)
     tax_val = cgst = sgst = igst = total = 0.0
-    for it in rows:
+    for idx, it in enumerate(rows):
         qty = float(it.qty)
         product = await db.get(Product, it.product_id)
         rate = float(product.gst_rate) if product else 0.0
-        taxable = round(float(it.line_total) * disc_factor, 2)
-        c, s, i = _split(taxable, rate, interstate)
-        line_total = round(taxable + c + s + i, 2)
+        if idx < n - 1:
+            charged = round(float(it.line_total) * disc_factor, 2)
+        else:
+            charged = round(target - running, 2)  # last line absorbs rounding remainder
+        running = round(running + charged, 2)
+        taxable, c, s, i = _inclusive_split(charged, rate, interstate)
+        line_total = charged
         db.add(
             InvoiceLine(
                 invoice_id=inv.id, product_id=it.product_id,
@@ -248,7 +274,7 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
         return existing
 
     fy = fy_for_date(dt.datetime.now(dt.UTC).date())
-    seq = await _next_seq(db, fy)
+    seq = await _next_seq(db, fy, is_credit_note=True)
     note = Invoice(
         invoice_no=f"{settings.INVOICE_PREFIX}/CN/{fy}/{seq:06d}",
         fy=fy,

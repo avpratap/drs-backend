@@ -26,6 +26,18 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     )
     items = {i.product_id: i for i in res.scalars().all()}
 
+    # The submission must account for EVERY planned line (qty_delivered=0 means
+    # not-delivered). Otherwise an omitted item would stay stuck 'planned' and billed
+    # ₹0 with no way to correct it (the order is terminal after this call).
+    submitted = {di.product_id for di in data.items}
+    missing = set(items.keys()) - submitted
+    if missing:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Delivery must report every planned item (use qty_delivered=0 for not "
+            f"delivered); missing product(s): {sorted(missing)}",
+        )
+
     for di in data.items:
         it = items.get(di.product_id)
         if it is None:

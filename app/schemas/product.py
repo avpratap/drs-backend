@@ -2,17 +2,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProductCreate(BaseModel):
-    sku: str
-    name: str
-    description: str | None = None
-    uom: str = "piece"
+    # Bounded to the products column widths (clean 422 instead of a DB DataError 500).
+    sku: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4096)
+    uom: str = Field(default="piece", max_length=16)
     pack_size: float = 1
     is_subscribable: bool = True
     perishable: bool = True
-    hsn_code: str | None = None
+    hsn_code: str | None = Field(default=None, max_length=16)
     gst_rate: float = 0
-    category: str | None = None
-    image_url: str | None = None
+    category: str | None = Field(default=None, max_length=64)
+    image_url: str | None = Field(default=None, max_length=512)
 
 
 class ProductUpdate(BaseModel):

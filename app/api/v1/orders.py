@@ -36,24 +36,23 @@ async def _gst_rates(db: AsyncSession, product_ids: list[int]) -> dict[int, floa
 
 
 def _apply_tax(view: OrderOut, rates: dict[int, float]) -> None:
-    """Fill indicative tax-inclusive fields (unit_price is pre-tax; GST added on top).
-
-    GST is computed on the discounted taxable value: an order-level coupon is
-    apportioned across lines by the subtotal ratio, so tax_total and total_incl_tax
-    stay consistent with the discounted `total` (these fields are indicative; the GST
-    invoice is authoritative)."""
+    """Fill the indicative GST breakdown. Prices are GST-INCLUSIVE (MRP): unit_price and
+    line_total already include tax, and total_incl_tax == the discounted `total` the
+    customer actually pays. gst_amount is the tax PORTION backed out of each line (an
+    order-level coupon is apportioned by the subtotal ratio). These fields are indicative;
+    the GST invoice is authoritative."""
     subtotal = float(view.subtotal) or 0.0
-    # Fraction of each line that remains taxable after an order-level discount.
     disc_factor = (float(view.total) / subtotal) if subtotal > 0 else 1.0
     tax_total = 0.0
     for it in view.items:
         it.gst_rate = rates.get(it.product_id, 0.0)
-        taxable = it.line_total * disc_factor
-        it.gst_amount = round(taxable * it.gst_rate / 100, 2)
-        it.price_incl_tax = round(it.unit_price * (1 + it.gst_rate / 100), 2)
+        charged = it.line_total * disc_factor  # inclusive amount for this line
+        taxable = round(charged / (1 + it.gst_rate / 100), 2)
+        it.gst_amount = round(charged - taxable, 2)  # tax already inside the price
+        it.price_incl_tax = round(it.unit_price, 2)  # price is the inclusive MRP
         tax_total += it.gst_amount
     view.tax_total = round(tax_total, 2)
-    view.total_incl_tax = round(float(view.total) + view.tax_total, 2)
+    view.total_incl_tax = round(float(view.total), 2)  # GST already inside `total`
 
 
 async def _detail(db: AsyncSession, order: Order) -> OrderOut:
@@ -209,6 +208,34 @@ async def _owned_order(db: AsyncSession, order_id: int, user: User) -> Order:
     if user.role != "admin" and order.account_id not in await _my_account_ids(db, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     return order
+
+
+@router.post("/{order_id}/cancel", response_model=OrderOut, operation_id="cancel_order")
+async def cancel_order(
+    order_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Customer cancels their own order while it's still cancellable (not yet paid or
+    dispatched). A paid order must be refunded by support instead (409)."""
+    res = await db.execute(select(Order).where(Order.id == order_id).with_for_update())
+    order = res.scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if user.role != "admin" and order.account_id not in await _my_account_ids(db, user):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if order.status == "cancelled":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Order already cancelled")
+    if order.payment_status == "paid":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Order is already paid; contact support for a refund instead of cancelling",
+        )
+    if order.status not in ("created", "pending"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Order is {order.status} and can no longer be cancelled"
+        )
+    order.status = "cancelled"
+    await db.commit()
+    return await _detail(db, order)
 
 
 @router.post("/{order_id}/invoice", response_model=InvoiceOut, operation_id="generate_order_invoice")

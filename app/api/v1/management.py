@@ -3,7 +3,7 @@ assignment, account finance, shop mgmt, coupons, users, withdrawals. All admin-g
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -318,6 +318,40 @@ async def set_account_tier(account_id: int, data: TierAssignIn, db: AsyncSession
 
 
 # ---------- User management ----------
+_VALID_ROLES = {"admin", "customer", "subscriber", "delivery"}
+
+
+class StaffUserIn(BaseModel):
+    phone: str = Field(min_length=8, max_length=16, pattern=r"^\d{8,15}$")
+    role: str = Field(default="delivery")
+    full_name: str | None = Field(default=None, max_length=255)
+
+
+@router.post("/users", response_model=UserAdminOut, operation_id="admin_create_user", status_code=201)
+async def admin_create_user(data: StaffUserIn, db: AsyncSession = Depends(get_db)):
+    """Provision a staff account (delivery/admin/subscriber) by phone. Customers still
+    self-register via OTP; this is how drivers/staff get onboarded. The account is
+    phone-verified so the user can log in with an OTP immediately."""
+    if data.role not in _VALID_ROLES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"role must be one of: {', '.join(sorted(_VALID_ROLES))}",
+        )
+    if await db.scalar(select(User).where(User.phone == data.phone)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A user with this phone already exists")
+    user = User(
+        phone=data.phone,
+        role=data.role,
+        full_name=data.full_name,
+        status="active",
+        phone_verified=True,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 @router.get("/users", response_model=list[UserAdminOut], operation_id="list_users")
 async def list_users(
     role: str | None = None,
@@ -340,6 +374,11 @@ async def update_user(user_id: int, data: UserPatch, db: AsyncSession = Depends(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     patch = data.model_dump(exclude_unset=True)
     if "role" in patch:
+        if patch["role"] not in _VALID_ROLES:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"role must be one of: {', '.join(sorted(_VALID_ROLES))}",
+            )
         user.role = patch["role"]
         user.token_version += 1  # force re-auth so the new role takes effect
     if "status" in patch:

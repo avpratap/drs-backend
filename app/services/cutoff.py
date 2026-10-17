@@ -10,11 +10,14 @@ Per order we take a row lock and refuse to clobber anything already past
 """
 import datetime as dt
 import logging
+import secrets
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.redis import redis_client
+from app.models.billing import Wallet
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.shop import CustomerAccount, Shop
 from app.models.subscription import Subscription
@@ -23,8 +26,11 @@ from app.services import notifications as notify
 from app.services.pricing import PriceBook, load_price_book
 from app.services.subscription import compute_plan
 
-_LOCK_NS = 424242
 CHUNK = 200
+# Redis lock TTL. A real cutoff finishes in well under this; the key auto-expires so a
+# crashed run can never deadlock a date forever (a pg session-advisory lock could not be
+# held reliably across the per-chunk commits / connection-pool churn).
+_LOCK_TTL = 3600
 
 log = logging.getLogger("drs.cutoff")
 
@@ -37,6 +43,7 @@ class _Ctx:
     shops: dict[int, Shop]
     accounts: dict[int, CustomerAccount]
     owners: dict[int, User | None]  # keyed by account_id
+    wallets: dict[int, float]  # account_id -> current wallet balance (for prepaid gate)
     book: PriceBook
 
 
@@ -74,7 +81,22 @@ async def _load_ctx(db: AsyncSession) -> _Ctx:
         else {}
     )
     owners = {a.id: users.get(a.owner_user_id) for a in accounts.values()}
-    return _Ctx(shops, accounts, owners, await load_price_book(db))
+    # Preload wallet balances for the retail prepaid accounts so the funds gate below
+    # does no per-subscription lookup (keeps the cutoff N+1-free).
+    prepaid_ids = {
+        a.id
+        for a in accounts.values()
+        if a.account_type == "retail" and a.billing_mode == "prepaid_wallet"
+    }
+    wallets: dict[int, float] = {}
+    if prepaid_ids:
+        wrows = (
+            await db.execute(
+                select(Wallet.account_id, Wallet.balance).where(Wallet.account_id.in_(prepaid_ids))
+            )
+        ).all()
+        wallets = {aid: float(bal) for aid, bal in wrows}
+    return _Ctx(shops, accounts, owners, wallets, await load_price_book(db))
 
 
 async def _materialize_one(
@@ -83,6 +105,29 @@ async def _materialize_one(
     lines = await compute_plan(db, sub, delivery_date)
     if not lines:
         return False
+
+    shop = ctx.shops.get(sub.shop_id)
+    account = ctx.accounts.get(sub.account_id)
+    tier_id = ctx.book.tier_for(shop, account) if shop is not None else None
+
+    # Price the plan first (so the prepaid funds gate can run before we touch the order).
+    priced: list[tuple[int, float, float, float]] = []  # (product_id, qty, unit_price, line_total)
+    subtotal = 0.0
+    for line in lines:
+        unit_price = ctx.book.unit_price(line["product_id"], tier_id, line["qty"])
+        if unit_price is None:
+            # Misconfiguration: a subscribed product has no price for this tier. Skip the
+            # line (never materialize a silent ₹0 charge) and log loudly for ops.
+            log.warning(
+                "cutoff: no price for product %s (tier %s) on sub %s — line skipped",
+                line["product_id"], tier_id, sub.id,
+            )
+            continue
+        line_total = round(unit_price * line["qty"], 2)
+        subtotal += line_total
+        priced.append((line["product_id"], line["qty"], unit_price, line_total))
+    if not priced:
+        return False  # nothing priced -> nothing to deliver
 
     res = await db.execute(
         select(DeliveryOrder)
@@ -95,6 +140,35 @@ async def _materialize_one(
     order = res.scalar_one_or_none()
     if order is not None and order.status not in ("generated", "frozen"):
         return False  # never clobber assigned/dispatched/delivered
+
+    # Retail prepaid funds gate: never deliver a prepaid retail account into the negative.
+    # If the wallet can't cover tomorrow's order, skip it, drop any stale pending order
+    # from a prior run, and nudge the customer to top up.
+    if (
+        account is not None
+        and account.account_type == "retail"
+        and account.billing_mode == "prepaid_wallet"
+        and ctx.wallets.get(sub.account_id, 0.0) < subtotal
+    ):
+        if order is not None:
+            await db.execute(
+                delete(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
+            )
+            await db.delete(order)
+        owner = ctx.owners.get(sub.account_id)
+        if owner is not None:
+            await notify.emit_event(
+                db, "wallet.low", owner,
+                {"balance": round(ctx.wallets.get(sub.account_id, 0.0), 2), "needed": subtotal},
+                account_id=sub.account_id,
+                dedupe_key=f"cutoff.skipped_lowbalance:{sub.id}:{delivery_date}",
+            )
+        log.info(
+            "cutoff: sub %s skipped — prepaid wallet %.2f < order %.2f",
+            sub.id, ctx.wallets.get(sub.account_id, 0.0), subtotal,
+        )
+        return False
+
     if order is None:
         order = DeliveryOrder(
             delivery_date=delivery_date,
@@ -113,27 +187,12 @@ async def _materialize_one(
             delete(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
         )
 
-    shop = ctx.shops.get(sub.shop_id)
-    account = ctx.accounts.get(sub.account_id)
-    tier_id = ctx.book.tier_for(shop, account) if shop is not None else None
-    subtotal = 0.0
-    for line in lines:
-        unit_price = ctx.book.unit_price(line["product_id"], tier_id, line["qty"])
-        if unit_price is None:
-            # Misconfiguration: a subscribed product has no price for this tier. Skip the
-            # line (never materialize a silent ₹0 charge) and log loudly for ops.
-            log.warning(
-                "cutoff: no price for product %s (tier %s) on sub %s — line skipped",
-                line["product_id"], tier_id, sub.id,
-            )
-            continue
-        line_total = round(unit_price * line["qty"], 2)
-        subtotal += line_total
+    for product_id, qty, unit_price, line_total in priced:
         db.add(
             DeliveryOrderItem(
                 delivery_order_id=order.id,
-                product_id=line["product_id"],
-                qty_planned=line["qty"],
+                product_id=product_id,
+                qty_planned=qty,
                 unit_price=unit_price,
                 line_total=line_total,
                 status="planned",
@@ -159,9 +218,19 @@ async def _materialize_one(
 
 
 async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
-    lock_key = int(delivery_date.strftime("%Y%m%d"))
-    got = await db.scalar(select(func.pg_try_advisory_lock(_LOCK_NS, lock_key)))
-    if not got:
+    # Redis lock keyed by the delivery date. Unlike a pg advisory lock, it survives the
+    # per-chunk commits and connection-pool churn below. Fail-open if Redis is down — the
+    # cutoff is critical and UNIQUE(shop_id, delivery_date) + row locks already prevent
+    # data corruption from a concurrent run; the lock only avoids duplicated work.
+    lock_key = f"cutoff:lock:{delivery_date.isoformat()}"
+    token = secrets.token_hex(8)
+    lock_acquired: bool | None = None
+    try:
+        lock_acquired = bool(await redis_client.set(lock_key, token, nx=True, ex=_LOCK_TTL))
+    except Exception:
+        log.warning("cutoff: redis lock unavailable for %s, proceeding without it", delivery_date)
+        lock_acquired = None
+    if lock_acquired is False:
         return {
             "schedule_run_id": None,
             "delivery_date": delivery_date,
@@ -226,11 +295,16 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
                 await db.rollback()
         raise
     finally:
-        # Clear any aborted-transaction state before releasing the advisory lock, so the
-        # unlock itself can't raise PendingRollbackError and leak the session lock.
+        # Clear any aborted-transaction state before touching the DB again.
         try:
             await db.rollback()
         except Exception:
             pass
-        await db.execute(select(func.pg_advisory_unlock(_LOCK_NS, lock_key)))
-        await db.commit()
+        # Release the Redis lock only if we still own it (compare token so we never
+        # delete a lock a later run acquired after ours expired).
+        if lock_acquired:
+            try:
+                if await redis_client.get(lock_key) == token:
+                    await redis_client.delete(lock_key)
+            except Exception:
+                pass

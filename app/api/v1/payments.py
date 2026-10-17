@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.models.invoice import Invoice
 from app.models.order import Order
 from app.models.payment import Payment
 from app.models.refund import Refund, WebhookEvent
@@ -17,6 +18,7 @@ from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.schemas.payment import PaymentCreate, PaymentCreateOut, PaymentVerify, RefundIn
 from app.services import billing as billing_service
+from app.services import invoicing
 from app.services import notifications as notify
 from app.services import payments as pay_service
 
@@ -285,28 +287,41 @@ async def refund_payment(
     # than rolling back the record of money that already left the gateway.
     try:
         if payment.payment_type == "wallet_topup":
-            # Reverse the top-up: pull the money back out of the wallet.
+            # Reverse the top-up: pull the money back out of the wallet (the gateway
+            # refund above already returned it to the customer's card/UPI).
             wallet = await billing_service.wallet_adjust(
                 db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
                 allow_negative=True,
             )
-        else:  # order_payment -> store credit back to the wallet
-            wallet = await billing_service.wallet_adjust(
-                db, payment.account_id, amount, "refund", "refund", refund.id
-            )
+            balance = float(wallet.balance)
+        else:
+            # order_payment -> refunded TO SOURCE (card/UPI) by the gateway refund above.
+            # Do NOT also credit the wallet (that was a double-refund). Mark the order and,
+            # once it's fully refunded, issue the GST credit note against its invoice.
+            wallet = await billing_service.get_or_create_wallet(db, payment.account_id)
+            balance = float(wallet.balance)
             if payment.ref_id:
                 order = await db.get(Order, payment.ref_id)
                 if order is not None:
-                    order.payment_status = (
-                        "refunded" if already + amount >= float(payment.amount)
-                        else "partially_refunded"
-                    )
+                    fully = already + amount >= float(payment.amount)
+                    order.payment_status = "refunded" if fully else "partially_refunded"
+                    if fully:
+                        inv = await db.scalar(
+                            select(Invoice).where(
+                                Invoice.order_id == order.id,
+                                Invoice.is_credit_note.is_(False),
+                            )
+                        )
+                        if inv is not None:
+                            await invoicing.generate_credit_note(
+                                db, inv, reason=f"Refund for order {order.order_no}"
+                            )
         # Tell the customer their refund landed (idempotent per refund; emit is isolated).
         owner = await _owner_user(db, payment.account_id)
         if owner is not None:
             await notify.emit_event(
                 db, "payment.refunded", owner,
-                {"amount": amount, "balance": float(wallet.balance)},
+                {"amount": amount, "balance": balance},
                 account_id=payment.account_id, dedupe_key=f"payment.refunded:{refund.id}",
             )
         await db.commit()

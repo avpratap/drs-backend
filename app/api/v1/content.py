@@ -26,14 +26,20 @@ public_root_router = APIRouter(tags=["seo"])
 
 
 # ---------- Schemas ----------
+# body_html is admin-authored CMS HTML served via the PUBLIC /content router. It is NOT
+# sanitized server-side (that would strip legitimate markup); the web frontend MUST render
+# it through an HTML sanitizer / strict CSP. Bounded here as defense-in-depth.
+_BODY_MAX = 100_000
+
+
 class ArticleIn(BaseModel):
     slug: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     title: str = Field(min_length=1, max_length=255)
-    body_html: str = Field(min_length=1)
+    body_html: str = Field(min_length=1, max_length=_BODY_MAX)
     excerpt: str | None = Field(default=None, max_length=500)
     author_name: str | None = Field(default=None, max_length=120)
     category: str | None = Field(default=None, max_length=64)
-    tags: list[str] | None = None
+    tags: list[str] | None = Field(default=None, max_length=30)
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
     cover_image_url: str | None = Field(default=None, max_length=512)
@@ -41,11 +47,11 @@ class ArticleIn(BaseModel):
 
 class ArticleUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
-    body_html: str | None = None
+    body_html: str | None = Field(default=None, max_length=_BODY_MAX)
     excerpt: str | None = Field(default=None, max_length=500)
     author_name: str | None = Field(default=None, max_length=120)
     category: str | None = Field(default=None, max_length=64)
-    tags: list[str] | None = None
+    tags: list[str] | None = Field(default=None, max_length=30)
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
     cover_image_url: str | None = Field(default=None, max_length=512)
@@ -71,14 +77,14 @@ class ArticleOut(BaseModel):
 class PageIn(BaseModel):
     slug: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     title: str = Field(min_length=1, max_length=255)
-    body_html: str = Field(min_length=1)
+    body_html: str = Field(min_length=1, max_length=_BODY_MAX)
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
 
 
 class PageUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
-    body_html: str | None = None
+    body_html: str | None = Field(default=None, max_length=_BODY_MAX)
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
 

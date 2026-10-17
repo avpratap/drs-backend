@@ -7,8 +7,8 @@ class OrderItemIn(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    items: list[OrderItemIn]
-    address: str | None = None
+    items: list[OrderItemIn] = Field(min_length=1, max_length=100)
+    address: str | None = Field(default=None, max_length=1024)
     coupon_code: str | None = Field(default=None, max_length=32)
 
 
@@ -18,8 +18,9 @@ class OrderItemOut(BaseModel):
     qty: float
     unit_price: float
     line_total: float
-    # Tax-inclusive display (unit_price is pre-tax; GST added on top). Indicative —
-    # the legal GST invoice is computed separately in invoicing.py.
+    # GST breakdown for display. Prices are GST-INCLUSIVE: price_incl_tax == unit_price
+    # and gst_amount is the tax portion backed out of the line. Indicative — the legal
+    # GST invoice is computed separately in invoicing.py.
     gst_rate: float = 0
     gst_amount: float = 0
     price_incl_tax: float = 0

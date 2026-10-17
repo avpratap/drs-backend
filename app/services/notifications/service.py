@@ -202,24 +202,36 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
 async def process_outbox(db: AsyncSession, *, limit: int = 100) -> dict:
     """Drain due queued notifications (worker poller + admin flush endpoint)."""
     now = dt.datetime.now(dt.UTC)
-    res = await db.execute(
-        select(Notification)
-        .where(
-            Notification.status == "queued",
-            or_(Notification.scheduled_for.is_(None), Notification.scheduled_for <= now),
-            or_(Notification.next_attempt_at.is_(None), Notification.next_attempt_at <= now),
+    # Pick candidate ids WITHOUT holding locks across the whole drain (a batch-wide
+    # FOR UPDATE would be released by the first per-row commit, opening a double-send
+    # window for an overlapping drain). Each row is then re-locked individually below.
+    ids = (
+        await db.execute(
+            select(Notification.id)
+            .where(
+                Notification.status == "queued",
+                or_(Notification.scheduled_for.is_(None), Notification.scheduled_for <= now),
+                or_(Notification.next_attempt_at.is_(None), Notification.next_attempt_at <= now),
+            )
+            .order_by(Notification.id)
+            .limit(limit)
         )
-        .order_by(Notification.id)
-        .limit(limit)
-        .with_for_update(skip_locked=True)
-    )
-    batch = res.scalars().all()
-    sent = failed = 0
-    # Commit per row so one raising/bad row can't roll back already-sent rows or wedge
-    # the queue (re-sending good ones every drain). Senders are fail-soft, but a logical
-    # or DB error on one row must not poison the batch.
-    for notif in batch:
-        nid = notif.id
+    ).scalars().all()
+    sent = failed = processed = 0
+    for nid in ids:
+        # Re-lock this one row for the duration of its own send+commit. skip_locked means
+        # a concurrent drain won't also grab it; the status re-check catches a row another
+        # worker already sent between our candidate scan and this lock.
+        notif = (
+            await db.execute(
+                select(Notification)
+                .where(Notification.id == nid, Notification.status == "queued")
+                .with_for_update(skip_locked=True)
+            )
+        ).scalar_one_or_none()
+        if notif is None:
+            continue
+        processed += 1
         try:
             ok = await deliver_notification(db, notif)
             await db.commit()
@@ -237,4 +249,4 @@ async def process_outbox(db: AsyncSession, *, limit: int = 100) -> dict:
                     await db.commit()
             except Exception:
                 await db.rollback()
-    return {"processed": len(batch), "sent": sent, "failed": failed}
+    return {"processed": processed, "sent": sent, "failed": failed}

@@ -1,4 +1,5 @@
 """Render a GST tax invoice to a PDF and store it; cache the URL on the invoice."""
+import asyncio
 from io import BytesIO
 
 from reportlab.lib.pagesizes import A4
@@ -79,9 +80,11 @@ async def get_or_create_pdf(db: AsyncSession, invoice: Invoice) -> str:
     lines = (
         await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
     ).scalars().all()
-    pdf = _render(invoice, list(lines))
+    # reportlab render is CPU-bound and the upload does blocking I/O — run both off the
+    # event loop so a PDF request can't stall every other coroutine.
+    pdf = await asyncio.to_thread(_render, invoice, list(lines))
     key = f"invoices/{invoice.fy}/{invoice.invoice_no.replace('/', '_')}.pdf"
-    url = put_object(key, pdf, "application/pdf")
+    url = await asyncio.to_thread(put_object, key, pdf, "application/pdf")
     invoice.pdf_url = url
     await db.commit()
     return url

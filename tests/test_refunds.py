@@ -88,7 +88,8 @@ async def test_order_payment_refund_marks_order(client):
     r = await client.post(f"/api/v1/payments/{pid}/refund", json={}, headers=auth(admin))
     assert r.status_code == 200
     assert r.json()["amount"] == 54.0
-    # Order-payment refund returns store credit to the wallet.
-    assert round(await _wallet(client, cust) - before, 2) == 54.0
+    # Order-payment refund goes BACK TO SOURCE (card/UPI) via the gateway — the wallet
+    # is NOT credited (crediting it too was the double-refund bug).
+    assert round(await _wallet(client, cust) - before, 2) == 0.0
     o = (await client.get(f"/api/v1/orders/{order['id']}", headers=auth(cust))).json()
     assert o["payment_status"] == "refunded"

@@ -148,6 +148,21 @@ async def my_gift_cards(user: User = Depends(get_current_user), db: AsyncSession
     return rows
 
 
+@router.get(
+    "/loyalty/gift-cards/{code}/balance",
+    response_model=GiftCardOut,
+    operation_id="gift_card_balance",
+)
+async def gift_card_balance(
+    code: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Check a gift card's remaining balance/status by its code (before redeeming)."""
+    gc = await db.scalar(select(GiftCard).where(GiftCard.code == code))
+    if gc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
+    return gc
+
+
 @router.post("/loyalty/gift-cards/redeem", response_model=GiftCardOut, operation_id="redeem_gift_card")
 async def redeem_gift_card(
     data: RedeemGiftIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)

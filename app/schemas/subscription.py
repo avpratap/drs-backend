@@ -1,6 +1,6 @@
 import datetime as dt
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SubscriptionCreate(BaseModel):
@@ -18,7 +18,21 @@ class ItemIn(BaseModel):
     default_qty: float = Field(ge=0, le=100_000, allow_inf_nan=False)
     frequency: str = "daily"  # daily | alternate | weekly
     interval_days: int | None = Field(default=None, ge=1, le=365)
-    days_of_week: str | None = None  # csv "1,3,5" (Mon=1)
+    # csv of ISO weekdays, Mon=1..Sun=7, e.g. "1,3,5". Bounded + format-checked below.
+    days_of_week: str | None = Field(default=None, max_length=32, pattern=r"^[1-7](,[1-7])*$")
+
+    @model_validator(mode="after")
+    def _check_cadence(self) -> "ItemIn":
+        # Reject cadences that the cutoff would otherwise mis-handle: an unknown frequency
+        # or a weekly line with no days silently materializes EVERY day (over-billing);
+        # a malformed days string would drop the subscription from every cutoff.
+        if self.frequency not in ("daily", "alternate", "weekly"):
+            raise ValueError("frequency must be one of: daily, alternate, weekly")
+        if self.frequency == "weekly" and not self.days_of_week:
+            raise ValueError("weekly frequency requires days_of_week (e.g. '1,3,5')")
+        if self.frequency == "alternate" and self.interval_days is None:
+            raise ValueError("alternate frequency requires interval_days")
+        return self
 
 
 class ItemOut(ItemIn):
@@ -45,7 +59,7 @@ class OverrideIn(BaseModel):
     product_id: int
     for_date: dt.date
     override_qty: float = Field(ge=0, le=100_000, allow_inf_nan=False)  # 0 = skip
-    note: str | None = None
+    note: str | None = Field(default=None, max_length=255)  # bounded to the column width
 
 
 class PlanLine(BaseModel):

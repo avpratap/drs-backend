@@ -56,7 +56,10 @@ async def lifespan(_app: FastAPI):
 # Hide API docs in prod (don't advertise the surface publicly).
 _docs = None if settings.ENV == "prod" else "/docs"
 app = FastAPI(
-    title="DRS API", version="0.1.0", docs_url=_docs, redoc_url=None, lifespan=lifespan
+    title="DRS API", version="0.1.0", docs_url=_docs, redoc_url=None, lifespan=lifespan,
+    # Relative server so generated Dart/TS clients resolve against the host they're
+    # pointed at (each client still sets its own baseURL) instead of defaulting to localhost.
+    servers=[{"url": "/", "description": "same origin"}],
 )
 
 app.add_middleware(
@@ -69,6 +72,29 @@ app.add_middleware(
 app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(RateLimitMiddleware)  # reject abusive IPs before heavy work
 app.add_middleware(RequestContextMiddleware)  # outermost: times & tags every request
+
+
+# Hard cap on request body size (defense against a single huge-body DoS). Generous
+# enough for the 5 MB image uploads + multipart framing; blocks multi-hundred-MB bodies.
+_MAX_BODY_BYTES = 8 * 1024 * 1024
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            if int(cl) > _MAX_BODY_BYTES:
+                return JSONResponse(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    content={"detail": "Request body too large", "error_code": "payload_too_large"},
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Invalid Content-Length", "error_code": "bad_request"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -86,14 +112,20 @@ async def security_headers(request: Request, call_next):
 
 
 def _sanitize(obj):
-    """Coerce non-finite floats (inf/nan) so the 422 body is JSON-serializable."""
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return str(obj)
+    """Coerce a validation-error payload so the 422 body is always JSON-serializable:
+    non-finite floats (inf/nan) and any non-JSON-native value (e.g. the original
+    ValueError a model_validator raised, carried in the error `ctx`) become strings."""
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else str(obj)
     if isinstance(obj, dict):
         return {k: _sanitize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_sanitize(v) for v in obj]
-    return obj
+    if isinstance(obj, (str, int)) or obj is None:
+        return obj
+    return str(obj)
 
 
 def _error_code(status_code: int) -> str:
@@ -155,6 +187,6 @@ if not _storage_enabled():
         return FileResponse(path)
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def root():
     return {"app": "DRS API", "env": settings.ENV, "docs": "/docs"}

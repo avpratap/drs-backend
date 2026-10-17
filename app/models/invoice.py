@@ -27,7 +27,9 @@ class Invoice(Base):
     __tablename__ = "invoices"
     __table_args__ = (
         UniqueConstraint("invoice_no", name="uq_invoice_no"),
-        UniqueConstraint("fy", "seq_no", name="uq_invoice_fy_seq"),
+        # Tax invoices and credit notes keep SEPARATE consecutive per-FY series, so
+        # seq_no is unique per (fy, document-type), not globally per fy.
+        UniqueConstraint("fy", "seq_no", "is_credit_note", name="uq_invoice_fy_seq_type"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)

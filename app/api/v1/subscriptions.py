@@ -134,6 +134,13 @@ async def create_subscription(
         )
         await db.commit()
         await db.refresh(sub)
+    elif sub.status == "cancelled":
+        # Re-subscribing to a shop whose subscription was cancelled reactivates it
+        # (rather than silently returning the stale 'cancelled' template).
+        sub.status = "active"
+        sub.start_date = sub_service.today_ist()
+        await db.commit()
+        await db.refresh(sub)
     return sub
 
 
@@ -169,6 +176,10 @@ async def set_items(
     db: AsyncSession = Depends(get_db),
 ):
     """Replace the standing-order lines (upsert by product; drop missing ones)."""
+    if len(items) > 200:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Too many items (max 200)"
+        )
     sub = await _sub_or_404(user, db, sub_id)
     res = await db.execute(
         select(SubscriptionItem).where(SubscriptionItem.subscription_id == sub.id)

@@ -36,7 +36,7 @@ async def test_customer_cannot_deliver(client):
     cust = await login(client, "9876543210")
     r = await client.post(
         "/api/v1/delivery/orders/1/deliver",
-        json={"items": [], "returns": []},
+        json={"items": [{"product_id": 1, "qty_delivered": 0}], "returns": []},
         headers=auth(cust),
     )
     assert r.status_code == 403
@@ -46,7 +46,7 @@ async def test_delivery_unknown_order_404(client):
     delivery = await login(client, "9999900003")
     r = await client.post(
         "/api/v1/delivery/orders/999999/deliver",
-        json={"items": [], "returns": []},
+        json={"items": [{"product_id": 1, "qty_delivered": 0}], "returns": []},
         headers=auth(delivery),
     )
     assert r.status_code == 404

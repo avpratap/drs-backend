@@ -1,10 +1,14 @@
 """Admin tooling services: audit trail, feature flags, outbound webhooks, CSV exports."""
+import asyncio
 import csv
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import logging
+import socket
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +66,34 @@ async def enqueue_outbound(db: AsyncSession, event_type: str, payload: dict) -> 
     return len(hooks)
 
 
+def _is_public_url(url: str) -> bool:
+    """SSRF guard: only http(s), and every resolved IP must be public. Blocks loopback,
+    private, link-local (incl. the 169.254.169.254 cloud-metadata endpoint), reserved,
+    multicast and unspecified addresses. Best-effort (DNS is resolved once here)."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        infos = socket.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
+    except Exception:
+        return False
+    for *_, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return False
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+            or ip.is_multicast or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
 async def _attempt_delivery(hook: OutboundWebhook, delivery: OutboundWebhookDelivery, payload: dict) -> None:
     delivery.attempts += 1
     body = json.dumps(payload, default=str).encode()
@@ -69,6 +101,12 @@ async def _attempt_delivery(hook: OutboundWebhook, delivery: OutboundWebhookDeli
     if not hook.url or hook.url.startswith(("http://localhost", "https://localhost", "http://dev", "https://dev")):
         delivery.status = "sent"
         delivery.response_code = 200
+        return
+    # SSRF guard: never let an admin-configured URL reach an internal/metadata address.
+    if not await asyncio.to_thread(_is_public_url, hook.url):
+        log.warning("outbound webhook blocked (non-public host): %s", hook.url)
+        delivery.status = "failed"
+        delivery.response_code = 0
         return
     try:
         import httpx

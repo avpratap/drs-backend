@@ -76,8 +76,9 @@ async def test_tax_inclusive_display(client):
     order = (await client.post("/api/v1/orders", json={"items": [{"product_id": pid, "qty": 2}]}, headers=h)).json()
     item = next(i for i in order["items"] if i["product_id"] == pid)
     assert item["gst_rate"] == 12.0
-    # line_total 1000 -> gst 120; unit 500 -> incl 560
-    assert item["gst_amount"] == 120.0
-    assert item["price_incl_tax"] == 560.0
-    assert order["tax_total"] == 120.0
-    assert order["total_incl_tax"] == round(order["total"] + 120.0, 2)
+    # Prices are GST-INCLUSIVE: charged 1000 -> taxable 1000/1.12=892.86, tax 107.14;
+    # price_incl_tax == unit_price (500); total_incl_tax == total (GST already inside).
+    assert item["gst_amount"] == 107.14
+    assert item["price_incl_tax"] == 500.0
+    assert order["tax_total"] == 107.14
+    assert order["total_incl_tax"] == round(order["total"], 2)

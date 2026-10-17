@@ -67,7 +67,7 @@ class ReturnIn(BaseModel):
 
 
 class DeliverRequest(BaseModel):
-    items: list[DeliverItem] = Field(max_length=200)
+    items: list[DeliverItem] = Field(min_length=1, max_length=200)
     pod: PODIn | None = None
     returns: list[ReturnIn] = Field(default=[], max_length=200)
     cash_collected: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)

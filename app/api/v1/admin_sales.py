@@ -232,6 +232,13 @@ async def cancel_order(order_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status.HTTP_409_CONFLICT, "Order already cancelled")
     if order.payment_status in ("refunded", "partially_refunded"):
         raise HTTPException(status.HTTP_409_CONFLICT, "Refunded order cannot be cancelled")
+    if order.payment_status == "paid":
+        # Never cancel a paid order silently (money would be kept). Refund it first via
+        # POST /payments/{id}/refund — that reverses the charge and issues a credit note.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Order is paid; refund the payment before cancelling",
+        )
     order.status = "cancelled"
     await db.commit()
     await db.refresh(order)
