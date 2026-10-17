@@ -44,18 +44,29 @@ async def create_request(db: AsyncSession, user, order: Order, items, reason) ->
         )
     ).all()
     already = {pid: float(q or 0) for pid, q in already_rows}
+    # Aggregate the requested qty PER product across this request's lines first, so two
+    # lines for the same product can't each pass the per-line check (single-request
+    # over-return). Validate the per-product TOTAL against what remains.
+    requested: dict[int, float] = {}
     for it in items:
-        if it.product_id not in ordered:
+        if float(it.qty) <= 0:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Product {it.product_id} is not on order {order.order_no}",
+                f"Return qty for product {it.product_id} must be > 0",
             )
-        remaining = round(ordered[it.product_id] - already.get(it.product_id, 0.0), 3)
-        if float(it.qty) <= 0 or float(it.qty) > remaining:
+        requested[it.product_id] = requested.get(it.product_id, 0.0) + float(it.qty)
+    for pid, req_qty in requested.items():
+        if pid not in ordered:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Return qty for product {it.product_id} must be in (0, {remaining}] "
-                f"(already returned: {already.get(it.product_id, 0.0)})",
+                f"Product {pid} is not on order {order.order_no}",
+            )
+        remaining = round(ordered[pid] - already.get(pid, 0.0), 3)
+        if req_qty > remaining:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Return qty for product {pid} ({req_qty}) exceeds remaining {remaining} "
+                f"(already returned: {already.get(pid, 0.0)})",
             )
     rr = ReturnRequest(
         rma_no="PENDING",
@@ -145,8 +156,10 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
                 )
             ).scalars().all()
         }
+        # Prorate the credit note to the amount actually refunded (goodwill partials
+        # must not over-reverse output GST).
         await invoicing.generate_credit_note_for_lines(
-            db, inv, returned, reason=f"Return {rr.rma_no}"
+            db, inv, returned, reason=f"Return {rr.rma_no}", amount=round(float(amount), 2)
         )
     return rr
 

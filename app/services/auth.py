@@ -21,9 +21,13 @@ async def get_or_create_user(db: AsyncSession, phone: str) -> User:
     user = result.scalar_one_or_none()
     if user is None:
         user = User(phone=phone, phone_verified=True, role=UserRole.customer.value)
-        db.add(user)
         try:
-            async with db.begin_nested():  # savepoint: concurrent first-login race
+            # add() MUST be inside the savepoint: on a concurrent-first-login unique
+            # violation the flush fails, the SAVEPOINT rolls back and the pending object
+            # is expunged, leaving the outer transaction usable for the re-select below.
+            # (With add() outside, the rollback can't recover → PendingRollbackError 500.)
+            async with db.begin_nested():
+                db.add(user)
                 await db.flush()
         except IntegrityError:
             # Another concurrent verify created this phone — use the committed row.

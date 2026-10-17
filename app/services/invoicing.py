@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
+from app.models.fulfillment import Return
 from app.models.invoice import Invoice, InvoiceLine
 from app.models.order import Order, OrderItem
 from app.models.product import Product
@@ -132,10 +133,20 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
             select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
         )
     ).scalars().all()
+    # Net out door returns per product so the invoice bills the NET delivered quantity
+    # (== what delivery billing charged), not the gross delivered.
+    returned_rows = (
+        await db.execute(
+            select(Return.product_id, func.sum(Return.qty_returned))
+            .where(Return.delivery_order_id == order.id)
+            .group_by(Return.product_id)
+        )
+    ).all()
+    returned = {pid: float(q or 0) for pid, q in returned_rows}
 
     tax_val = cgst = sgst = igst = total = 0.0
     for it in rows:
-        qty = float(it.qty_delivered or 0)
+        qty = round(float(it.qty_delivered or 0) - returned.get(it.product_id, 0.0), 3)
         if qty <= 0:
             continue
         product = await db.get(Product, it.product_id)
@@ -276,9 +287,13 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
     await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, _lk(invoice.id))))
+    # Idempotent only against a prior FULL credit note — a partial (RMA) CN must not
+    # match-and-skip the full reversal.
     existing = await db.scalar(
         select(Invoice).where(
-            Invoice.original_invoice_id == invoice.id, Invoice.is_credit_note.is_(True)
+            Invoice.original_invoice_id == invoice.id,
+            Invoice.is_credit_note.is_(True),
+            Invoice.is_partial.is_(False),
         )
     )
     if existing is not None:
@@ -336,12 +351,16 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
 
 
 async def generate_credit_note_for_lines(
-    db: AsyncSession, invoice: Invoice, returned_qty: dict[int, float], reason: str | None
+    db: AsyncSession, invoice: Invoice, returned_qty: dict[int, float], reason: str | None,
+    amount: float | None = None,
 ) -> Invoice:
-    """Partial GST credit note: reverse only the RETURNED quantities, prorated per invoice
-    line (qty_returned / invoiced_qty). Used for RMA partial refunds so output GST isn't
-    over-reversed. NOT idempotent by itself — the caller (rma.refund) is single-shot under a
-    status guard, which is why multiple partial credit notes per invoice are allowed."""
+    """Partial GST credit note for an RMA return. Reverses the RETURNED quantities,
+    allocating each product's returned qty ACROSS that product's invoice lines (so a
+    product spanning >1 line isn't over-reversed), and — when `amount` is given and is
+    less than the returned-lines value — scales the whole reversal to the amount actually
+    refunded (goodwill partials don't over-reverse output GST). Marked is_partial so it
+    won't be mistaken for the full-reversal credit note. Flush-only: the caller owns the
+    commit (and the single-shot RMA status guard is what prevents duplicates)."""
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
     fy = fy_for_date(dt.datetime.now(dt.UTC).date())
@@ -353,7 +372,7 @@ async def generate_credit_note_for_lines(
         invoice_date=dt.datetime.now(dt.UTC).date(),
         seller_gstin=invoice.seller_gstin, buyer_gstin=invoice.buyer_gstin,
         place_of_supply=invoice.place_of_supply, is_interstate=invoice.is_interstate,
-        is_credit_note=True, original_invoice_id=invoice.id, status="issued",
+        is_credit_note=True, is_partial=True, original_invoice_id=invoice.id, status="issued",
     )
     db.add(note)
     await db.flush()
@@ -361,23 +380,38 @@ async def generate_credit_note_for_lines(
     lines = (
         await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
     ).scalars().all()
-    tax_val = cgst = sgst = igst = total = 0.0
+    # Allocate each product's returned qty across its lines (a product may appear on >1).
+    remaining = {pid: float(q) for pid, q in returned_qty.items()}
+    portions: list[tuple[InvoiceLine, float, float]] = []  # (line, alloc_qty, frac)
+    gross_value = 0.0
     for ln in lines:
-        rq = returned_qty.get(ln.product_id)
         line_qty = float(ln.qty)
-        if not rq or line_qty <= 0:
+        rem = remaining.get(ln.product_id, 0.0)
+        if rem <= 0 or line_qty <= 0:
             continue
-        frac = min(float(rq), line_qty) / line_qty  # proportion of this line returned
-        taxable = round(-float(ln.taxable_value) * frac, 2)
-        c = round(-float(ln.cgst) * frac, 2)
-        s = round(-float(ln.sgst) * frac, 2)
-        i = round(-float(ln.igst) * frac, 2)
-        lt = round(-float(ln.line_total) * frac, 2)
+        alloc = min(rem, line_qty)
+        remaining[ln.product_id] = rem - alloc
+        frac = alloc / line_qty
+        gross_value += float(ln.line_total) * frac
+        portions.append((ln, alloc, frac))
+    # Scale to the actually-refunded amount if it is less than the returned-lines value.
+    scale = 1.0
+    if amount is not None and gross_value > 0:
+        scale = min(float(amount), gross_value) / gross_value
+
+    tax_val = cgst = sgst = igst = total = 0.0
+    for ln, alloc, frac in portions:
+        f = frac * scale
+        taxable = round(-float(ln.taxable_value) * f, 2)
+        c = round(-float(ln.cgst) * f, 2)
+        s = round(-float(ln.sgst) * f, 2)
+        i = round(-float(ln.igst) * f, 2)
+        lt = round(-float(ln.line_total) * f, 2)
         db.add(
             InvoiceLine(
                 invoice_id=note.id, product_id=ln.product_id, hsn_code=ln.hsn_code,
                 description=(reason or "Credit note") + f" — {ln.description or ''}",
-                qty=-min(float(rq), line_qty), unit_price=float(ln.unit_price),
+                qty=-round(alloc, 3), unit_price=float(ln.unit_price),
                 taxable_value=taxable, gst_rate=float(ln.gst_rate),
                 cgst=c, sgst=s, igst=i, line_total=lt,
             )
@@ -392,6 +426,6 @@ async def generate_credit_note_for_lines(
     note.sgst = round(sgst, 2)
     note.igst = round(igst, 2)
     note.total = round(total, 2)
-    await db.commit()
+    await db.flush()
     await db.refresh(note)
     return note

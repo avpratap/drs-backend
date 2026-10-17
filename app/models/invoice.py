@@ -54,6 +54,9 @@ class Invoice(Base):
     igst: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     is_credit_note: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # True for a PARTIAL credit note (RMA per-line reversal). A full-reversal CN keeps
+    # this False, so the full-CN idempotency check won't match (and skip) a partial one.
+    is_partial: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     original_invoice_id: Mapped[int | None] = mapped_column(
         ForeignKey("invoices.id"), nullable=True
     )

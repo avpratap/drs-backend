@@ -5,7 +5,6 @@ gets at-most-once execution. The first call runs and its 2xx response is stored;
 retries replay the stored response. Non-2xx responses release the key so the
 client can genuinely retry. Reusing a key with a different body is a 422.
 """
-import datetime as dt
 import hashlib
 
 from sqlalchemy import select
@@ -20,9 +19,6 @@ from app.models.idempotency import IdempotencyKey
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _HOP_HEADERS = {"content-length", "content-type"}
-# An in-progress claim older than this is treated as abandoned (handler crashed / request
-# dropped between claim and response-store) so retries aren't wedged until the 48h prune.
-_INPROGRESS_TIMEOUT = dt.timedelta(seconds=120)
 
 
 def _subject(request: Request) -> str:
@@ -82,19 +78,16 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                         content={"detail": "Idempotency-Key reused with a different request"},
                     )
                 elif existing.response_status is None:
-                    # In progress — unless the claim is stale (handler crashed before
-                    # storing a response), in which case re-claim it so the client can retry.
-                    age = dt.datetime.now(dt.UTC) - existing.created_at
-                    if age > _INPROGRESS_TIMEOUT:
-                        existing.request_hash = req_hash
-                        existing.created_at = dt.datetime.now(dt.UTC)
-                        await db.commit()
-                        claimed = True
-                    else:
-                        return JSONResponse(
-                            status_code=409,
-                            content={"detail": "A request with this Idempotency-Key is in progress"},
-                        )
+                    # In progress → 409. We deliberately do NOT auto-reclaim a "stale"
+                    # claim in-request: a handler merely slow (gateway latency) is still
+                    # running, so re-executing it would double-charge, and a naive UPDATE
+                    # reclaim is a TOCTOU race where two retries both proceed. Orphaned
+                    # claims from a true crash are cleared out-of-band by the maintenance
+                    # reaper (reap_stale_idempotency), never by re-running the money path.
+                    return JSONResponse(
+                        status_code=409,
+                        content={"detail": "A request with this Idempotency-Key is in progress"},
+                    )
                 else:
                     return Response(
                         content=existing.response_body or "",

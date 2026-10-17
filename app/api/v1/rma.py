@@ -93,7 +93,11 @@ async def _owned_or_404(db: AsyncSession, rr_id: int, user: User, *, lock: bool 
 async def create_return(
     data: RMACreateIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    order = await db.get(Order, data.order_id)
+    # Lock the order so two concurrent returns can't each pass the over-return guard
+    # against the same baseline (TOCTOU aggregate over-return).
+    order = (
+        await db.execute(select(Order).where(Order.id == data.order_id).with_for_update())
+    ).scalar_one_or_none()
     if order is None or (
         user.role != "admin" and order.account_id not in await _my_account_ids(db, user)
     ):

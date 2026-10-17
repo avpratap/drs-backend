@@ -10,6 +10,12 @@ from app.models.notification import Notification
 from app.models.refund import WebhookEvent
 
 IDEMPOTENCY_TTL_HOURS = 48
+# A claim still "in progress" (response_status NULL) this long after creation is an
+# orphan from a hard crash (SIGKILL between claim-commit and response-store). The
+# middleware never re-executes such a claim in-request (that could double-charge); the
+# reaper clears it out-of-band so a genuine retry can proceed. Generous vs any real
+# handler runtime (AI ≤~93s, gateway ≤~40s).
+IDEMPOTENCY_INPROGRESS_TTL_MIN = 15
 WEBHOOK_TTL_DAYS = 30
 NOTIFICATION_DONE_TTL_DAYS = 30
 NOTIFICATION_FAILED_TTL_DAYS = 90
@@ -25,6 +31,17 @@ async def prune(db: AsyncSession) -> dict:
         )
     )
     counts["idempotency_keys"] = r.rowcount or 0
+
+    # Reap orphaned in-progress claims so a crashed write isn't wedged on 409 until the
+    # 48h prune (the middleware no longer auto-reclaims these in-request).
+    r = await db.execute(
+        delete(IdempotencyKey).where(
+            IdempotencyKey.response_status.is_(None),
+            IdempotencyKey.created_at
+            < now - dt.timedelta(minutes=IDEMPOTENCY_INPROGRESS_TTL_MIN),
+        )
+    )
+    counts["idempotency_inprogress_reaped"] = r.rowcount or 0
 
     r = await db.execute(
         delete(WebhookEvent).where(
