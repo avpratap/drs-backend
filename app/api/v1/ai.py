@@ -94,6 +94,9 @@ async def ai_support(
     else:
         facts.append("- no account/orders yet")
     prompt = f"{chr(10).join(facts)}\n\n<user_question>{_sanitize_user_text(data.message)}</user_question>"
+    # Release the pooled DB connection BEFORE the (potentially multi-second) LLM call —
+    # otherwise a handful of concurrent AI requests pin the whole pool for the Claude RTT.
+    await db.close()
     answer = await ai.complete(_SUPPORT_SYSTEM, prompt)
     return {"answer": answer, "ai_live": ai.ai_enabled()}
 
@@ -127,5 +130,7 @@ async def admin_ai_copilot(
     # Audit trail: who asked the copilot what (DPDP — question only, no customer PII).
     _audit.info("copilot_query", extra={"admin_user_id": user.id, "q": data.message[:500]})
     prompt = f"{metrics}\n\n<user_question>{_sanitize_user_text(data.message)}</user_question>"
+    # Release the pooled DB connection before the slow LLM call (see ai_support).
+    await db.close()
     answer = await ai.complete(_COPILOT_SYSTEM, prompt)
     return {"answer": answer, "ai_live": ai.ai_enabled()}

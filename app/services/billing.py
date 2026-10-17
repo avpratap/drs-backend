@@ -105,19 +105,25 @@ async def credit_entry(
 
 
 async def _already_billed(db: AsyncSession, account: CustomerAccount, order_id: int) -> bool:
-    if account.billing_mode == "postpaid_credit":
-        res = await db.execute(
-            select(func.count())
-            .select_from(CreditLedger)
-            .where(CreditLedger.ref_type == "delivery_order", CreditLedger.ref_id == order_id)
+    # Check BOTH ledgers regardless of the account's CURRENT billing_mode: if the mode
+    # changed between two deliveries of the same order, a mode-specific check would miss
+    # the entry made under the old mode and double-bill. A charge in EITHER ledger counts.
+    credit = await db.scalar(
+        select(func.count())
+        .select_from(CreditLedger)
+        .where(CreditLedger.ref_type == "delivery_order", CreditLedger.ref_id == order_id)
+    )
+    if (credit or 0) > 0:
+        return True
+    wallet = await db.scalar(
+        select(func.count())
+        .select_from(WalletTransaction)
+        .where(
+            WalletTransaction.ref_type == "delivery_order",
+            WalletTransaction.ref_id == order_id,
         )
-    else:
-        res = await db.execute(
-            select(func.count())
-            .select_from(WalletTransaction)
-            .where(WalletTransaction.ref_type == "delivery_order", WalletTransaction.ref_id == order_id)
-        )
-    return (res.scalar_one() or 0) > 0
+    )
+    return (wallet or 0) > 0
 
 
 async def bill_delivery(db: AsyncSession, order: DeliveryOrder, amount: float) -> None:
