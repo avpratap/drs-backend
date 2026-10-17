@@ -72,6 +72,46 @@ def _r_promo(d: dict) -> dict:
     return {"text": txt, "wa_template": "promo", "wa_params": [str(d.get("message", ""))]}
 
 
+def _r_payment_refunded(d: dict) -> dict:
+    txt = (
+        f"DRS: Refund of ₹{_money(d.get('amount', 0))} processed to your wallet. "
+        f"Wallet balance ₹{_money(d.get('balance', 0))}."
+    )
+    return {"text": txt, "wa_template": "payment_refunded",
+            "wa_params": [_money(d.get("amount", 0)), _money(d.get("balance", 0))]}
+
+
+def _r_subscription_created(d: dict) -> dict:
+    txt = "DRS: Your daily subscription is active. Manage or pause anytime in the app."
+    return {"text": txt, "wa_template": "subscription_created", "wa_params": []}
+
+
+def _r_subscription_paused(d: dict) -> dict:
+    txt = "DRS: Your subscription is paused. Resume anytime to restart daily deliveries."
+    return {"text": txt, "wa_template": "subscription_paused", "wa_params": []}
+
+
+def _r_subscription_resumed(d: dict) -> dict:
+    txt = "DRS: Welcome back! Your subscription is active again."
+    return {"text": txt, "wa_template": "subscription_resumed", "wa_params": []}
+
+
+def _r_subscription_cancelled(d: dict) -> dict:
+    txt = "DRS: Your subscription is cancelled. We'd love to have you back anytime."
+    return {"text": txt, "wa_template": "subscription_cancelled", "wa_params": []}
+
+
+def _r_shipment_delivered(d: dict) -> dict:
+    txt = f"DRS: Your order {d.get('shipment_no', '')} has been delivered ✅. Enjoy!"
+    return {"text": txt, "wa_template": "shipment_delivered",
+            "wa_params": [str(d.get("shipment_no", ""))]}
+
+
+def _r_review_request(d: dict) -> dict:
+    txt = f"DRS: How was {d.get('product', 'your order')}? Tap to rate and help others. 🌟"
+    return {"text": txt, "wa_template": "review_request", "wa_params": [str(d.get("product", ""))]}
+
+
 # event_type -> (category, channels, renderer)
 REGISTRY: dict[str, tuple[str, list[str], Callable[[dict], dict]]] = {
     "order.generated": (TRANSACTIONAL, ["whatsapp", "sms"], _r_order_generated),
@@ -81,6 +121,13 @@ REGISTRY: dict[str, tuple[str, list[str], Callable[[dict], dict]]] = {
     "wallet.low": (TRANSACTIONAL, ["whatsapp", "sms"], _r_wallet_low),
     "marketing.winback": (MARKETING, ["whatsapp"], _r_winback),
     "marketing.promo": (MARKETING, ["whatsapp", "sms"], _r_promo),
+    "payment.refunded": (TRANSACTIONAL, ["whatsapp", "sms"], _r_payment_refunded),
+    "subscription.created": (TRANSACTIONAL, ["whatsapp"], _r_subscription_created),
+    "subscription.paused": (TRANSACTIONAL, ["whatsapp"], _r_subscription_paused),
+    "subscription.resumed": (TRANSACTIONAL, ["whatsapp"], _r_subscription_resumed),
+    "subscription.cancelled": (TRANSACTIONAL, ["whatsapp"], _r_subscription_cancelled),
+    "shipment.delivered": (TRANSACTIONAL, ["whatsapp", "push"], _r_shipment_delivered),
+    "review.request": (MARKETING, ["whatsapp", "push"], _r_review_request),
 }
 
 

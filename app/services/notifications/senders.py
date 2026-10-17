@@ -58,12 +58,84 @@ async def send_sms(to_addr: str, body: str, payload: dict | None) -> tuple[bool,
     return _stub("sms", to_addr, body)
 
 
+def fcm_enabled() -> bool:
+    return bool(settings.FCM_PROJECT_ID and settings.FCM_CREDENTIALS_JSON)
+
+
+def email_enabled() -> bool:
+    return bool(settings.SMTP_HOST)
+
+
+def _fcm_access_token() -> str:
+    """OAuth2 access token from the service-account JSON (lazy google-auth)."""
+    import json
+
+    from google.oauth2 import service_account  # lazy
+
+    raw = settings.FCM_CREDENTIALS_JSON
+    info = json.loads(raw) if raw.strip().startswith("{") else json.load(open(raw))
+    creds = service_account.Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+    )
+    from google.auth.transport.requests import Request as GRequest  # lazy
+
+    creds.refresh(GRequest())
+    return creds.token
+
+
 async def send_push(to_addr: str, body: str, payload: dict | None) -> tuple[bool, str | None, str | None]:
-    return _stub("push", to_addr or "device", body)
+    # to_addr is a comma-joined list of the user's active device tokens (resolved at
+    # emit time). No creds -> dev stub.
+    tokens = [t for t in (to_addr or "").split(",") if t]
+    if not fcm_enabled():
+        return _stub("push", to_addr or "device", body)
+    if not tokens:
+        return False, None, "no device tokens"
+    try:
+        import asyncio
+
+        token = await asyncio.to_thread(_fcm_access_token)  # blocking crypto -> thread
+        url = f"https://fcm.googleapis.com/v1/projects/{settings.FCM_PROJECT_ID}/messages:send"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        sent_ids, last_err = [], None
+        async with httpx.AsyncClient(timeout=10) as client:
+            for tok in tokens:
+                msg = {"message": {"token": tok, "notification": {"title": "DRS", "body": body}}}
+                resp = await client.post(url, json=msg, headers=headers)
+                if resp.status_code < 300:
+                    sent_ids.append(resp.json().get("name", tok[:12]))
+                else:
+                    last_err = f"fcm {resp.status_code}: {resp.text[:120]}"
+        if sent_ids:
+            return True, ",".join(sent_ids), last_err
+        return False, None, last_err or "fcm: all tokens failed"
+    except Exception as exc:
+        return False, None, f"fcm error: {exc}"
 
 
 async def send_email(to_addr: str, body: str, payload: dict | None) -> tuple[bool, str | None, str | None]:
-    return _stub("email", to_addr or "email", body)
+    if not email_enabled():
+        return _stub("email", to_addr or "email", body)
+    if not to_addr:
+        return False, None, "no email address"
+    try:
+        import email.message
+
+        import aiosmtplib  # lazy
+
+        msg = email.message.EmailMessage()
+        msg["From"] = settings.SMTP_FROM
+        msg["To"] = to_addr
+        msg["Subject"] = (payload or {}).get("subject", "DRS notification")
+        msg.set_content(body)
+        await aiosmtplib.send(
+            msg, hostname=settings.SMTP_HOST, port=settings.SMTP_PORT,
+            username=settings.SMTP_USER or None, password=settings.SMTP_PASSWORD or None,
+            start_tls=settings.SMTP_PORT == 587,
+        )
+        return True, f"smtp_{secrets.token_hex(6)}", None
+    except Exception as exc:
+        return False, None, f"smtp error: {exc}"
 
 
 SENDERS = {

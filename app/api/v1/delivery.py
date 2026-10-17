@@ -2,8 +2,8 @@ import datetime as dt
 import secrets
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -12,6 +12,8 @@ from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
+from app.models.driver import DriverLocation
+from app.models.fulfillment import CashCollection
 from app.models.user import User
 from app.schemas.delivery import DeliverRequest, DeliveryOrderItemOut, DeliveryOrderOut
 from app.services import delivery as delivery_service
@@ -124,4 +126,133 @@ async def deliver_order(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
 
     await delivery_service.mark_delivered(db, order, user, data)
+    return await _order_detail(db, order)
+
+
+# ---------- Delivery-app operations (route, location, summary, failure) ----------
+class LocationIn(BaseModel):
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lng: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
+class OkOut(BaseModel):
+    ok: bool
+
+
+class RouteStopOut(BaseModel):
+    sequence: int
+    order: DeliveryOrderOut
+
+
+class SummaryOut(BaseModel):
+    date: dt.date
+    delivered: int
+    failed: int
+    pending: int
+    cash_collected: float
+
+
+class FailIn(BaseModel):
+    reason: str = Field(pattern="^(customer_unavailable|address_wrong|refused|other)$")
+
+
+def _require_delivery(user: User) -> None:
+    if user.role not in ("delivery", "admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Delivery staff only")
+
+
+@router.post("/location", response_model=OkOut, operation_id="post_driver_location")
+async def post_driver_location(
+    data: LocationIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Driver GPS ping (append-only; latest row is the driver's current position)."""
+    _require_delivery(user)
+    db.add(DriverLocation(driver_id=user.id, lat=data.lat, lng=data.lng))
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/orders/route", response_model=list[RouteStopOut], operation_id="delivery_route")
+async def delivery_route(
+    date: dt.date | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's assigned stops for a date as an ordered route with sequence numbers.
+    Ordered by shop_id (stable); geo nearest-neighbor from the driver's latest location
+    is a future enhancement once shops carry geo."""
+    for_date = date or (today_ist() + dt.timedelta(days=1))
+    ids = await allowed_shop_ids(user, db)
+    q = select(DeliveryOrder).where(DeliveryOrder.delivery_date == for_date)
+    if ids is not ALL:
+        if not ids:
+            return []
+        q = q.where(DeliveryOrder.shop_id.in_(ids))
+    orders = (await db.execute(q.order_by(DeliveryOrder.shop_id))).scalars().all()
+    details = await _order_details(db, list(orders))
+    return [RouteStopOut(sequence=i + 1, order=d) for i, d in enumerate(details)]
+
+
+@router.get("/summary", response_model=SummaryOut, operation_id="delivery_summary")
+async def delivery_summary(
+    date: dt.date | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-day counts (delivered/failed/pending) + cash collected, scoped to the caller."""
+    _require_delivery(user)
+    for_date = date or today_ist()
+    ids = await allowed_shop_ids(user, db)
+    q = select(DeliveryOrder).where(DeliveryOrder.delivery_date == for_date)
+    if ids is not ALL:
+        if not ids:
+            return SummaryOut(date=for_date, delivered=0, failed=0, pending=0, cash_collected=0)
+        q = q.where(DeliveryOrder.shop_id.in_(ids))
+    orders = (await db.execute(q)).scalars().all()
+    delivered = [o for o in orders if o.status in ("delivered", "partially_delivered")]
+    failed = sum(1 for o in orders if o.status == "failed")
+    pending = sum(1 for o in orders if o.status in ("generated", "frozen"))
+    cash = 0.0
+    if delivered:
+        cash = float(
+            await db.scalar(
+                select(func.coalesce(func.sum(CashCollection.amount_collected), 0)).where(
+                    CashCollection.delivery_order_id.in_([o.id for o in delivered])
+                )
+            )
+            or 0
+        )
+    return SummaryOut(
+        date=for_date, delivered=len(delivered), failed=failed, pending=pending, cash_collected=cash
+    )
+
+
+@router.post(
+    "/orders/{order_id}/fail", response_model=DeliveryOrderOut, operation_id="fail_delivery_order"
+)
+async def fail_delivery_order(
+    order_id: int,
+    data: FailIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark an assigned stop failed with a reason (no billing/stock movement)."""
+    _require_delivery(user)
+    order = (
+        await db.execute(
+            select(DeliveryOrder).where(DeliveryOrder.id == order_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    ids = await allowed_shop_ids(user, db)
+    if ids is not ALL and order.shop_id not in ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if order.status not in ("generated", "frozen"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Order is {order.status}; cannot mark failed"
+        )
+    order.status = "failed"
+    order.failure_reason = data.reason
+    await db.commit()
     return await _order_detail(db, order)

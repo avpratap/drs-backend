@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     SHIPROCKET_BASE_URL: str = "https://apiv2.shiprocket.in/v1/external"
     PICKUP_PINCODE: str = "302001"  # seller origin pincode (Jaipur) for serviceability
 
+    # FCM push (HTTP v1). Empty -> dev stub (logs, no send).
+    FCM_PROJECT_ID: str = ""
+    FCM_CREDENTIALS_JSON: str = ""  # service-account JSON (raw or path); empty -> stub
+
+    # Email (SMTP). Empty host -> dev stub (logs, no send).
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "DRS <no-reply@drs.co.in>"
+
     # AI/LLM (Claude). Empty key -> dev stub (templated answers, no external call).
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-opus-4-8"

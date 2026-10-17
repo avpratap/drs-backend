@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.device_token import DeviceToken
 from app.models.notification import Notification
 from app.models.user import User
 from app.services import profile as profile_svc
@@ -110,6 +111,16 @@ async def emit_event(
                     scheduled_for = _quiet_end(prof, now)
 
         to_addr = _addr(channel, user)
+        if channel == "push":
+            # Push "address" is the user's active device tokens, joined for the sender.
+            tokens = (
+                await db.execute(
+                    select(DeviceToken.token).where(
+                        DeviceToken.user_id == user.id, DeviceToken.active.is_(True)
+                    )
+                )
+            ).scalars().all()
+            to_addr = ",".join(tokens) if tokens else None
         if status == "queued" and not to_addr:
             status, skip_reason = "skipped", "no_address"
 
@@ -149,17 +160,22 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
         notif.status, notif.error = "failed", "no sender"
         return False
     notif.attempts += 1
+    notif.last_attempt_at = dt.datetime.now(dt.UTC)
     ok, msg_id, err = await sender(notif.to_addr or "", notif.body or "", notif.payload)
     if ok:
         notif.status = "sent"
         notif.provider = settings.WHATSAPP_PROVIDER if notif.channel == "whatsapp" else notif.channel
         notif.provider_message_id = msg_id
         notif.sent_at = dt.datetime.now(dt.UTC)
+        notif.next_attempt_at = None
         notif.error = None
     else:
         notif.error = err
         if notif.attempts >= MAX_ATTEMPTS:
             notif.status = "failed"
+        else:
+            # Exponential backoff: retry no sooner than 2**attempts minutes out.
+            notif.next_attempt_at = notif.last_attempt_at + dt.timedelta(minutes=2**notif.attempts)
     return ok
 
 
@@ -171,6 +187,7 @@ async def process_outbox(db: AsyncSession, *, limit: int = 100) -> dict:
         .where(
             Notification.status == "queued",
             or_(Notification.scheduled_for.is_(None), Notification.scheduled_for <= now),
+            or_(Notification.next_attempt_at.is_(None), Notification.next_attempt_at <= now),
         )
         .order_by(Notification.id)
         .limit(limit)

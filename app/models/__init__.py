@@ -1,3 +1,9 @@
+from app.models.admin_tools import (
+    AdminAuditLog,
+    FeatureFlag,
+    OutboundWebhook,
+    OutboundWebhookDelivery,
+)
 from app.models.auth_session import AuthSession
 from app.models.base import Base
 from app.models.batch import StockBatch
@@ -6,6 +12,8 @@ from app.models.cart import Cart, CartItem
 from app.models.content import Article, Banner, StaticPage
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
+from app.models.device_token import DeviceToken
+from app.models.driver import DriverLocation
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.idempotency import IdempotencyKey
 from app.models.inventory import StockItem, StockMovement
@@ -18,6 +26,7 @@ from app.models.loyalty import (
     ReferralCode,
     ReferralRedemption,
 )
+from app.models.newsletter import NewsletterSubscriber
 from app.models.notification import Notification
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment
@@ -43,9 +52,11 @@ from app.models.transfer import StockTransfer, StockTransferItem, StockTransferL
 from app.models.user import User, UserRole
 from app.models.variant import ProductVariant
 from app.models.warehouse import Location
+from app.models.wishlist import WishlistItem
 
 __all__ = [
     "Address",
+    "AdminAuditLog",
     "Article",
     "AuthSession",
     "Banner",
@@ -63,6 +74,9 @@ __all__ = [
     "DeliveryAssignment",
     "DeliveryOrder",
     "DeliveryOrderItem",
+    "DeviceToken",
+    "DriverLocation",
+    "FeatureFlag",
     "GiftCard",
     "GiftCardTransaction",
     "IdempotencyKey",
@@ -70,9 +84,12 @@ __all__ = [
     "InvoiceLine",
     "Location",
     "LoyaltyAccount",
+    "NewsletterSubscriber",
     "Notification",
     "Order",
     "OrderItem",
+    "OutboundWebhook",
+    "OutboundWebhookDelivery",
     "Payment",
     "PaymentMandate",
     "PaymentMethod",
@@ -116,5 +133,6 @@ __all__ = [
     "Wallet",
     "WalletTransaction",
     "WebhookEvent",
+    "WishlistItem",
     "WithdrawalRequest",
 ]

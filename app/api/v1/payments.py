@@ -268,12 +268,12 @@ async def refund_payment(
 
     if payment.payment_type == "wallet_topup":
         # Reverse the top-up: pull the money back out of the wallet.
-        await billing_service.wallet_adjust(
+        wallet = await billing_service.wallet_adjust(
             db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
             allow_negative=True,
         )
     else:  # order_payment -> store credit back to the wallet
-        await billing_service.wallet_adjust(
+        wallet = await billing_service.wallet_adjust(
             db, payment.account_id, amount, "refund", "refund", refund.id
         )
         if payment.ref_id:
@@ -282,6 +282,14 @@ async def refund_payment(
                 order.payment_status = (
                     "refunded" if already + amount >= float(payment.amount) else "partially_refunded"
                 )
+    # Tell the customer their refund landed (idempotent per refund).
+    owner = await _owner_user(db, payment.account_id)
+    if owner is not None:
+        await notify.emit_event(
+            db, "payment.refunded", owner,
+            {"amount": amount, "balance": float(wallet.balance)},
+            account_id=payment.account_id, dedupe_key=f"payment.refunded:{refund.id}",
+        )
     await db.commit()
     return {
         "refund_id": refund.id,

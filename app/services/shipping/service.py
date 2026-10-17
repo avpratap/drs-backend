@@ -10,6 +10,9 @@ from app.core.config import settings
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.shipment import Shipment, ShipmentTrackingEvent
+from app.models.shop import CustomerAccount
+from app.models.user import User
+from app.services import notifications as notify
 from app.services.shipping import client
 
 # Map courier/webhook status text -> our canonical status.
@@ -117,8 +120,21 @@ async def apply_tracking(
     ))
     # Don't regress out of a terminal state on a late/duplicate event.
     if mapped and ship.status not in _TERMINAL:
+        was_delivered = ship.status == "delivered"
         ship.status = mapped
+        if mapped == "delivered" and not was_delivered:
+            await _notify_delivered(db, ship)
     return ship
+
+
+async def _notify_delivered(db: AsyncSession, ship: Shipment) -> None:
+    account = await db.get(CustomerAccount, ship.account_id)
+    owner = await db.get(User, account.owner_user_id) if account else None
+    if owner is not None:
+        await notify.emit_event(
+            db, "shipment.delivered", owner, {"shipment_no": ship.shipment_no},
+            account_id=ship.account_id, dedupe_key=f"shipment.delivered:{ship.id}",
+        )
 
 
 async def cancel_shipment(db: AsyncSession, ship: Shipment) -> Shipment:

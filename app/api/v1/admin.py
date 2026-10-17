@@ -105,6 +105,31 @@ async def flush_notifications(limit: int = 100, db: AsyncSession = Depends(get_d
     return await notify.process_outbox(db, limit=limit)
 
 
+class ResendOut(BaseModel):
+    id: int
+    status: str
+
+
+@router.post(
+    "/notifications/{notif_id}/resend", operation_id="resend_notification", response_model=ResendOut
+)
+async def resend_notification(notif_id: int, db: AsyncSession = Depends(get_db)):
+    """Re-queue a failed/sent notification for immediate redelivery."""
+    notif = await db.get(Notification, notif_id)
+    if notif is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Notification not found")
+    if notif.status == "skipped":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Skipped notifications can't be resent (gating applied)"
+        )
+    notif.status = "queued"
+    notif.next_attempt_at = None
+    notif.scheduled_for = None
+    notif.error = None
+    await db.commit()
+    return ResendOut(id=notif.id, status=notif.status)
+
+
 @router.get(
     "/notifications", operation_id="list_notifications", response_model=list[NotificationOut]
 )

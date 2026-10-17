@@ -22,7 +22,15 @@ from app.schemas.subscription import (
     SubscriptionDetail,
     SubscriptionOut,
 )
+from app.services import notifications as notify
 from app.services import subscription as sub_service
+
+# Subscription status -> lifecycle notification event.
+_STATUS_EVENT = {
+    "paused": "subscription.paused",
+    "active": "subscription.resumed",
+    "cancelled": "subscription.cancelled",
+}
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -84,6 +92,11 @@ async def create_subscription(
             start_date=sub_service.today_ist(),
         )
         db.add(sub)
+        await db.flush()
+        await notify.emit_event(
+            db, "subscription.created", user, {"shop_id": shop.id},
+            account_id=shop.account_id, dedupe_key=f"subscription.created:{sub.id}",
+        )
         await db.commit()
         await db.refresh(sub)
     return sub
@@ -215,6 +228,13 @@ async def _set_status(user, db, sub_id, new_status, allowed_from):
             status.HTTP_409_CONFLICT, f"Cannot {new_status} a {sub.status} subscription"
         )
     sub.status = new_status
+    event = _STATUS_EVENT.get(new_status)
+    if event is not None:
+        # No dedupe_key: pause/resume can legitimately recur and should notify each time
+        # (the HTTP idempotency layer already prevents double-execution of one call).
+        await notify.emit_event(
+            db, event, user, {"shop_id": sub.shop_id}, account_id=sub.account_id,
+        )
     await db.commit()
     await db.refresh(sub)
     return sub

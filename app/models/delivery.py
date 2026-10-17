@@ -48,6 +48,7 @@ class DeliveryOrder(Base, TimestampMixin):
         ForeignKey("delivery_schedule_runs.id"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(20), default="generated", nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     subtotal: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     amount_due: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)

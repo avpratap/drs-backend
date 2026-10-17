@@ -18,6 +18,11 @@ class OrderItemOut(BaseModel):
     qty: float
     unit_price: float
     line_total: float
+    # Tax-inclusive display (unit_price is pre-tax; GST added on top). Indicative —
+    # the legal GST invoice is computed separately in invoicing.py.
+    gst_rate: float = 0
+    gst_amount: float = 0
+    price_incl_tax: float = 0
 
 
 class OrderOut(BaseModel):
@@ -32,4 +37,6 @@ class OrderOut(BaseModel):
     coupon_code: str | None = None
     total: float
     payment_status: str
+    tax_total: float = 0
+    total_incl_tax: float = 0
     items: list[OrderItemOut] = []

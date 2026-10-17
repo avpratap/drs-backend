@@ -20,6 +20,7 @@ class DeliveryOrderOut(BaseModel):
     shop_id: int
     origin: str
     status: str
+    failure_reason: str | None = None
     subtotal: float
     total: float
     amount_due: float
