@@ -37,6 +37,7 @@ class InvoiceOut(BaseModel):
     igst: float
     total: float
     is_credit_note: bool
+    is_partial: bool = False
     original_invoice_id: int | None = None
     status: str
     lines: list[InvoiceLineOut] = []

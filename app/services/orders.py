@@ -43,11 +43,12 @@ async def _get_or_create_home_shop(
     state: str | None = None,
     pincode: str | None = None,
 ) -> Shop:
-    # D2C orders deliver to the account's dedicated "Home" shop. Select it by name so a
-    # B2B account's real stores are never picked (and never clobbered) by a D2C checkout.
+    # D2C orders deliver to the account's dedicated home shop, identified by the is_home
+    # FLAG (not the magic name) so a B2B account's real store named "Home" is never picked
+    # or clobbered by a D2C checkout.
     res = await db.execute(
         select(Shop)
-        .where(Shop.account_id == account.id, Shop.name == "Home")
+        .where(Shop.account_id == account.id, Shop.is_home.is_(True))
         .order_by(Shop.id)
         .limit(1)
     )
@@ -55,7 +56,7 @@ async def _get_or_create_home_shop(
     if shop is None:
         shop = Shop(
             account_id=account.id, name="Home", address=address,
-            state=state, pincode=pincode, status="active",
+            state=state, pincode=pincode, status="active", is_home=True,
         )
         db.add(shop)
         await db.flush()
@@ -98,6 +99,8 @@ async def create_order(
         order_type="one_time",
         status="created",
         payment_status="pending",
+        # Authoritative per-order place-of-supply (falls back to shop/address state if None).
+        ship_state=(state or None),
     )
     db.add(order)
     await db.flush()

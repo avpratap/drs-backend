@@ -20,6 +20,10 @@ class Order(Base, TimestampMixin):
     coupon_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     total: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    # Per-order delivery state — authoritative GST place-of-supply for this D2C order
+    # (so a repeat customer or one with a different saved address is still taxed by where
+    # THIS order ships). Null → fall back to address/shop/seller state.
+    ship_state: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class OrderItem(Base):

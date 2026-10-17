@@ -9,7 +9,7 @@
 import datetime as dt
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -196,9 +196,12 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
 
 
 async def _order_place_of_supply(db: AsyncSession, order: Order) -> str:
-    """For a one-time D2C order, place of supply is the DELIVERY location — the buyer's
-    default address state (so an interstate shipment is correctly IGST). Fall back to the
-    storefront shop's state, then the seller state (intra-state) as a last resort."""
+    """For a one-time D2C order, place of supply is where THIS order ships. Prefer the
+    order's own captured delivery state (authoritative per-order, so a repeat customer or
+    one with a different saved address is still taxed correctly), then the buyer's default
+    address state, then the storefront shop's state, then the seller state as a last resort."""
+    if order.ship_state:
+        return order.ship_state
     state = await db.scalar(
         select(Address.state).where(
             Address.account_id == order.account_id,
@@ -295,16 +298,58 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
     await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, _lk(invoice.id))))
-    # Idempotent only against a prior FULL credit note — a partial (RMA) CN must not
-    # match-and-skip the full reversal.
+    # ONE credit note per invoice (uq_credit_note_original partial unique index). Find any
+    # existing CN for this invoice:
+    #   * already a FULL reversal (is_partial=False) -> idempotent, return it.
+    #   * a PARTIAL (RMA) CN -> UPGRADE it in place to the full reversal. The unique index
+    #     forbids inserting a second CN, so a full refund-to-source can't add one on top;
+    #     upgrading reverses the invoice exactly once (no GST over- or under-reversal).
     existing = await db.scalar(
         select(Invoice).where(
             Invoice.original_invoice_id == invoice.id,
             Invoice.is_credit_note.is_(True),
-            Invoice.is_partial.is_(False),
         )
     )
+    if existing is not None and not existing.is_partial:
+        return existing
+
+    orig_lines = (
+        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
+    ).scalars().all()
+
+    def _full_negation_lines(target_id: int) -> list[InvoiceLine]:
+        return [
+            InvoiceLine(
+                invoice_id=target_id,
+                product_id=ln.product_id,
+                hsn_code=ln.hsn_code,
+                description=(reason or "Credit note") + f" — {ln.description or ''}",
+                qty=-float(ln.qty),
+                unit_price=float(ln.unit_price),
+                taxable_value=round(-float(ln.taxable_value), 2),
+                gst_rate=float(ln.gst_rate),
+                cgst=round(-float(ln.cgst), 2),
+                sgst=round(-float(ln.sgst), 2),
+                igst=round(-float(ln.igst), 2),
+                line_total=round(-float(ln.line_total), 2),
+            )
+            for ln in orig_lines
+        ]
+
     if existing is not None:
+        # Upgrade the partial CN to the FULL reversal: swap its lines + header totals for
+        # the exact negation of the invoice and clear is_partial.
+        await db.execute(delete(InvoiceLine).where(InvoiceLine.invoice_id == existing.id))
+        existing.is_partial = False
+        existing.taxable_value = round(-float(invoice.taxable_value), 2)
+        existing.cgst = round(-float(invoice.cgst), 2)
+        existing.sgst = round(-float(invoice.sgst), 2)
+        existing.igst = round(-float(invoice.igst), 2)
+        existing.total = round(-float(invoice.total), 2)
+        for line in _full_negation_lines(existing.id):
+            db.add(line)
+        await db.commit()
+        await db.refresh(existing)
         return existing
 
     fy = fy_for_date(_today())
@@ -332,27 +377,8 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
     )
     db.add(note)
     await db.flush()
-
-    lines = (
-        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
-    ).scalars().all()
-    for ln in lines:
-        db.add(
-            InvoiceLine(
-                invoice_id=note.id,
-                product_id=ln.product_id,
-                hsn_code=ln.hsn_code,
-                description=(reason or "Credit note") + f" — {ln.description or ''}",
-                qty=-float(ln.qty),
-                unit_price=float(ln.unit_price),
-                taxable_value=round(-float(ln.taxable_value), 2),
-                gst_rate=float(ln.gst_rate),
-                cgst=round(-float(ln.cgst), 2),
-                sgst=round(-float(ln.sgst), 2),
-                igst=round(-float(ln.igst), 2),
-                line_total=round(-float(ln.line_total), 2),
-            )
-        )
+    for line in _full_negation_lines(note.id):
+        db.add(line)
     await db.commit()
     await db.refresh(note)
     return note
