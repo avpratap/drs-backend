@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     FCM_PROJECT_ID: str = ""
     FCM_CREDENTIALS_JSON: str = ""  # service-account JSON (raw or path); empty -> stub
 
+    # Newsletter one-click-unsubscribe token signing. A dedicated secret (not JWT_SECRET)
+    # so rotating JWT auth doesn't invalidate unsubscribe links already in inboxes; falls
+    # back to JWT_SECRET when unset (dev).
+    NEWSLETTER_UNSUB_SECRET: str = ""
+
     # Email (SMTP). Empty host -> dev stub (logs, no send).
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587

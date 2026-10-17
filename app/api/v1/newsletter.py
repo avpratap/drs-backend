@@ -25,10 +25,10 @@ _EMAIL = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
 def _unsub_token(email: str) -> str:
     """Stateless per-email unsubscribe token (HMAC) — goes in the emailed one-click link,
-    so only someone who received the email (or the owner) can unsubscribe that address."""
-    return hmac.new(
-        settings.JWT_SECRET.encode(), f"unsub:{email}".encode(), hashlib.sha256
-    ).hexdigest()
+    so only someone who received the email (or the owner) can unsubscribe that address.
+    Signed with a DEDICATED secret so a JWT-auth rotation doesn't break outstanding links."""
+    secret = settings.NEWSLETTER_UNSUB_SECRET or settings.JWT_SECRET
+    return hmac.new(secret.encode(), f"unsub:{email}".encode(), hashlib.sha256).hexdigest()
 
 
 class SubscribeIn(BaseModel):
@@ -105,9 +105,11 @@ async def confirm(token: str, db: AsyncSession = Depends(get_db)):
     row.consent_at = dt.datetime.now(dt.UTC)
     row.confirm_token = None
     await db.commit()
+    # Return the unsubscribe token ALWAYS (prod included): the confirmation landing page
+    # must be able to show a working one-click unsubscribe link (CAN-SPAM/DPDP), and the
+    # token is specific to this email, delivered to the person who just confirmed it.
     return StatusOut(
-        email=row.email, status="subscribed",
-        unsubscribe_token=_unsub_token(row.email) if settings.ENV != "prod" else None,
+        email=row.email, status="subscribed", unsubscribe_token=_unsub_token(row.email)
     )
 
 
