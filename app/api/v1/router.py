@@ -7,9 +7,11 @@ from app.api.v1 import (
     auth,
     billing,
     cart,
+    content,
     delivery,
     inventory,
     invoices,
+    loyalty,
     management,
     orders,
     payments,
@@ -47,4 +49,7 @@ api_router.include_router(cart.router)
 api_router.include_router(rma.router)
 api_router.include_router(reviews.router)
 api_router.include_router(support.router)
+api_router.include_router(content.router)
+api_router.include_router(content.public_router)
+api_router.include_router(loyalty.router)
 api_router.include_router(ai.router)

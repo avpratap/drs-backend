@@ -119,7 +119,10 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+from app.api.v1.content import public_root_router  # noqa: E402
+
 app.include_router(health_router)  # /healthz, /readyz
+app.include_router(public_root_router)  # /sitemap.xml, /robots.txt (domain root)
 app.include_router(api_router)  # /api/v1/...
 
 

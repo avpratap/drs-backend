@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_delete, cache_get_json, cache_set_json
@@ -10,6 +11,7 @@ from app.deps.pagination import Page, pagination
 from app.models.product import Product
 from app.models.rating import Rating, ReviewHelpful
 from app.models.user import User
+from app.models.variant import ProductVariant
 from app.schemas.product import ProductCreate, ProductOut, ProductUpdate
 from app.services import reviews as review_svc
 
@@ -263,3 +265,131 @@ async def list_product_ratings(
         "distribution": distribution,
         "ratings": [RatingOut.model_validate(r).model_dump() for r in rows],
     }
+
+
+# ---------- Variants (catalog/display only; checkout stays product-level) ----------
+class VariantIn(BaseModel):
+    sku: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=64)
+    pack_size: float = Field(default=1, gt=0, le=1_000_000, allow_inf_nan=False)
+    price: float = Field(default=0, ge=0, le=1_000_000, allow_inf_nan=False)
+    mrp: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
+    image_url: str | None = Field(default=None, max_length=512)
+    sort_order: int = 0
+
+
+class VariantUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=64)
+    pack_size: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    price: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
+    mrp: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
+    image_url: str | None = Field(default=None, max_length=512)
+    status: str | None = Field(default=None, pattern="^(active|inactive)$")
+    sort_order: int | None = None
+
+
+class VariantOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    product_id: int
+    sku: str
+    label: str
+    pack_size: float
+    price: float
+    mrp: float | None = None
+    image_url: str | None = None
+    status: str
+    sort_order: int
+
+
+class ProductFullOut(ProductOut):
+    variants: list[VariantOut] = []
+
+
+async def _require_product(db: AsyncSession, product_id: int) -> Product:
+    product = await db.get(Product, product_id)
+    if product is None or product.status == "retired":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
+    return product
+
+
+@router.post(
+    "/{product_id}/variants",
+    response_model=VariantOut,
+    operation_id="create_variant",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def create_variant(product_id: int, data: VariantIn, db: AsyncSession = Depends(get_db)):
+    await _require_product(db, product_id)
+    variant = ProductVariant(product_id=product_id, **data.model_dump())
+    db.add(variant)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Variant SKU already exists") from None
+    await db.refresh(variant)
+    return variant
+
+
+@router.get(
+    "/{product_id}/variants", response_model=list[VariantOut], operation_id="list_variants"
+)
+async def list_variants(
+    product_id: int,
+    all: bool = False,
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(ProductVariant).where(ProductVariant.product_id == product_id)
+    # Only admins may request inactive variants via ?all=true; everyone else sees active.
+    if not (all and user is not None and user.role == "admin"):
+        q = q.where(ProductVariant.status == "active")
+    q = q.order_by(ProductVariant.sort_order, ProductVariant.id)
+    return (await db.execute(q)).scalars().all()
+
+
+@router.get("/{product_id}/full", response_model=ProductFullOut, operation_id="get_product_full")
+async def get_product_full(product_id: int, db: AsyncSession = Depends(get_db)):
+    product = await _require_product(db, product_id)
+    variants = (
+        await db.execute(
+            select(ProductVariant)
+            .where(ProductVariant.product_id == product_id, ProductVariant.status == "active")
+            .order_by(ProductVariant.sort_order, ProductVariant.id)
+        )
+    ).scalars().all()
+    out = ProductFullOut.model_validate(product)
+    out.variants = [VariantOut.model_validate(v) for v in variants]
+    return out
+
+
+@router.patch(
+    "/variants/{variant_id}",
+    response_model=VariantOut,
+    operation_id="update_variant",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def update_variant(variant_id: int, data: VariantUpdate, db: AsyncSession = Depends(get_db)):
+    variant = await db.get(ProductVariant, variant_id)
+    if variant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Variant not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(variant, field, value)
+    await db.commit()
+    await db.refresh(variant)
+    return variant
+
+
+@router.delete(
+    "/variants/{variant_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    operation_id="retire_variant",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def retire_variant(variant_id: int, db: AsyncSession = Depends(get_db)):
+    variant = await db.get(ProductVariant, variant_id)
+    if variant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Variant not found")
+    variant.status = "inactive"  # soft-delete
+    await db.commit()
