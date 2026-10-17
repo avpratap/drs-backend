@@ -4,14 +4,23 @@ Erasure is PII tombstoning, not hard-delete: financial/tax records (invoices,
 payments, ledgers) must be retained for legal compliance, so we anonymize the
 person while leaving the money trail intact, and revoke all consents.
 """
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.auth_session import AuthSession
+from app.models.delivery import DeliveryOrder
 from app.models.device_token import DeviceToken
+from app.models.driver import DriverLocation
+from app.models.fulfillment import ProofOfDelivery
 from app.models.invoice import Invoice
+from app.models.newsletter import NewsletterSubscriber
+from app.models.notification import Notification
 from app.models.order import Order
 from app.models.profile import Address, Consent, PaymentMandate, PaymentMethod, UserProfile
+from app.models.rating import Rating
+from app.models.shipment import Shipment
 from app.models.shop import CustomerAccount
+from app.models.support import SupportTicket, TicketMessage
 from app.models.user import User
 from app.services import profile as profile_svc
 
@@ -53,6 +62,12 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
     consents = (
         await db.execute(select(Consent).where(Consent.user_id == user.id).order_by(Consent.id))
     ).scalars().all()
+    tickets = (
+        await db.execute(select(SupportTicket).where(SupportTicket.created_by == user.id))
+    ).scalars().all()
+    ratings = (
+        await db.execute(select(Rating).where(Rating.user_id == user.id))
+    ).scalars().all()
 
     return {
         "user": {"id": user.id, "phone": user.phone, "email": user.email, "name": user.full_name},
@@ -93,15 +108,25 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
         "consents": [
             {"purpose": c.purpose, "action": c.action, "at": str(c.created_at)} for c in consents
         ],
+        "support_tickets": [
+            {"id": t.id, "subject": t.subject, "status": t.status} for t in tickets
+        ],
+        "ratings": [
+            {"product_id": r.product_id, "stars": r.stars, "comment": r.comment} for r in ratings
+        ],
     }
 
 
 async def erase_user(db: AsyncSession, user: User) -> dict:
-    """Anonymize PII and revoke consent; retain financial records (append a withdrawal)."""
+    """Anonymize PII and revoke consent; retain financial/tax records (invoices, ledgers).
+    Covers every PII-bearing table keyed to the user or their account(s)."""
+    orig_email = user.email  # capture before nulling (newsletter is keyed by email)
     # base-36 keeps the unique tombstone within phone's VARCHAR(16) for any id size.
     user.phone = f"erz-{_b36(user.id)}"
     user.email = None
     user.full_name = None
+    user.password_hash = None
+    user.phone_verified = False
     user.status = "erased"
     user.token_version += 1  # invalidate all existing tokens
 
@@ -144,10 +169,75 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
             m.display = None
             m.status = "removed"
 
+        # Cancel UPI-AutoPay / e-NACH mandates so an erased subject can't still be debited.
+        await db.execute(
+            update(PaymentMandate)
+            .where(
+                PaymentMandate.account_id.in_(account_ids),
+                PaymentMandate.status.notin_(("cancelled", "expired")),
+            )
+            .values(status="cancelled", gateway_mandate_id=None)
+        )
+        # Proof-of-delivery (recipient name, signature/photo, GPS) via the account's orders.
+        do_ids = (
+            await db.execute(
+                select(DeliveryOrder.id).where(DeliveryOrder.account_id.in_(account_ids))
+            )
+        ).scalars().all()
+        if do_ids:
+            await db.execute(
+                update(ProofOfDelivery)
+                .where(ProofOfDelivery.delivery_order_id.in_(do_ids))
+                .values(
+                    recipient_name=None, photo_url=None, signature_url=None,
+                    note=None, lat=None, lng=None,
+                )
+            )
+        # Courier shipment destination snapshot (keep state/pincode for tax/courier stats).
+        await db.execute(
+            update(Shipment)
+            .where(Shipment.account_id.in_(account_ids))
+            .values(to_name=None, to_phone=None, to_address=None, to_city=None)
+        )
+
     # Deactivate device tokens so an erased subject stops receiving push.
     await db.execute(
         update(DeviceToken).where(DeviceToken.user_id == user.id).values(active=False)
     )
+    # Scrub rendered PII from the notification outbox (to_addr = phone/token, body/payload).
+    await db.execute(
+        update(Notification).where(Notification.user_id == user.id).values(
+            to_addr=None, body=None, payload=None
+        )
+    )
+    # Support tickets / messages (free-text often contains name/address/phone).
+    await db.execute(
+        update(SupportTicket).where(SupportTicket.created_by == user.id).values(subject="erased")
+    )
+    await db.execute(
+        update(TicketMessage).where(TicketMessage.sender_user_id == user.id).values(
+            body="erased", attachment_url=None
+        )
+    )
+    # Review free-text.
+    await db.execute(
+        update(Rating).where(Rating.user_id == user.id).values(comment=None, admin_reply=None)
+    )
+    # Auth-session request metadata (IP / user-agent / device name).
+    await db.execute(
+        update(AuthSession).where(AuthSession.user_id == user.id).values(
+            ip=None, user_agent=None, device_name=None
+        )
+    )
+    # Driver GPS ping history (if the subject was a delivery user).
+    await db.execute(delete(DriverLocation).where(DriverLocation.driver_id == user.id))
+    # Newsletter subscription (keyed by email, not user_id) — fully remove.
+    if orig_email:
+        await db.execute(
+            delete(NewsletterSubscriber).where(
+                func.lower(NewsletterSubscriber.email) == orig_email.lower()
+            )
+        )
 
     for purpose in ("whatsapp_optin", "marketing_sms", "marketing_email", "data_processing"):
         db.add(Consent(user_id=user.id, purpose=purpose, action="withdrawn", source="erasure"))

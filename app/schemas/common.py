@@ -35,6 +35,10 @@ class DataExportOut(BaseModel):
     profile: dict | None = None
     addresses: list[dict]
     payment_methods: list[dict]
+    payment_mandates: list[dict] = []
+    device_tokens: list[dict] = []
     orders: list[dict]
     invoices: list[dict]
     consents: list[dict]
+    support_tickets: list[dict] = []
+    ratings: list[dict] = []
