@@ -43,7 +43,13 @@ async def create_transfer(db: AsyncSession, from_loc, to_loc, items, note, user_
 
 
 async def _items(db: AsyncSession, transfer_id: int, *, lock: bool = False):
-    q = select(StockTransferItem).where(StockTransferItem.transfer_id == transfer_id)
+    # Deterministic product_id order so dispatch acquires stock-item locks in the same
+    # global order as production/expiry (prevents lock-order deadlocks).
+    q = (
+        select(StockTransferItem)
+        .where(StockTransferItem.transfer_id == transfer_id)
+        .order_by(StockTransferItem.product_id)
+    )
     if lock:
         q = q.with_for_update()
     return (await db.execute(q)).scalars().all()

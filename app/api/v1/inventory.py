@@ -172,12 +172,15 @@ async def list_reorder_suggestions(
 
 
 @router.post("/stock/adjust", response_model=StockItemOut, operation_id="adjust_stock")
-async def adjust(data: StockAdjustIn, db: AsyncSession = Depends(get_db)):
+async def adjust(
+    data: StockAdjustIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
     if data.change == 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "change must be non-zero")
     await _require_product(db, data.product_id)
     item = await inventory.adjust_stock(
-        db, data.product_id, data.change, data.reason, location_id=data.location_id, note=data.note
+        db, data.product_id, data.change, data.reason,
+        location_id=data.location_id, note=data.note, created_by=user.id,
     )
     await db.commit()
     await db.refresh(item)
@@ -185,10 +188,13 @@ async def adjust(data: StockAdjustIn, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/stock/wastage", response_model=StockItemOut, operation_id="record_wastage")
-async def wastage(data: WastageIn, db: AsyncSession = Depends(get_db)):
+async def wastage(
+    data: WastageIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
     await _require_product(db, data.product_id)
     item = await inventory.adjust_stock(
-        db, data.product_id, -data.qty, "wastage", location_id=data.location_id, note=data.note
+        db, data.product_id, -data.qty, "wastage",
+        location_id=data.location_id, note=data.note, created_by=user.id,
     )
     await db.commit()
     await db.refresh(item)
@@ -198,15 +204,10 @@ async def wastage(data: WastageIn, db: AsyncSession = Depends(get_db)):
 @router.post("/stock/reorder", response_model=StockItemOut, operation_id="set_reorder_point")
 async def set_reorder(data: ReorderIn, db: AsyncSession = Depends(get_db)):
     await _require_product(db, data.product_id)
-    loc = data.location_id or await inventory.default_location_id(db)
-    item = await db.scalar(
-        select(StockItem).where(
-            StockItem.product_id == data.product_id, StockItem.location_id == loc
-        )
-    )
-    if item is None:
-        item = StockItem(product_id=data.product_id, location_id=loc, qty_on_hand=0)
-        db.add(item)
+    # Reuse the hardened helpers: require_location validates/defaults the location (clean
+    # 404/409 instead of an FK/NOT-NULL 500) and _locked_item get-or-creates race-safely.
+    loc = await inventory.require_location(db, data.location_id)
+    item = await inventory._locked_item(db, data.product_id, loc)
     item.reorder_point = data.reorder_point
     await db.commit()
     await db.refresh(item)

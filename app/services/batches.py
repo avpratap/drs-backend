@@ -6,11 +6,13 @@ the remainder is still decremented from the aggregate as an unbatched movement
 (stock can go negative — a delivery is never blocked on inventory).
 """
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.batch import StockBatch
 from app.models.inventory import StockMovement
 from app.services.inventory import _locked_item, require_location
@@ -73,8 +75,13 @@ async def consume_fefo(
     ref_id: int | None = None,
     created_by: int | None = None,
 ) -> None:
-    """Remove `qty` from stock, allocating across batches earliest-expiry-first."""
+    """Remove `qty` from stock, allocating across batches earliest-expiry-first.
+
+    Already-expired lots (expiry < today, pending the expiry sweep) are NOT allocated, so
+    FEFO never ships expired perishables; any shortfall of fresh stock falls to the
+    unbatched remainder (aggregate may go negative — a delivery is never blocked)."""
     location_id = await require_location(db, location_id)
+    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
     item = await _locked_item(db, product_id, location_id)
     item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
 
@@ -86,6 +93,7 @@ async def consume_fefo(
                 StockBatch.location_id == location_id,
                 StockBatch.status == "active",
                 StockBatch.qty > 0,
+                or_(StockBatch.expiry_date.is_(None), StockBatch.expiry_date >= today),
             )
             .order_by(StockBatch.expiry_date.asc().nulls_last(), StockBatch.id.asc())
             .with_for_update()

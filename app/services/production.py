@@ -88,7 +88,7 @@ async def complete_order(db: AsyncSession, pro: ProductionOrder, output_batch_no
     await batch_svc.receive_batch(
         db, pro.product_id, output_batch_no, float(pro.planned_qty),
         location_id=pro.location_id, mfg_date=mfg_date, expiry_date=expiry_date,
-        created_by=user_id,
+        created_by=user_id, reason="production", ref_type="production", ref_id=pro.id,
     )
     pro.output_batch_no = output_batch_no
     pro.mfg_date = mfg_date

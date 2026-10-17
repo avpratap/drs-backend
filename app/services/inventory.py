@@ -21,8 +21,12 @@ async def require_location(db: AsyncSession, location_id: int | None) -> int:
     missing location fails cleanly instead of a NOT-NULL IntegrityError 500 later."""
     if location_id is None:
         location_id = await default_location_id(db)
-    if location_id is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "No stock location configured")
+        if location_id is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "No stock location configured")
+        return location_id
+    # A supplied id must actually exist, else inserts fail with an opaque FK 500.
+    if await db.get(Location, location_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
     return location_id
 
 
