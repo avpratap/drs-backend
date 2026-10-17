@@ -1,0 +1,188 @@
+"""Support tickets: customer inbox + admin console."""
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.db import get_db
+from app.deps.auth import get_current_user, require_role
+from app.deps.pagination import Page, pagination
+from app.models.support import SupportTicket, TicketMessage
+from app.models.user import User
+from app.services import support
+
+router = APIRouter(tags=["support"])
+
+
+# ---------- Schemas ----------
+class TicketCreateIn(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    category: str = Field(default="other", pattern="^(order|delivery|payment|product|other)$")
+    body: str = Field(min_length=1, max_length=5000)
+
+
+class MessageIn(BaseModel):
+    body: str = Field(min_length=1, max_length=5000)
+    attachment_url: str | None = Field(default=None, max_length=512)
+
+
+class StatusIn(BaseModel):
+    status: str = Field(pattern="^(open|pending|resolved|closed)$")
+
+
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    sender_role: str
+    body: str
+    attachment_url: str | None = None
+
+
+class TicketOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    ticket_no: str
+    subject: str
+    category: str
+    status: str
+    priority: str
+    messages: list[MessageOut] = []
+
+
+async def _messages(db: AsyncSession, ticket_id: int) -> list[MessageOut]:
+    rows = (
+        await db.execute(
+            select(TicketMessage)
+            .where(TicketMessage.ticket_id == ticket_id)
+            .order_by(TicketMessage.id)
+        )
+    ).scalars().all()
+    return [MessageOut.model_validate(m) for m in rows]
+
+
+async def _with_messages(db: AsyncSession, ticket: SupportTicket) -> TicketOut:
+    out = TicketOut.model_validate(ticket)
+    out.messages = await _messages(db, ticket.id)
+    return out
+
+
+async def _owned_or_404(db: AsyncSession, ticket_id: int, user: User) -> SupportTicket:
+    ticket = await db.get(SupportTicket, ticket_id)
+    # 404 (not 403) on someone else's ticket so ids aren't enumerable.
+    if ticket is None or ticket.created_by != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    return ticket
+
+
+# ---------- Customer ----------
+@router.post("/support/tickets", response_model=TicketOut, operation_id="create_ticket")
+async def create_ticket(
+    data: TicketCreateIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    ticket = await support.create_ticket(db, user, data.subject, data.category, data.body)
+    await db.commit()
+    await db.refresh(ticket)
+    return await _with_messages(db, ticket)
+
+
+@router.get("/support/tickets", response_model=list[TicketOut], operation_id="list_my_tickets")
+async def list_my_tickets(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    rows = (
+        await db.execute(
+            select(SupportTicket)
+            .where(SupportTicket.created_by == user.id)
+            .order_by(SupportTicket.id.desc())
+            .limit(page.limit)
+            .offset(page.offset)
+        )
+    ).scalars().all()
+    return [await _with_messages(db, t) for t in rows]
+
+
+@router.get("/support/tickets/{ticket_id}", response_model=TicketOut, operation_id="get_ticket")
+async def get_ticket(
+    ticket_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    ticket = await _owned_or_404(db, ticket_id, user)
+    return await _with_messages(db, ticket)
+
+
+@router.post(
+    "/support/tickets/{ticket_id}/messages", response_model=TicketOut, operation_id="reply_ticket"
+)
+async def reply_ticket(
+    ticket_id: int,
+    data: MessageIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    ticket = await _owned_or_404(db, ticket_id, user)
+    await support.add_message(db, ticket, user, data.body, data.attachment_url)
+    await db.commit()
+    await db.refresh(ticket)
+    return await _with_messages(db, ticket)
+
+
+# ---------- Admin ----------
+@router.get(
+    "/admin/support/tickets",
+    response_model=list[TicketOut],
+    operation_id="admin_list_tickets",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_list_tickets(
+    status_filter: str | None = None,
+    category: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    q = select(SupportTicket).order_by(SupportTicket.id.desc())
+    if status_filter:
+        q = q.where(SupportTicket.status == status_filter)
+    if category:
+        q = q.where(SupportTicket.category == category)
+    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return [await _with_messages(db, t) for t in rows]
+
+
+@router.post(
+    "/admin/support/tickets/{ticket_id}/messages",
+    response_model=TicketOut,
+    operation_id="admin_reply_ticket",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_reply_ticket(
+    ticket_id: int,
+    data: MessageIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    ticket = await db.get(SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    await support.add_message(db, ticket, user, data.body, data.attachment_url)
+    await db.commit()
+    await db.refresh(ticket)
+    return await _with_messages(db, ticket)
+
+
+@router.post(
+    "/admin/support/tickets/{ticket_id}/status",
+    response_model=TicketOut,
+    operation_id="admin_set_ticket_status",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_set_ticket_status(
+    ticket_id: int, data: StatusIn, db: AsyncSession = Depends(get_db)
+):
+    ticket = await db.get(SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    await support.set_status(db, ticket, data.status)
+    await db.commit()
+    await db.refresh(ticket)
+    return await _with_messages(db, ticket)

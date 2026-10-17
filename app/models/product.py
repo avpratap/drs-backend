@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Boolean, Numeric, String
+from sqlalchemy import BigInteger, Boolean, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -25,3 +25,6 @@ class Product(Base, TimestampMixin):
     length_cm: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
     width_cm: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
     height_cm: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    # Denormalized review aggregates (recomputed over approved reviews on each change).
+    avg_rating: Mapped[float] = mapped_column(Numeric(3, 2), default=0, nullable=False)
+    rating_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

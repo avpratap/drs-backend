@@ -13,6 +13,27 @@ from app.core.security import decode_token
 from app.models.user import User
 
 _bearer = HTTPBearer(auto_error=True)
+_bearer_optional = HTTPBearer(auto_error=False)
+
+
+async def get_optional_user(
+    cred: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """Current user if a valid bearer is present, else None (for public-readable
+    endpoints that personalize when authenticated)."""
+    if cred is None:
+        return None
+    try:
+        payload = decode_token(cred.credentials)
+        if payload.get("type") != "access":
+            return None
+        user = await db.get(User, int(payload["sub"]))
+    except (jwt.PyJWTError, KeyError, ValueError):
+        return None
+    if user is None or user.status != "active" or user.token_version != payload.get("ver"):
+        return None
+    return user
 
 
 async def get_current_user(

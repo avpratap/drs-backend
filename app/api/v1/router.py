@@ -6,6 +6,7 @@ from app.api.v1 import (
     ai,
     auth,
     billing,
+    cart,
     delivery,
     inventory,
     invoices,
@@ -15,9 +16,12 @@ from app.api.v1 import (
     procurement,
     production,
     products,
+    reviews,
+    rma,
     shipping,
     shops,
     subscriptions,
+    support,
     transfers,
 )
 
@@ -39,4 +43,8 @@ api_router.include_router(procurement.router)
 api_router.include_router(transfers.router)
 api_router.include_router(production.router)
 api_router.include_router(shipping.router)
+api_router.include_router(cart.router)
+api_router.include_router(rma.router)
+api_router.include_router(reviews.router)
+api_router.include_router(support.router)
 api_router.include_router(ai.router)

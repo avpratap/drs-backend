@@ -2,6 +2,7 @@ from app.models.auth_session import AuthSession
 from app.models.base import Base
 from app.models.batch import StockBatch
 from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
+from app.models.cart import Cart, CartItem
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
@@ -22,11 +23,13 @@ from app.models.profile import (
     PaymentMethod,
     UserProfile,
 )
-from app.models.rating import Rating
+from app.models.rating import Rating, ReviewHelpful
 from app.models.refund import Refund, WebhookEvent
+from app.models.rma import ReturnRequest, ReturnRequestItem
 from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
+from app.models.support import SupportTicket, TicketMessage
 from app.models.transfer import StockTransfer, StockTransferItem, StockTransferLot
 from app.models.user import User, UserRole
 from app.models.warehouse import Location
@@ -37,6 +40,8 @@ __all__ = [
     "Base",
     "BillOfMaterials",
     "BomComponent",
+    "Cart",
+    "CartItem",
     "CashCollection",
     "Consent",
     "Coupon",
@@ -66,6 +71,9 @@ __all__ = [
     "Rating",
     "Refund",
     "Return",
+    "ReturnRequest",
+    "ReturnRequestItem",
+    "ReviewHelpful",
     "ScheduleRun",
     "Shipment",
     "ShipmentTrackingEvent",
@@ -80,6 +88,8 @@ __all__ = [
     "SubscriptionItem",
     "SubscriptionOverride",
     "Supplier",
+    "SupportTicket",
+    "TicketMessage",
     "User",
     "UserProfile",
     "UserRole",

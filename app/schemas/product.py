@@ -32,3 +32,9 @@ class ProductOut(ProductCreate):
     model_config = ConfigDict(from_attributes=True)
     id: int
     status: str
+    avg_rating: float = 0
+    rating_count: int = 0
+    weight_kg: float | None = None
+    length_cm: float | None = None
+    width_cm: float | None = None
+    height_cm: float | None = None
