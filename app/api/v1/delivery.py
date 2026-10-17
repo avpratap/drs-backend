@@ -3,7 +3,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -47,12 +47,54 @@ async def upload_pod_asset(
     return {"url": url}
 
 
+async def _attach_stop_details(db: AsyncSession, views: list[DeliveryOrderOut]) -> None:
+    """Fill each stop's shop address/pincode/geo + the account owner's name/phone, so
+    the delivery app knows where to go and who to hand to (batched; no N+1)."""
+    if not views:
+        return
+    shop_ids = {v.shop_id for v in views}
+    rows = (
+        await db.execute(
+            text(
+                "SELECT s.id, s.name, s.address, s.pincode, s.account_id, "
+                "ST_Y(s.geo::geometry) AS lat, ST_X(s.geo::geometry) AS lng "
+                "FROM shops s WHERE s.id = ANY(:ids)"
+            ),
+            {"ids": list(shop_ids)},
+        )
+    ).mappings().all()
+    shop = {r["id"]: r for r in rows}
+    account_ids = {r["account_id"] for r in rows}
+    contacts: dict[int, tuple[str | None, str | None]] = {}
+    if account_ids:
+        crows = (
+            await db.execute(
+                text(
+                    "SELECT a.id, u.full_name, u.phone FROM customer_accounts a "
+                    "JOIN users u ON u.id = a.owner_user_id WHERE a.id = ANY(:ids)"
+                ),
+                {"ids": list(account_ids)},
+            )
+        ).mappings().all()
+        contacts = {r["id"]: (r["full_name"], r["phone"]) for r in crows}
+    for v in views:
+        s = shop.get(v.shop_id)
+        if s is None:
+            continue
+        v.shop_name, v.address, v.pincode = s["name"], s["address"], s["pincode"]
+        v.lat = float(s["lat"]) if s["lat"] is not None else None
+        v.lng = float(s["lng"]) if s["lng"] is not None else None
+        name, phone = contacts.get(s["account_id"], (None, None))
+        v.contact_name, v.contact_phone = name, phone
+
+
 async def _order_detail(db: AsyncSession, order: DeliveryOrder) -> DeliveryOrderOut:
     res = await db.execute(
         select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
     )
     out = DeliveryOrderOut.model_validate(order)
     out.items = [DeliveryOrderItemOut.model_validate(i) for i in res.scalars().all()]
+    await _attach_stop_details(db, [out])
     return out
 
 
@@ -74,6 +116,7 @@ async def _order_details(db: AsyncSession, orders: list[DeliveryOrder]) -> list[
         view = DeliveryOrderOut.model_validate(o)
         view.items = by_order.get(o.id, [])
         views.append(view)
+    await _attach_stop_details(db, views)
     return views
 
 

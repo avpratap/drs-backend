@@ -3,6 +3,8 @@ from fastapi import APIRouter
 from app.api.v1 import (
     account,
     admin,
+    admin_analytics,
+    admin_sales,
     admin_tools,
     ai,
     auth,
@@ -11,6 +13,8 @@ from app.api.v1 import (
     content,
     delivery,
     devices,
+    home,
+    inbox,
     inventory,
     invoices,
     loyalty,
@@ -29,6 +33,7 @@ from app.api.v1 import (
     subscriptions,
     support,
     transfers,
+    uploads,
     wishlist,
 )
 
@@ -63,3 +68,8 @@ api_router.include_router(wishlist.router)
 api_router.include_router(newsletter.router)
 api_router.include_router(ml.router)
 api_router.include_router(ai.router)
+api_router.include_router(admin_sales.router)
+api_router.include_router(admin_analytics.router)
+api_router.include_router(uploads.router)
+api_router.include_router(home.router)
+api_router.include_router(inbox.router)

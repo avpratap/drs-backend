@@ -4,7 +4,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubscriptionCreate(BaseModel):
-    shop_id: int
+    # B2B subscribers pass one of their shop_ids. Retail customers may omit it; a "home
+    # shop" is auto-provisioned under their account from the optional address fields.
+    shop_id: int | None = None
+    home_name: str | None = Field(default=None, max_length=255)
+    home_address: str | None = Field(default=None, max_length=1024)
+    home_state: str | None = Field(default=None, max_length=120)
+    home_pincode: str | None = Field(default=None, max_length=10)
 
 
 class ItemIn(BaseModel):

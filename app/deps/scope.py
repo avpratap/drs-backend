@@ -15,7 +15,10 @@ ALL = object()  # sentinel meaning "no restriction" (admins)
 async def allowed_shop_ids(user: User, db: AsyncSession):
     if user.role == "admin":
         return ALL
-    if user.role == "subscriber":
+    # Subscribers (B2B) and retail customers both own their shops via their account
+    # (a retail customer's "home shop" is their delivery address). They see only their
+    # own account's shops — no cross-account access.
+    if user.role in ("subscriber", "customer"):
         res = await db.execute(
             select(Shop.id)
             .join(CustomerAccount, Shop.account_id == CustomerAccount.id)

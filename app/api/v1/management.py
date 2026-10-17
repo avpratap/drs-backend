@@ -24,13 +24,16 @@ from app.schemas.management import (
     AccountBillingOut,
     CouponIn,
     CouponOut,
+    CouponPatch,
     CreditSettleIn,
     DeliveryAssignmentIn,
     DeliveryAssignmentOut,
     PriceTierIn,
     PriceTierOut,
+    PriceTierPatch,
     ProductPriceIn,
     ProductPriceOut,
+    ProductPricePatch,
     ShopPatch,
     TierAssignIn,
     UserAdminOut,
@@ -164,6 +167,45 @@ async def list_price_tiers(db: AsyncSession = Depends(get_db)):
     return (await db.execute(select(PriceTier).order_by(PriceTier.id).limit(500))).scalars().all()
 
 
+@router.get("/price-tiers/{tier_id}", response_model=PriceTierOut, operation_id="get_price_tier")
+async def get_price_tier(tier_id: int, db: AsyncSession = Depends(get_db)):
+    tier = await db.get(PriceTier, tier_id)
+    if tier is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Price tier not found")
+    return tier
+
+
+@router.patch("/price-tiers/{tier_id}", response_model=PriceTierOut, operation_id="update_price_tier")
+async def update_price_tier(tier_id: int, data: PriceTierPatch, db: AsyncSession = Depends(get_db)):
+    tier = await db.get(PriceTier, tier_id)
+    if tier is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Price tier not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(tier, field, value)
+    await db.commit()
+    await db.refresh(tier)
+    return tier
+
+
+@router.delete(
+    "/price-tiers/{tier_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    operation_id="delete_price_tier",
+)
+async def delete_price_tier(tier_id: int, db: AsyncSession = Depends(get_db)):
+    tier = await db.get(PriceTier, tier_id)
+    if tier is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Price tier not found")
+    # Refuse to delete a tier still referenced by prices/shops/accounts (would orphan).
+    for model, col in ((ProductPrice, ProductPrice.price_tier_id),
+                       (Shop, Shop.price_tier_id),
+                       (CustomerAccount, CustomerAccount.price_tier_id)):
+        if await db.scalar(select(func.count()).select_from(model).where(col == tier_id)):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Tier is in use; reassign first")
+    await db.delete(tier)
+    await db.commit()
+
+
 # ---------- Product prices ----------
 @router.post(
     "/product-prices", response_model=ProductPriceOut, operation_id="create_product_price"
@@ -200,6 +242,52 @@ async def list_product_prices(
     if product_id is not None:
         q = q.where(ProductPrice.product_id == product_id)
     return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+
+
+@router.get(
+    "/product-prices/{price_id}", response_model=ProductPriceOut, operation_id="get_product_price"
+)
+async def get_product_price(price_id: int, db: AsyncSession = Depends(get_db)):
+    price = await db.get(ProductPrice, price_id)
+    if price is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product price not found")
+    return price
+
+
+@router.patch(
+    "/product-prices/{price_id}",
+    response_model=ProductPriceOut,
+    operation_id="update_product_price",
+)
+async def update_product_price(
+    price_id: int, data: ProductPricePatch, db: AsyncSession = Depends(get_db)
+):
+    price = await db.get(ProductPrice, price_id)
+    if price is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product price not found")
+    patch = data.model_dump(exclude_unset=True)
+    for field, value in patch.items():
+        setattr(price, field, value)
+    if price.valid_to and price.valid_to < price.valid_from:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    await db.commit()
+    await db.refresh(price)
+    await cache_delete("cache:products:active")
+    return price
+
+
+@router.delete(
+    "/product-prices/{price_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    operation_id="delete_product_price",
+)
+async def delete_product_price(price_id: int, db: AsyncSession = Depends(get_db)):
+    price = await db.get(ProductPrice, price_id)
+    if price is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product price not found")
+    await db.delete(price)
+    await db.commit()
+    await cache_delete("cache:products:active")
 
 
 # ---------- Tier assignment ----------
@@ -297,6 +385,31 @@ async def list_coupons(
     if active is not None:
         q = q.where(Coupon.active == active)
     return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+
+
+@router.get("/coupons/{coupon_id}", response_model=CouponOut, operation_id="get_coupon")
+async def get_coupon(coupon_id: int, db: AsyncSession = Depends(get_db)):
+    coupon = await db.get(Coupon, coupon_id)
+    if coupon is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Coupon not found")
+    return coupon
+
+
+@router.patch("/coupons/{coupon_id}", response_model=CouponOut, operation_id="update_coupon")
+async def update_coupon(coupon_id: int, data: CouponPatch, db: AsyncSession = Depends(get_db)):
+    coupon = await db.get(Coupon, coupon_id)
+    if coupon is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Coupon not found")
+    patch = data.model_dump(exclude_unset=True)
+    if "value" in patch and coupon.discount_type == "percent" and patch["value"] > 100:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "percent value must be <= 100")
+    for field, value in patch.items():
+        setattr(coupon, field, value)
+    if coupon.valid_to and coupon.valid_from and coupon.valid_to < coupon.valid_from:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    await db.commit()
+    await db.refresh(coupon)
+    return coupon
 
 
 @router.post("/coupons/{coupon_id}/deactivate", response_model=CouponOut, operation_id="deactivate_coupon")

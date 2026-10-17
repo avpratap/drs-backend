@@ -1,4 +1,7 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,9 +10,11 @@ from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.models.order import Order, OrderItem
 from app.models.product import Product
+from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.schemas.order import OrderCreate, OrderItemOut, OrderOut
+from app.services import invoicing
 from app.services import orders as order_service
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -159,3 +164,96 @@ async def reorder(
     items = [_ReorderItem(i.product_id, float(i.qty)) for i in src_items]
     order = await order_service.create_order(db, user, items, None, None)
     return await _detail(db, order)
+
+
+# ---------- Invoice + live tracking ----------
+class InvoiceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    invoice_no: str
+    invoice_date: dt.date
+    total: float
+
+
+class TrackingEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    status: str
+    location: str | None = None
+    note: str | None = None
+    event_time: dt.datetime | None = None
+
+
+class ShipmentTrackOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    shipment_no: str
+    status: str
+    courier: str | None = None
+    awb: str | None = None
+    tracking_url: str | None = None
+    events: list[TrackingEventOut] = []
+
+
+class OrderTrackingOut(BaseModel):
+    order_id: int
+    order_no: str
+    status: str
+    payment_status: str
+    shipments: list[ShipmentTrackOut] = []
+
+
+async def _owned_order(db: AsyncSession, order_id: int, user: User) -> Order:
+    order = await db.get(Order, order_id)
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if user.role != "admin" and order.account_id not in await _my_account_ids(db, user):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    return order
+
+
+@router.post("/{order_id}/invoice", response_model=InvoiceOut, operation_id="generate_order_invoice")
+async def generate_order_invoice(
+    order_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Issue (or fetch the existing) GST tax invoice for a paid one-time order. Idempotent."""
+    order = await _owned_order(db, order_id, user)
+    if order.payment_status != "paid":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Invoice is available only after the order is paid"
+        )
+    inv = await invoicing.generate_for_order(db, order)
+    return inv
+
+
+@router.get("/{order_id}/tracking", response_model=OrderTrackingOut, operation_id="track_order")
+async def track_order(
+    order_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Live status for a one-time order: order + payment state plus each courier shipment
+    with its latest tracking events (newest first)."""
+    order = await _owned_order(db, order_id, user)
+    shipments = (
+        await db.execute(
+            select(Shipment).where(Shipment.order_id == order.id).order_by(Shipment.id.desc())
+        )
+    ).scalars().all()
+    out_shipments: list[ShipmentTrackOut] = []
+    for sh in shipments:
+        events = (
+            await db.execute(
+                select(ShipmentTrackingEvent)
+                .where(ShipmentTrackingEvent.shipment_id == sh.id)
+                .order_by(ShipmentTrackingEvent.id.desc())
+                .limit(50)
+            )
+        ).scalars().all()
+        view = ShipmentTrackOut.model_validate(sh)
+        view.events = [TrackingEventOut.model_validate(e) for e in events]
+        out_shipments.append(view)
+    return OrderTrackingOut(
+        order_id=order.id,
+        order_no=order.order_no,
+        status=order.status,
+        payment_status=order.payment_status,
+        shipments=out_shipments,
+    )

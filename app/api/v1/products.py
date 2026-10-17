@@ -8,6 +8,7 @@ from app.core.cache import cache_delete, cache_get_json, cache_set_json
 from app.core.db import get_db
 from app.deps.auth import get_current_user, get_optional_user, require_role
 from app.deps.pagination import Page, pagination
+from app.models.inventory import StockItem
 from app.models.product import Product
 from app.models.rating import Rating, ReviewHelpful
 from app.models.user import User
@@ -52,15 +53,29 @@ class HelpfulOut(BaseModel):
     voted: bool
 
 
+_SORTS = {
+    "newest": Product.id.desc(),
+    "rating": Product.avg_rating.desc(),
+    "name": Product.name.asc(),
+}
+
+
 @router.get("", response_model=list[ProductOut], operation_id="list_products")
 async def list_products(
     category: str | None = None,
     q: str | None = None,
+    sort: str | None = None,  # newest | rating | name (default: id asc)
+    perishable: bool | None = None,
+    in_stock: bool | None = None,
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    # Only the plain full-active list is cached; filtered/search queries hit the DB.
-    if category is None and q is None and page.offset == 0:
+    # Only the plain full-active list (no filters/sort) is cached; anything else hits DB.
+    plain = (
+        category is None and q is None and sort is None
+        and perishable is None and in_stock is None and page.offset == 0
+    )
+    if plain:
         cached = await cache_get_json(_CACHE_KEY)
         if cached is not None:
             return cached
@@ -70,12 +85,35 @@ async def list_products(
     if q is not None:
         like = f"%{q}%"
         query = query.where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
-    query = query.order_by(Product.id).limit(page.limit).offset(page.offset)
+    if perishable is not None:
+        query = query.where(Product.perishable.is_(perishable))
+    if in_stock:
+        in_stock_ids = (
+            select(StockItem.product_id)
+            .group_by(StockItem.product_id)
+            .having(func.sum(StockItem.qty_on_hand) > 0)
+        )
+        query = query.where(Product.id.in_(in_stock_ids))
+    query = query.order_by(_SORTS.get(sort, Product.id)).limit(page.limit).offset(page.offset)
     rows = (await db.execute(query)).scalars().all()
     out = [ProductOut.model_validate(p).model_dump() for p in rows]
-    if category is None and q is None and page.offset == 0:
+    if plain:
         await cache_set_json(_CACHE_KEY, out)
     return out
+
+
+@router.get("/categories", response_model=list[str], operation_id="list_product_categories")
+async def list_product_categories(db: AsyncSession = Depends(get_db)):
+    """Distinct categories among active products (storefront nav/facets)."""
+    rows = (
+        await db.execute(
+            select(Product.category)
+            .where(Product.status == "active", Product.category.is_not(None))
+            .distinct()
+            .order_by(Product.category)
+        )
+    ).scalars().all()
+    return rows
 
 
 @router.get("/{product_id}", response_model=ProductOut, operation_id="get_product")

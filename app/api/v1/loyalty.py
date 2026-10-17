@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.models.loyalty import GiftCard
+from app.deps.pagination import Page, pagination
+from app.models.loyalty import GiftCard, LoyaltyAccount
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.services import loyalty
@@ -67,6 +68,23 @@ class AdjustPointsIn(BaseModel):
 
 class IssueGiftIn(BaseModel):
     amount: float = Field(gt=0, le=10_000_000, allow_inf_nan=False)
+    issued_to_account_id: int | None = None
+    expires_at: dt.date | None = None
+
+
+class LoyaltyAccountAdminOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    account_id: int
+    points_balance: int
+
+
+class GiftCardAdminOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    code: str
+    initial_amount: float
+    balance: float
+    status: str
     issued_to_account_id: int | None = None
     expires_at: dt.date | None = None
 
@@ -171,6 +189,62 @@ async def admin_issue_gift_card(data: IssueGiftIn, db: AsyncSession = Depends(ge
     if data.issued_to_account_id is not None and await db.get(CustomerAccount, data.issued_to_account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     gc = await loyalty.issue_gift_card(db, data.amount, data.issued_to_account_id, data.expires_at)
+    await db.commit()
+    await db.refresh(gc)
+    return gc
+
+
+@router.get(
+    "/admin/loyalty",
+    response_model=list[LoyaltyAccountAdminOut],
+    operation_id="admin_list_loyalty",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_list_loyalty(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
+    rows = (
+        await db.execute(
+            select(LoyaltyAccount).order_by(LoyaltyAccount.points_balance.desc())
+            .limit(page.limit).offset(page.offset)
+        )
+    ).scalars().all()
+    return rows
+
+
+@router.get(
+    "/admin/gift-cards",
+    response_model=list[GiftCardAdminOut],
+    operation_id="admin_list_gift_cards",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_list_gift_cards(
+    status_filter: str | None = None,
+    issued_to: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    q = select(GiftCard).order_by(GiftCard.id.desc())
+    if status_filter:
+        q = q.where(GiftCard.status == status_filter)
+    if issued_to is not None:
+        q = q.where(GiftCard.issued_to_account_id == issued_to)
+    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+
+
+@router.post(
+    "/admin/gift-cards/{card_id}/void",
+    response_model=GiftCardAdminOut,
+    operation_id="admin_void_gift_card",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_void_gift_card(card_id: int, db: AsyncSession = Depends(get_db)):
+    gc = (
+        await db.execute(select(GiftCard).where(GiftCard.id == card_id).with_for_update())
+    ).scalar_one_or_none()
+    if gc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
+    if gc.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Gift card is {gc.status}, cannot void")
+    gc.status = "disabled"
     await db.commit()
     await db.refresh(gc)
     return gc

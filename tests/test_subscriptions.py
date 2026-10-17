@@ -57,7 +57,8 @@ async def test_override_past_date_rejected(client):
 
 
 async def test_subscription_scoping(client):
-    # A plain customer owns no shops -> cannot see the subscriber's subscription.
-    cust = await login(client, "9876543210")
+    # A fresh customer owns no shops -> cannot see another account's subscription.
+    # (A retail customer only ever sees subscriptions under their own home shop.)
+    cust = await login(client, "9100000555")
     subs = (await client.get("/api/v1/subscriptions", headers=auth(cust))).json()
     assert subs == []

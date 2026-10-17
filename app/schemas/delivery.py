@@ -25,6 +25,14 @@ class DeliveryOrderOut(BaseModel):
     total: float
     amount_due: float
     items: list[DeliveryOrderItemOut] = []
+    # Stop detail (populated in the serializer) so the delivery app knows where/who.
+    shop_name: str | None = None
+    address: str | None = None
+    pincode: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    contact_name: str | None = None
+    contact_phone: str | None = None
 
 
 class CutoffResult(BaseModel):

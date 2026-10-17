@@ -50,6 +50,30 @@ class ProductPriceOut(BaseModel):
     valid_to: dt.date | None = None
 
 
+class PriceTierPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    tier_type: str | None = Field(default=None, pattern="^(retail|b2b)$")
+
+
+class ProductPricePatch(BaseModel):
+    unit_price: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    min_qty: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    valid_from: dt.date | None = None
+    valid_to: dt.date | None = None
+
+
+class CouponPatch(BaseModel):
+    # The coupon code is immutable; everything else is editable.
+    value: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    min_order_value: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
+    max_discount: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    valid_from: dt.date | None = None
+    valid_to: dt.date | None = None
+    usage_limit: int | None = Field(default=None, ge=1)
+    per_user_limit: int | None = Field(default=None, ge=1)
+    active: bool | None = None
+
+
 class TierAssignIn(BaseModel):
     price_tier_id: int
 

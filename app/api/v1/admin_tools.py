@@ -1,4 +1,6 @@
 """Admin depth: audit log, CSV exports, feature flags, outbound webhooks, product search."""
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
-from app.models.admin_tools import AdminAuditLog, FeatureFlag, OutboundWebhook
+from app.models.admin_tools import (
+    AdminAuditLog,
+    FeatureFlag,
+    OutboundWebhook,
+    OutboundWebhookDelivery,
+)
 from app.models.product import Product
 from app.services import admin_tools as svc
 
@@ -54,6 +61,23 @@ class WebhookOut(BaseModel):
     event_type: str
     url: str
     active: bool
+
+
+class WebhookPatch(BaseModel):
+    event_type: str | None = Field(default=None, min_length=1, max_length=48)
+    url: str | None = Field(default=None, min_length=1, max_length=512)
+    secret: str | None = Field(default=None, max_length=128)
+    active: bool | None = None
+
+
+class WebhookDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    webhook_id: int
+    event_type: str
+    status: str
+    attempts: int
+    response_code: int | None = None
 
 
 class ProductSearchOut(BaseModel):
@@ -159,6 +183,63 @@ async def delete_outbound_webhook(hook_id: int, db: AsyncSession = Depends(get_d
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook not found")
     await db.delete(hook)
     await db.commit()
+
+
+@router.patch(
+    "/outbound-webhooks/{hook_id}", response_model=WebhookOut, operation_id="update_outbound_webhook"
+)
+async def update_outbound_webhook(hook_id: int, data: WebhookPatch, db: AsyncSession = Depends(get_db)):
+    hook = await db.get(OutboundWebhook, hook_id)
+    if hook is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(hook, field, value)
+    await db.commit()
+    await db.refresh(hook)
+    return hook
+
+
+@router.get(
+    "/outbound-webhooks/{hook_id}/deliveries",
+    response_model=list[WebhookDeliveryOut],
+    operation_id="list_webhook_deliveries",
+)
+async def list_webhook_deliveries(
+    hook_id: int, db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)
+):
+    if await db.get(OutboundWebhook, hook_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook not found")
+    return (
+        await db.execute(
+            select(OutboundWebhookDelivery)
+            .where(OutboundWebhookDelivery.webhook_id == hook_id)
+            .order_by(OutboundWebhookDelivery.id.desc())
+            .limit(page.limit)
+            .offset(page.offset)
+        )
+    ).scalars().all()
+
+
+@router.post(
+    "/outbound-webhooks/{hook_id}/test",
+    response_model=WebhookDeliveryOut,
+    operation_id="test_outbound_webhook",
+)
+async def test_outbound_webhook(hook_id: int, db: AsyncSession = Depends(get_db)):
+    """Fire a test delivery at this webhook (uses the real dispatch, fail-soft)."""
+    hook = await db.get(OutboundWebhook, hook_id)
+    if hook is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook not found")
+    payload = {"event": hook.event_type, "test": True, "ts": dt.datetime.now(dt.UTC).isoformat()}
+    delivery = OutboundWebhookDelivery(
+        webhook_id=hook.id, event_type=hook.event_type, payload=payload, status="pending"
+    )
+    db.add(delivery)
+    await db.flush()
+    await svc._attempt_delivery(hook, delivery, payload)
+    await db.commit()
+    await db.refresh(delivery)
+    return delivery
 
 
 # ---------- Full-text product search ----------

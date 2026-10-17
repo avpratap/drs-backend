@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.invoice import Invoice, InvoiceLine
+from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.profile import Address, UserProfile
 from app.models.shop import CustomerAccount, Shop
@@ -21,6 +22,7 @@ from app.models.shop import CustomerAccount, Shop
 _SEQ_LOCK_NS = 555001
 _INV_LOCK_NS = 555002  # serialize invoice generation per delivery order
 _CN_LOCK_NS = 555003  # serialize credit-note generation per source invoice
+_ORD_INV_LOCK_NS = 555004  # serialize invoice generation per one-time order
 
 
 def fy_for_date(d: dt.date) -> str:
@@ -141,6 +143,88 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
         igst += i
         total += line_total
 
+    inv.taxable_value = round(tax_val, 2)
+    inv.cgst = round(cgst, 2)
+    inv.sgst = round(sgst, 2)
+    inv.igst = round(igst, 2)
+    inv.total = round(total, 2)
+    await db.commit()
+    await db.refresh(inv)
+    return inv
+
+
+async def _order_place_of_supply(db: AsyncSession, order: Order) -> str:
+    shop = await db.get(Shop, order.shop_id)
+    if shop is not None and shop.state:
+        return shop.state
+    state = await db.scalar(
+        select(Address.state).where(
+            Address.account_id == order.account_id,
+            Address.status == "active",
+            Address.is_default.is_(True),
+        ).limit(1)
+    )
+    return state or settings.SELLER_STATE
+
+
+async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
+    """GST tax invoice for a one-time (D2C storefront) Order. Idempotent per order."""
+    await db.execute(select(func.pg_advisory_xact_lock(_ORD_INV_LOCK_NS, order.id)))
+    existing = await db.scalar(
+        select(Invoice).where(Invoice.order_id == order.id, Invoice.is_credit_note.is_(False))
+    )
+    if existing is not None:
+        return existing
+
+    place = await _order_place_of_supply(db, order)
+    interstate = place.strip().lower() != settings.SELLER_STATE.strip().lower()
+    today = dt.datetime.now(dt.UTC).date()
+    fy = fy_for_date(today)
+    seq = await _next_seq(db, fy)
+    inv = Invoice(
+        invoice_no=f"{settings.INVOICE_PREFIX}/{fy}/{seq:06d}",
+        fy=fy,
+        seq_no=seq,
+        account_id=order.account_id,
+        order_id=order.id,
+        invoice_date=today,
+        seller_gstin=settings.SELLER_GSTIN or None,
+        buyer_gstin=await _buyer_gstin(db, order.account_id),
+        place_of_supply=place,
+        is_interstate=interstate,
+    )
+    db.add(inv)
+    await db.flush()
+
+    rows = (
+        await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
+    ).scalars().all()
+    # Apportion any order-level discount across lines so taxable value matches what was
+    # actually charged (order.total is subtotal - discount).
+    subtotal = float(order.subtotal) or 0.0
+    disc_factor = (float(order.total) / subtotal) if subtotal > 0 else 1.0
+    tax_val = cgst = sgst = igst = total = 0.0
+    for it in rows:
+        qty = float(it.qty)
+        product = await db.get(Product, it.product_id)
+        rate = float(product.gst_rate) if product else 0.0
+        taxable = round(float(it.line_total) * disc_factor, 2)
+        c, s, i = _split(taxable, rate, interstate)
+        line_total = round(taxable + c + s + i, 2)
+        db.add(
+            InvoiceLine(
+                invoice_id=inv.id, product_id=it.product_id,
+                hsn_code=product.hsn_code if product else None,
+                description=product.name if product else None,
+                qty=qty, unit_price=float(it.unit_price), taxable_value=taxable,
+                gst_rate=rate, cgst=c, sgst=s, igst=i, line_total=line_total,
+            )
+        )
+        tax_val += taxable
+        cgst += c
+        sgst += s
+        igst += i
+        total += line_total
     inv.taxable_value = round(tax_val, 2)
     inv.cgst = round(cgst, 2)
     inv.sgst = round(sgst, 2)

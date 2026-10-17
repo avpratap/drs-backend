@@ -9,7 +9,7 @@ from app.core.db import get_db
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
-from app.models.shop import Shop
+from app.models.shop import CustomerAccount, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.user import User
 from app.schemas.subscription import (
@@ -73,15 +73,50 @@ async def _detail(db: AsyncSession, sub: Subscription) -> SubscriptionDetail:
     return out
 
 
+async def _retail_home_shop(db: AsyncSession, user: User, data: SubscriptionCreate) -> Shop:
+    """Get-or-create the retail customer's account + single home shop (their delivery
+    address). One home shop per account keeps the retail model one-address-simple; a B2B
+    user wanting many locations uses the subscriber role + explicit shop_ids."""
+    acct = await db.scalar(
+        select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+    )
+    if acct is None:
+        acct = CustomerAccount(
+            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+        )
+        db.add(acct)
+        await db.flush()
+    shop = await db.scalar(
+        select(Shop).where(Shop.account_id == acct.id).order_by(Shop.id).limit(1)
+    )
+    if shop is None:
+        shop = Shop(
+            account_id=acct.id,
+            name=data.home_name or "Home",
+            address=data.home_address,
+            state=data.home_state,
+            pincode=data.home_pincode,
+        )
+        db.add(shop)
+        await db.flush()
+    return shop
+
+
 @router.post("", response_model=SubscriptionOut, operation_id="create_subscription")
 async def create_subscription(
     data: SubscriptionCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if user.role not in ("subscriber", "admin"):
+    if user.role not in ("subscriber", "admin", "customer"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only subscribers manage subscriptions")
-    shop = await _owned_shop_or_404(user, db, data.shop_id)
+    if data.shop_id is not None:
+        shop = await _owned_shop_or_404(user, db, data.shop_id)
+    elif user.role == "customer":
+        # Retail D2C: auto-provision the caller's home shop.
+        shop = await _retail_home_shop(db, user, data)
+    else:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "shop_id is required")
     res = await db.execute(select(Subscription).where(Subscription.shop_id == shop.id))
     sub = res.scalar_one_or_none()
     if sub is None:

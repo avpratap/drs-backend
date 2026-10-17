@@ -7,10 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user
 from app.models.order import OrderItem
+from app.models.product import Product
 from app.models.user import User
 from app.schemas.order import OrderItemOut, OrderOut
 from app.services import cart as cart_svc
 from app.services import orders as order_service
+from app.services import shipping
 
 router = APIRouter(prefix="/cart", tags=["cart"])
 
@@ -52,6 +54,34 @@ class CouponPreviewOut(BaseModel):
     code: str
     discount: float
     final_total: float
+
+
+class QuoteIn(BaseModel):
+    coupon_code: str | None = Field(default=None, max_length=32)
+    pincode: str | None = Field(default=None, max_length=10)
+    weight_kg: float = Field(default=0.5, gt=0, le=100, allow_inf_nan=False)
+    cod: bool = False
+
+
+class QuoteLineOut(BaseModel):
+    product_id: int
+    qty: float
+    unit_price: float
+    line_total: float
+    gst_rate: float
+    gst_amount: float
+
+
+class QuoteOut(BaseModel):
+    items: list[QuoteLineOut] = []
+    subtotal: float
+    discount: float
+    tax_total: float
+    total: float            # subtotal - discount (pre-tax)
+    total_incl_tax: float   # total + tax_total
+    serviceable: bool | None = None
+    etd_days: int | None = None
+    shipping_rate: float | None = None
 
 
 async def _account_id(db: AsyncSession, user: User) -> int:
@@ -118,6 +148,57 @@ async def preview_coupon(
     await db.commit()
     return CouponPreviewOut(
         code=data.code, discount=discount, final_total=round(view["subtotal"] - discount, 2)
+    )
+
+
+@router.post("/quote", response_model=QuoteOut, operation_id="cart_quote")
+async def cart_quote(
+    data: QuoteIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """One-call pre-pay quote the web checkout can show before paying: line totals,
+    subtotal, coupon discount, indicative GST (on the discounted base), and — if a
+    pincode is given — courier serviceability. Read-only; never reserves the coupon."""
+    account_id = await _account_id(db, user)
+    cart = await cart_svc.get_or_create_active_cart(db, account_id)
+    view = await cart_svc.cart_view(db, cart)
+    subtotal = float(view["subtotal"])
+
+    discount = 0.0
+    if data.coupon_code:
+        discount = await cart_svc.coupon_preview(db, data.coupon_code, account_id, subtotal)
+    total = round(subtotal - discount, 2)
+    disc_factor = (total / subtotal) if subtotal > 0 else 1.0
+
+    # GST per line on the discounted taxable base (indicative; invoice is authoritative).
+    pids = [ln["product_id"] for ln in view["items"]]
+    rates: dict[int, float] = {}
+    if pids:
+        rows = (
+            await db.execute(select(Product.id, Product.gst_rate).where(Product.id.in_(pids)))
+        ).all()
+        rates = {pid: float(rate or 0) for pid, rate in rows}
+    lines: list[QuoteLineOut] = []
+    tax_total = 0.0
+    for ln in view["items"]:
+        rate = rates.get(ln["product_id"], 0.0)
+        gst_amount = round(ln["line_total"] * disc_factor * rate / 100, 2)
+        tax_total += gst_amount
+        lines.append(QuoteLineOut(
+            product_id=ln["product_id"], qty=ln["qty"], unit_price=ln["unit_price"],
+            line_total=ln["line_total"], gst_rate=rate, gst_amount=gst_amount,
+        ))
+    tax_total = round(tax_total, 2)
+
+    serviceable = etd_days = shipping_rate = None
+    if data.pincode:
+        svc = await shipping.check_serviceability(data.pincode, data.weight_kg, data.cod)
+        serviceable, etd_days, shipping_rate = svc["serviceable"], svc["etd_days"], svc["rate"]
+
+    await db.commit()  # persists a freshly-created empty cart, if any
+    return QuoteOut(
+        items=lines, subtotal=subtotal, discount=discount, tax_total=tax_total,
+        total=total, total_incl_tax=round(total + tax_total, 2),
+        serviceable=serviceable, etd_days=etd_days, shipping_rate=shipping_rate,
     )
 
 

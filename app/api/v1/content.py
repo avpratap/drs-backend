@@ -105,6 +105,16 @@ class BannerIn(BaseModel):
     valid_to: dt.date | None = None
 
 
+class BannerUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    image_url: str | None = Field(default=None, min_length=1, max_length=512)
+    cta_link: str | None = Field(default=None, max_length=512)
+    position: int | None = None
+    active: bool | None = None
+    valid_from: dt.date | None = None
+    valid_to: dt.date | None = None
+
+
 class BannerOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -232,6 +242,22 @@ async def publish_page(page_id: int, db: AsyncSession = Depends(get_db)):
     return obj
 
 
+@router.post("/pages/{page_id}/unpublish", response_model=PageOut, operation_id="unpublish_page")
+async def unpublish_page(page_id: int, db: AsyncSession = Depends(get_db)):
+    obj = await _get_page(db, page_id)
+    content_svc.unpublish(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.delete("/pages/{page_id}", status_code=status.HTTP_204_NO_CONTENT, operation_id="delete_page")
+async def delete_page(page_id: int, db: AsyncSession = Depends(get_db)):
+    obj = await _get_page(db, page_id)
+    await db.delete(obj)
+    await db.commit()
+
+
 # ---------- Admin: banners ----------
 @router.post("/banners", response_model=BannerOut, operation_id="create_banner")
 async def create_banner(data: BannerIn, db: AsyncSession = Depends(get_db)):
@@ -247,6 +273,18 @@ async def admin_list_banners(db: AsyncSession = Depends(get_db), page: Page = De
     return (
         await db.execute(select(Banner).order_by(Banner.position, Banner.id).limit(page.limit).offset(page.offset))
     ).scalars().all()
+
+
+@router.patch("/banners/{banner_id}", response_model=BannerOut, operation_id="update_banner")
+async def update_banner(banner_id: int, data: BannerUpdate, db: AsyncSession = Depends(get_db)):
+    b = await db.get(Banner, banner_id)
+    if b is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Banner not found")
+    for k, v in data.model_dump(exclude_unset=True).items():
+        setattr(b, k, v)
+    await db.commit()
+    await db.refresh(b)
+    return b
 
 
 @router.delete("/banners/{banner_id}", status_code=status.HTTP_204_NO_CONTENT, operation_id="delete_banner")
