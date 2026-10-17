@@ -118,12 +118,14 @@ async def receive_transfer(db: AsyncSession, tr: StockTransfer, user_id) -> Stoc
         ).scalars().all()
         for lot in lots:
             if lot.batch_no is not None:
+                # Label the arrival as transfer_in (not a plain receipt) so movement
+                # reports count transfer arrivals consistently with the unbatched path.
                 await batch_svc.receive_batch(
                     db, it.product_id, lot.batch_no, float(lot.qty),
                     location_id=tr.to_location_id, mfg_date=lot.mfg_date,
                     expiry_date=lot.expiry_date, created_by=user_id,
+                    reason="transfer_in", ref_type="transfer", ref_id=tr.id,
                 )
-                # receive_batch logs reason="receipt"; relabel the destination arrival.
             else:
                 await inventory.adjust_stock(
                     db, it.product_id, float(lot.qty), "transfer_in",

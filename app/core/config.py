@@ -1,8 +1,19 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("ENV")
+    @classmethod
+    def _validate_env(cls, v: str) -> str:
+        # Only "prod" enables the production guards/behaviour; a typo like
+        # "production"/"staging" would silently run in dev mode (docs exposed, OTP
+        # leaked, payment stubs). Fail fast on anything unexpected.
+        if v not in {"dev", "test", "prod"}:
+            raise ValueError("ENV must be one of: dev, test, prod")
+        return v
 
     DATABASE_URL: str = "postgresql+asyncpg://drs:drs@localhost:5432/drs"
     REDIS_URL: str = "redis://localhost:6379/0"

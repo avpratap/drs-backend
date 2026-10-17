@@ -5,6 +5,7 @@ import secrets
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.loyalty import (
@@ -17,28 +18,42 @@ from app.models.loyalty import (
 )
 
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no ambiguous 0/O/1/I
+_MAX_POINTS = 1_000_000_000  # keep within int4; reject absurd balances cleanly
 
 
 def _token(n: int) -> str:
     return "".join(secrets.choice(_ALPHABET) for _ in range(n))
 
 
-async def _locked_loyalty(db: AsyncSession, account_id: int) -> LoyaltyAccount:
-    row = (
+async def _select_loyalty_locked(db: AsyncSession, account_id: int) -> LoyaltyAccount | None:
+    return (
         await db.execute(
             select(LoyaltyAccount).where(LoyaltyAccount.account_id == account_id).with_for_update()
         )
     ).scalar_one_or_none()
-    if row is None:
-        row = LoyaltyAccount(account_id=account_id, points_balance=0)
-        db.add(row)
-        await db.flush()
-        row = (
-            await db.execute(
-                select(LoyaltyAccount).where(LoyaltyAccount.id == row.id).with_for_update()
-            )
-        ).scalar_one()
-    return row
+
+
+async def _locked_loyalty(db: AsyncSession, account_id: int) -> LoyaltyAccount:
+    row = await _select_loyalty_locked(db, account_id)
+    if row is not None:
+        return row
+    # Create under a SAVEPOINT; a concurrent first-touch may win UNIQUE(account_id).
+    # On conflict, re-select the now-existing row (locked) instead of 500ing.
+    try:
+        async with db.begin_nested():
+            row = LoyaltyAccount(account_id=account_id, points_balance=0)
+            db.add(row)
+            await db.flush()
+    except IntegrityError:
+        row = await _select_loyalty_locked(db, account_id)
+        if row is None:
+            raise
+        return row
+    return (
+        await db.execute(
+            select(LoyaltyAccount).where(LoyaltyAccount.id == row.id).with_for_update()
+        )
+    ).scalar_one()
 
 
 async def _move_points(
@@ -48,6 +63,8 @@ async def _move_points(
     new_balance = la.points_balance + delta
     if new_balance < 0:
         raise HTTPException(status.HTTP_409_CONFLICT, "Insufficient points balance")
+    if new_balance > _MAX_POINTS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "points balance too large")
     la.points_balance = new_balance
     db.add(
         PointsLedger(
@@ -145,6 +162,10 @@ async def redeem_gift_card(db: AsyncSession, code: str, account_id: int, amount:
         await db.execute(select(GiftCard).where(GiftCard.code == code).with_for_update())
     ).scalar_one_or_none()
     if gc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
+    # If the card was issued to a specific account, only that account may redeem it.
+    # 404 (not 403) so a card's existence isn't enumerable by a non-recipient.
+    if gc.issued_to_account_id is not None and gc.issued_to_account_id != account_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
     if gc.status in ("disabled", "redeemed", "expired"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Gift card is {gc.status}")

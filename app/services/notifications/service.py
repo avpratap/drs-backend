@@ -56,7 +56,7 @@ def _in_quiet_hours(prof, now: dt.datetime) -> bool:
 
 def _quiet_end(prof, now: dt.datetime) -> dt.datetime:
     """Next datetime at which the quiet window ends."""
-    e = prof.quiet_hours_end
+    e = min(max(int(prof.quiet_hours_end or 0), 0), 23)  # clamp to a valid hour
     candidate = now.replace(hour=e, minute=0, second=0, microsecond=0)
     if candidate <= now:
         candidate += dt.timedelta(days=1)
@@ -85,6 +85,26 @@ async def emit_event(
     if spec is None:
         log.warning("emit_event: unknown event_type %s", event_type)
         return []
+    try:
+        return await _emit_event_inner(db, event_type, user, data, spec, account_id, dedupe_key)
+    except Exception:
+        # Notifications are best-effort relative to the caller's (often money-critical)
+        # transaction: a failure here must NEVER roll back the caller. Each row insert
+        # already uses its own savepoint; this outer guard catches anything else
+        # (profile/consent/device-token query errors, bad data) so emit can't propagate.
+        log.exception("emit_event failed for %s", event_type)
+        return []
+
+
+async def _emit_event_inner(
+    db: AsyncSession,
+    event_type: str,
+    user: User,
+    data: dict,
+    spec,
+    account_id: int | None,
+    dedupe_key: str | None,
+) -> list[Notification]:
     category, channels, render = spec
     rendered = render(data)
     prof = await profile_svc.get_or_create_profile(db, user)
@@ -159,7 +179,7 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
     if sender is None:
         notif.status, notif.error = "failed", "no sender"
         return False
-    notif.attempts += 1
+    notif.attempts = (notif.attempts or 0) + 1
     notif.last_attempt_at = dt.datetime.now(dt.UTC)
     ok, msg_id, err = await sender(notif.to_addr or "", notif.body or "", notif.payload)
     if ok:
@@ -195,9 +215,26 @@ async def process_outbox(db: AsyncSession, *, limit: int = 100) -> dict:
     )
     batch = res.scalars().all()
     sent = failed = 0
+    # Commit per row so one raising/bad row can't roll back already-sent rows or wedge
+    # the queue (re-sending good ones every drain). Senders are fail-soft, but a logical
+    # or DB error on one row must not poison the batch.
     for notif in batch:
-        ok = await deliver_notification(db, notif)
-        sent += int(ok)
-        failed += int(not ok)
-    await db.commit()
+        nid = notif.id
+        try:
+            ok = await deliver_notification(db, notif)
+            await db.commit()
+            sent += int(ok)
+            failed += int(not ok)
+        except Exception:
+            await db.rollback()
+            failed += 1
+            log.exception("deliver_notification crashed for notification %s", nid)
+            # Best-effort: mark it failed in a fresh transaction so it isn't retried forever.
+            try:
+                n = await db.get(Notification, nid)
+                if n is not None and n.status == "queued":
+                    n.status, n.error = "failed", "delivery crashed"
+                    await db.commit()
+            except Exception:
+                await db.rollback()
     return {"processed": len(batch), "sent": sent, "failed": failed}

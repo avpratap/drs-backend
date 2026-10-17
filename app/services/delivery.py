@@ -55,6 +55,25 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     else:
         order.status = "partially_delivered"
 
+    # Aggregate + validate returns PER product: a return must be of a product on the
+    # order and can't exceed what was delivered for it. Otherwise returning product B
+    # could cancel the charge for delivered product A, or returning more than delivered
+    # would synthesize phantom stock.
+    returned_qty: dict[int, float] = {}
+    for r in data.returns:
+        if r.product_id not in items:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Return product {r.product_id} is not in this order",
+            )
+        returned_qty[r.product_id] = returned_qty.get(r.product_id, 0.0) + float(r.qty_returned)
+    for pid, rq in returned_qty.items():
+        if rq > float(items[pid].qty_delivered):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Returned qty ({rq}) exceeds delivered for product {pid}",
+            )
+
     if data.pod is not None:
         db.add(
             ProofOfDelivery(
@@ -91,15 +110,17 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             )
         )
 
-    # Net chargeable = delivered value - returned value. bill_delivery is idempotent
-    # per delivery_order, so a corrected re-submit never double-charges.
-    delivered_total = sum(float(i.unit_price) * float(i.qty_delivered) for i in items.values())
-    returns_total = sum(
-        float(items[r.product_id].unit_price) * float(r.qty_returned)
-        for r in data.returns
-        if r.product_id in items
+    # Net chargeable = per-line (delivered - returned) value, floored at 0 per product
+    # so a return can never reduce the charge for a *different* delivered product.
+    # bill_delivery is idempotent per delivery_order, so a corrected re-submit never
+    # double-charges.
+    net = round(
+        sum(
+            max(float(it.unit_price) * (float(it.qty_delivered) - returned_qty.get(pid, 0.0)), 0.0)
+            for pid, it in items.items()
+        ),
+        2,
     )
-    net = round(delivered_total - returns_total, 2)
     await bill_delivery(db, order, net)
 
     # Decrement stock for what actually went out (delivered - returned), once per
@@ -111,19 +132,14 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     )
     if not already_stocked:
         loc = await inventory.default_location_id(db)
-        returned_qty: dict[int, float] = {}
-        for r in data.returns:
-            returned_qty[r.product_id] = returned_qty.get(r.product_id, 0.0) + float(r.qty_returned)
+        # returned_qty is validated above as <= qty_delivered per product, so out_qty
+        # is always >= 0 — we only ever deplete what the customer kept; returned units
+        # were never dispatched out of stock, so nothing is added back.
         for pid, it in items.items():
             out_qty = round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3)
             if out_qty > 0:  # FEFO: deplete earliest-expiry batches first
                 await batches.consume_fefo(
                     db, pid, out_qty, "delivery", location_id=loc,
-                    ref_type="delivery_order", ref_id=order.id, created_by=user.id,
-                )
-            elif out_qty < 0:  # net return back into stock
-                await inventory.adjust_stock(
-                    db, pid, -out_qty, "return", location_id=loc,
                     ref_type="delivery_order", ref_id=order.id, created_by=user.id,
                 )
 

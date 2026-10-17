@@ -42,13 +42,15 @@ async def get_current_user(
 ) -> User:
     try:
         payload = decode_token(cred.credentials)
+        if payload.get("type") != "access":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
+        sub = int(payload["sub"])  # missing/non-int sub -> 401, not 500
     except jwt.PyJWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from None
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token subject") from None
 
-    if payload.get("type") != "access":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
-
-    user = await db.get(User, int(payload["sub"]))
+    user = await db.get(User, sub)
     if user is None or user.status != "active":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found or inactive")
     if user.token_version != payload.get("ver"):

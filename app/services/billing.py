@@ -5,6 +5,7 @@ read-modify-write, so concurrent debits/credits can't lose updates. Billing for
 a delivery is idempotent (one ledger entry per delivery_order).
 """
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -26,14 +27,20 @@ async def get_or_create_wallet(db: AsyncSession, account_id: int, *, lock: bool 
     res = await db.execute(query)
     wallet = res.scalar_one_or_none()
     if wallet is None:
-        wallet = Wallet(account_id=account_id, balance=0)
-        db.add(wallet)
-        await db.flush()
-        if lock:  # re-select with the lock held now that the row exists
-            res = await db.execute(
-                select(Wallet).where(Wallet.id == wallet.id).with_for_update()
-            )
-            wallet = res.scalar_one()
+        # Two concurrent first-touches would both insert and collide on
+        # UNIQUE(account_id). Create in a savepoint; on collision, re-select the row
+        # the other transaction committed (locked if requested) instead of 500ing.
+        try:
+            async with db.begin_nested():
+                wallet = Wallet(account_id=account_id, balance=0)
+                db.add(wallet)
+                await db.flush()
+        except IntegrityError:
+            wallet = None
+        q2 = select(Wallet).where(Wallet.account_id == account_id)
+        if lock:
+            q2 = q2.with_for_update()
+        wallet = (await db.execute(q2)).scalar_one()
     return wallet
 
 
@@ -120,10 +127,20 @@ async def bill_delivery(db: AsyncSession, order: DeliveryOrder, amount: float) -
         return
     account = await db.get(CustomerAccount, order.account_id)
     if account is None:
-        await wallet_adjust(
-            db, order.account_id, -amount, "debit_order", "delivery_order", order.id,
-            allow_negative=True,
+        # No account row (orphan order): still idempotent — one wallet debit per order.
+        existing = await db.scalar(
+            select(func.count())
+            .select_from(WalletTransaction)
+            .where(
+                WalletTransaction.ref_type == "delivery_order",
+                WalletTransaction.ref_id == order.id,
+            )
         )
+        if not existing:
+            await wallet_adjust(
+                db, order.account_id, -amount, "debit_order", "delivery_order", order.id,
+                allow_negative=True,
+            )
         return
     if await _already_billed(db, account, order.id):
         return  # already charged for this delivery

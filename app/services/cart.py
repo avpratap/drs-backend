@@ -33,8 +33,11 @@ async def get_or_create_active_cart(db: AsyncSession, account_id: int) -> Cart:
 
 
 async def _require_product(db: AsyncSession, product_id: int) -> None:
-    if await db.get(Product, product_id) is None:
+    product = await db.get(Product, product_id)
+    if product is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
+    if product.status != "active":  # can't add a retired/soft-deleted product
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Product is not available")
 
 
 async def _items(db: AsyncSession, cart_id: int) -> list[CartItem]:
@@ -106,7 +109,10 @@ async def cart_view(db: AsyncSession, cart: Cart) -> dict:
     lines = []
     subtotal = 0.0
     for it in items:
-        unit_price = await resolve_unit_price(db, it.product_id, tier_id, float(it.qty))
+        # Indicative display only; None (no price configured) shows as 0 here but
+        # checkout re-resolves authoritatively and rejects an unpriced product.
+        resolved = await resolve_unit_price(db, it.product_id, tier_id, float(it.qty))
+        unit_price = resolved if resolved is not None else 0.0
         line_total = round(unit_price * float(it.qty), 2)
         subtotal += line_total
         lines.append(
@@ -163,12 +169,22 @@ async def coupon_preview(db: AsyncSession, code: str, account_id: int, subtotal:
 async def checkout(db: AsyncSession, user: User, address, coupon_code) -> Order:
     account = await order_service._get_or_create_account(db, user)
     cart = await get_or_create_active_cart(db, account.id)
-    items = await _items(db, cart.id)
+    # Lock the cart row and re-assert it's still active, so two concurrent checkouts
+    # can't both convert one cart into two orders. The lock is held until create_order
+    # commits (which also persists the 'converted' flip set below), so a racing
+    # checkout blocks here and then sees 'converted' -> 409.
+    locked = (
+        await db.execute(select(Cart).where(Cart.id == cart.id).with_for_update())
+    ).scalar_one()
+    if locked.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cart is already being checked out")
+    items = await _items(db, locked.id)
     if not items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Cart is empty")
     payload = [OrderItemIn(product_id=i.product_id, qty=float(i.qty)) for i in items]
-    # create_order commits the order (+ coupon reservation/redemption) atomically.
-    order = await order_service.create_order(db, user, payload, address, coupon_code)
-    cart.status = "converted"
-    await db.commit()
-    return order
+    # Flip within the locked transaction; create_order's commit persists the order +
+    # coupon reservation/redemption + this status change atomically. If create_order
+    # raises (e.g. unpriced/retired product), the session rolls back and the cart
+    # stays active.
+    locked.status = "converted"
+    return await order_service.create_order(db, user, payload, address, coupon_code)

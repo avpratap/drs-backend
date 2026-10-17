@@ -57,12 +57,17 @@ def upgrade() -> None:
 
     # Backfill any NULL movement locations to the default (or first) location, then
     # forbid NULL so every movement is attributable to a location.
+    # stock_movements is append-only (trigger from 0020 blocks UPDATE/DELETE); a real
+    # DB upgraded through 0020→0024 HAS NULL-location rows, so this UPDATE would trip
+    # the trigger and abort the migration. Disable the trigger for the backfill only.
+    op.execute("ALTER TABLE stock_movements DISABLE TRIGGER trg_stock_movements_append_only")
     op.execute(
         "UPDATE stock_movements SET location_id = COALESCE("
         "(SELECT id FROM locations WHERE is_default LIMIT 1), "
         "(SELECT id FROM locations ORDER BY id LIMIT 1)) "
         "WHERE location_id IS NULL"
     )
+    op.execute("ALTER TABLE stock_movements ENABLE TRIGGER trg_stock_movements_append_only")
     op.alter_column("stock_movements", "location_id", nullable=False)
     op.create_index("ix_stock_movements_location_id", "stock_movements", ["location_id"])
 

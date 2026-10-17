@@ -60,8 +60,13 @@ async def rotate_refresh(
     user_agent: str | None = None,
     ip: str | None = None,
 ) -> tuple[User, str, str]:
+    # Lock the session row so two concurrent refreshes with the same token serialize —
+    # the first rotates (revoked=True), the second then sees revoked and trips theft
+    # detection instead of both passing and minting two live families.
     result = await db.execute(
-        select(AuthSession).where(AuthSession.refresh_hash == hash_token(raw_refresh))
+        select(AuthSession)
+        .where(AuthSession.refresh_hash == hash_token(raw_refresh))
+        .with_for_update()
     )
     session = result.scalar_one_or_none()
     if session is None:

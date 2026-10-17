@@ -1,8 +1,11 @@
 """One-time order checkout: auto-provisions a retail account + home shop, prices lines."""
+from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.order import Order, OrderItem
+from app.models.product import Product
 from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
 from app.services import coupons as coupon_svc
@@ -13,11 +16,21 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
     res = await db.execute(select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id))
     account = res.scalar_one_or_none()
     if account is None:
-        account = CustomerAccount(
-            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
-        )
-        db.add(account)
-        await db.flush()
+        # Race-safe: concurrent first-touch collides on uq_customer_accounts_owner →
+        # re-select the committed row instead of creating a duplicate / 500ing.
+        try:
+            async with db.begin_nested():
+                account = CustomerAccount(
+                    owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+                )
+                db.add(account)
+                await db.flush()
+        except IntegrityError:
+            account = (
+                await db.execute(
+                    select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+                )
+            ).scalar_one()
     return account
 
 
@@ -38,6 +51,10 @@ async def _get_or_create_home_shop(db: AsyncSession, account: CustomerAccount, a
 async def create_order(
     db: AsyncSession, user: User, items, address: str | None, coupon_code: str | None = None
 ) -> Order:
+    # NOTE: one-time orders do NOT reserve or decrement stock at order time. DRS is
+    # make-to-order (daily production + standing supply), so stock is consumed at
+    # fulfillment, not at checkout — overselling at order time is an accepted,
+    # deliberate design choice, not an oversight.
     account = await _get_or_create_account(db, user)
     shop = await _get_or_create_home_shop(db, account, address)
     tier_id = await resolve_tier_id(db, shop)
@@ -56,7 +73,19 @@ async def create_order(
 
     subtotal = 0.0
     for it in items:
+        product = await db.get(Product, it.product_id)
+        if product is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Product {it.product_id} not found")
+        if product.status != "active":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Product {it.product_id} is not available"
+            )
         unit_price = await resolve_unit_price(db, it.product_id, tier_id, it.qty)
+        if unit_price is None:  # no price/tier configured — never charge ₹0 silently
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"No price configured for product {it.product_id}",
+            )
         line_total = round(unit_price * it.qty, 2)
         subtotal += line_total
         db.add(

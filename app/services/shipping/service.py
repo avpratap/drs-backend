@@ -61,6 +61,14 @@ async def _order_items_payload(db: AsyncSession, order: Order) -> list[dict]:
 async def create_shipment(db: AsyncSession, order: Order, dest: dict, weight_kg: float, cod: bool) -> Shipment:
     if order.payment_status not in ("paid", "pending"):  # refunded/cancelled can't ship
         raise HTTPException(http.HTTP_409_CONFLICT, f"Order is {order.payment_status}, cannot ship")
+    if order.status in ("cancelled", "refunded"):
+        raise HTTPException(http.HTTP_409_CONFLICT, f"Order is {order.status}, cannot ship")
+    # One live shipment per order (a cancelled one may be superseded).
+    existing = await db.scalar(
+        select(Shipment.id).where(Shipment.order_id == order.id, Shipment.status != "cancelled")
+    )
+    if existing is not None:
+        raise HTTPException(http.HTTP_409_CONFLICT, "A shipment already exists for this order")
     ship = Shipment(
         shipment_no="PENDING",
         order_id=order.id,
@@ -115,8 +123,14 @@ async def apply_tracking(
     db: AsyncSession, ship: Shipment, raw_status: str, *, location=None, note=None, raw=None
 ) -> Shipment:
     mapped = map_status(raw_status)
+    # Truncate external courier strings to their column widths (location String(120),
+    # note String(255)) so a long "activity" text is stored, not a DataError 500.
     db.add(ShipmentTrackingEvent(
-        shipment_id=ship.id, status=mapped or raw_status[:32], location=location, note=note, raw=raw,
+        shipment_id=ship.id,
+        status=mapped or raw_status[:32],
+        location=(location[:120] if location else None),
+        note=(note[:255] if note else None),
+        raw=raw,
     ))
     # Don't regress out of a terminal state on a late/duplicate event.
     if mapped and ship.status not in _TERMINAL:

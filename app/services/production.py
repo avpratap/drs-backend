@@ -9,7 +9,6 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory import StockItem
 from app.models.production import BillOfMaterials, BomComponent, ProductionOrder
 from app.services import batches as batch_svc
 from app.services import inventory
@@ -55,24 +54,25 @@ async def start_order(db: AsyncSession, pro: ProductionOrder, user_id) -> Produc
     components = await _components(db, pro.bom_id)
     if not components:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "BOM has no components")
-    # Verify every component is available at the location before consuming any.
-    needs = []
+    # Aggregate demand per component (a component listed in several BOM rows must be
+    # checked against the SUM, not each row vs full on-hand).
+    needs: dict[int, float] = {}
     for c in components:
-        need = _demand(c.qty, pro.planned_qty, bom.output_qty)
-        on_hand = await db.scalar(
-            select(StockItem.qty_on_hand).where(
-                StockItem.product_id == c.component_product_id,
-                StockItem.location_id == pro.location_id,
-            )
+        needs[c.component_product_id] = round(
+            needs.get(c.component_product_id, 0.0) + _demand(c.qty, pro.planned_qty, bom.output_qty),
+            3,
         )
-        if on_hand is None or float(on_hand) < need:
+    # Lock each component's stock row (stock_item-first, matching consume_fefo) BEFORE
+    # checking availability, so two concurrent runs sharing a component can't both pass
+    # the gate and drive stock negative (TOCTOU).
+    for product_id, need in sorted(needs.items()):
+        item = await inventory._locked_item(db, product_id, pro.location_id)
+        if float(item.qty_on_hand) < need:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Insufficient component {c.component_product_id} "
-                f"(have {float(on_hand or 0)}, need {need})",
+                f"Insufficient component {product_id} (have {float(item.qty_on_hand)}, need {need})",
             )
-        needs.append((c.component_product_id, need))
-    for product_id, need in needs:
+    for product_id, need in sorted(needs.items()):
         await batch_svc.consume_fefo(
             db, product_id, need, "production",
             location_id=pro.location_id, ref_type="production", ref_id=pro.id,

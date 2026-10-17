@@ -11,7 +11,10 @@ class CustomerAccount(Base, TimestampMixin):
     __tablename__ = "customer_accounts"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    # One account per owner (the get-or-create paths assume exactly one).
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), unique=True, nullable=False
+    )
     account_type: Mapped[str] = mapped_column(String(16), default="retail", nullable=False)  # retail|b2b
     billing_mode: Mapped[str] = mapped_column(
         String(20), default="prepaid_wallet", nullable=False

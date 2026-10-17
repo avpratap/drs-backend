@@ -9,6 +9,7 @@ Per order we take a row lock and refuse to clobber anything already past
 'generated'/'frozen' (i.e. assigned/dispatched/delivered).
 """
 import datetime as dt
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import delete, func, select
@@ -24,6 +25,8 @@ from app.services.subscription import compute_plan
 
 _LOCK_NS = 424242
 CHUNK = 200
+
+log = logging.getLogger("drs.cutoff")
 
 
 @dataclass
@@ -116,6 +119,14 @@ async def _materialize_one(
     subtotal = 0.0
     for line in lines:
         unit_price = ctx.book.unit_price(line["product_id"], tier_id, line["qty"])
+        if unit_price is None:
+            # Misconfiguration: a subscribed product has no price for this tier. Skip the
+            # line (never materialize a silent ₹0 charge) and log loudly for ops.
+            log.warning(
+                "cutoff: no price for product %s (tier %s) on sub %s — line skipped",
+                line["product_id"], tier_id, sub.id,
+            )
+            continue
         line_total = round(unit_price * line["qty"], 2)
         subtotal += line_total
         db.add(
@@ -157,6 +168,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
             "orders_generated": 0,
             "skipped": "locked",
         }
+    run_id = None
     try:
         run = ScheduleRun(for_delivery_date=delivery_date, status="generating")
         db.add(run)
@@ -180,8 +192,14 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
                 await db.execute(select(Subscription).where(Subscription.id.in_(chunk_ids)))
             ).scalars().all()
             for sub in subs:
-                if await _materialize_one(db, sub, delivery_date, run_id, ctx):
-                    count += 1
+                # Isolate each subscription in a savepoint: one bad sub (data/price
+                # error) is logged and skipped instead of aborting the whole run.
+                try:
+                    async with db.begin_nested():
+                        if await _materialize_one(db, sub, delivery_date, run_id, ctx):
+                            count += 1
+                except Exception:
+                    log.exception("cutoff: subscription %s failed — skipped", sub.id)
             await db.commit()  # commit per chunk
 
         run = await db.get(ScheduleRun, run_id)
@@ -194,6 +212,25 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
             "delivery_date": delivery_date,
             "orders_generated": count,
         }
+    except Exception:
+        # Never leave the run stuck 'generating'. Mark it terminal for operability.
+        await db.rollback()
+        if run_id is not None:
+            try:
+                run = await db.get(ScheduleRun, run_id)
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = dt.datetime.now(dt.UTC)
+                    await db.commit()
+            except Exception:
+                await db.rollback()
+        raise
     finally:
+        # Clear any aborted-transaction state before releasing the advisory lock, so the
+        # unlock itself can't raise PendingRollbackError and leak the session lock.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         await db.execute(select(func.pg_advisory_unlock(_LOCK_NS, lock_key)))
         await db.commit()

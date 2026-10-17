@@ -68,11 +68,34 @@ async def reject(db: AsyncSession, rr: ReturnRequest, note: str | None) -> Retur
     return rr
 
 
+async def _returned_value(db: AsyncSession, rr: ReturnRequest) -> float:
+    """Value of the returned lines = sum of original order unit_price * returned qty."""
+    prices = {
+        i.product_id: float(i.unit_price)
+        for i in (
+            await db.execute(select(OrderItem).where(OrderItem.order_id == rr.order_id))
+        ).scalars().all()
+    }
+    lines = (
+        await db.execute(
+            select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
+        )
+    ).scalars().all()
+    return round(sum(prices.get(li.product_id, 0.0) * float(li.qty) for li in lines), 2)
+
+
 async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRequest:
     if rr.status != "approved":
         raise HTTPException(status.HTTP_409_CONFLICT, f"RMA is {rr.status}, must be approved to refund")
     if amount <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Refund amount must be > 0")
+    # Never credit more than the value of the returned goods.
+    cap = await _returned_value(db, rr)
+    if round(float(amount), 2) > cap:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Refund {amount} exceeds returned value {cap}",
+        )
     await billing.wallet_adjust(db, rr.account_id, round(float(amount), 2), "refund", "rma", rr.id)
     rr.refund_amount = round(float(amount), 2)
     rr.status = "refunded"

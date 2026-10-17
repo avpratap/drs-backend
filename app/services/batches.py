@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.batch import StockBatch
 from app.models.inventory import StockMovement
-from app.services.inventory import _locked_item, default_location_id
+from app.services.inventory import _locked_item, require_location
 
 
 async def receive_batch(
@@ -25,9 +25,13 @@ async def receive_batch(
     mfg_date: dt.date | None = None,
     expiry_date: dt.date | None = None,
     created_by: int | None = None,
+    reason: str = "receipt",
+    ref_type: str = "batch",
+    ref_id: int | None = None,
 ) -> StockBatch:
-    if location_id is None:
-        location_id = await default_location_id(db)
+    """Receive a lot. `reason`/`ref_type`/`ref_id` label the movement (default is a
+    plain receipt referencing the batch; callers like transfers pass transfer_in)."""
+    location_id = await require_location(db, location_id)
     batch = StockBatch(
         product_id=product_id,
         location_id=location_id,
@@ -43,7 +47,8 @@ async def receive_batch(
     db.add(
         StockMovement(
             product_id=product_id, location_id=location_id, batch_id=batch.id,
-            change=qty, reason="receipt", ref_type="batch", ref_id=batch.id, created_by=created_by,
+            change=qty, reason=reason, ref_type=ref_type,
+            ref_id=ref_id if ref_id is not None else batch.id, created_by=created_by,
         )
     )
     return batch
@@ -61,8 +66,7 @@ async def consume_fefo(
     created_by: int | None = None,
 ) -> None:
     """Remove `qty` from stock, allocating across batches earliest-expiry-first."""
-    if location_id is None:
-        location_id = await default_location_id(db)
+    location_id = await require_location(db, location_id)
     item = await _locked_item(db, product_id, location_id)
     item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
 
@@ -106,34 +110,50 @@ async def consume_fefo(
 
 
 async def expire_batches(db: AsyncSession, as_of: dt.date, *, created_by: int | None = None) -> dict:
-    """Write off batches whose expiry_date has passed: qty->0, wastage movement."""
-    batches = (
+    """Write off batches whose expiry_date has passed: qty->0, wastage movement.
+
+    Locks the StockItem row BEFORE its batches — the same stock_item->batch order used
+    by consume_fefo / transfers / production — so a concurrent delivery and this expiry
+    job can't deadlock by acquiring the two rows in opposite orders.
+    """
+    _expired = (
+        StockBatch.status == "active",
+        StockBatch.qty > 0,
+        StockBatch.expiry_date.is_not(None),
+        StockBatch.expiry_date < as_of,
+    )
+    groups = (
         await db.execute(
-            select(StockBatch)
-            .where(
-                StockBatch.status == "active",
-                StockBatch.qty > 0,
-                StockBatch.expiry_date.is_not(None),
-                StockBatch.expiry_date < as_of,
-            )
-            .with_for_update()
+            select(StockBatch.product_id, StockBatch.location_id).where(*_expired).distinct()
         )
-    ).scalars().all()
+    ).all()
     count = 0
     total = 0.0
-    for b in batches:
-        qty = float(b.qty)
-        item = await _locked_item(db, b.product_id, b.location_id)
-        item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
-        b.qty = 0
-        b.status = "expired"
-        db.add(
-            StockMovement(
-                product_id=b.product_id, location_id=b.location_id, batch_id=b.id,
-                change=-qty, reason="wastage", ref_type="expiry", ref_id=b.id,
-                note="expired", created_by=created_by,
+    for product_id, location_id in groups:
+        item = await _locked_item(db, product_id, location_id)  # stock_item first
+        batches = (
+            await db.execute(
+                select(StockBatch)
+                .where(
+                    StockBatch.product_id == product_id,
+                    StockBatch.location_id == location_id,
+                    *_expired,
+                )
+                .with_for_update()
             )
-        )
-        count += 1
-        total = round(total + qty, 3)
+        ).scalars().all()
+        for b in batches:
+            qty = float(b.qty)
+            item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
+            b.qty = 0
+            b.status = "expired"
+            db.add(
+                StockMovement(
+                    product_id=b.product_id, location_id=b.location_id, batch_id=b.id,
+                    change=-qty, reason="wastage", ref_type="expiry", ref_id=b.id,
+                    note="expired", created_by=created_by,
+                )
+            )
+            count += 1
+            total = round(total + qty, 3)
     return {"batches_expired": count, "qty_written_off": total}

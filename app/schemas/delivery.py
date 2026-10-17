@@ -51,7 +51,9 @@ class PODIn(BaseModel):
 class ReturnIn(BaseModel):
     product_id: int
     qty_returned: float = Field(gt=0, le=100_000, allow_inf_nan=False)
-    reason: str  # damaged|expired|wrong_item|excess|refused
+    # Bounded to the returns.reason column (String(32)) so an over-long value is a clean
+    # 422, not a DataError 500 mid-transaction.
+    reason: str = Field(max_length=32)  # damaged|expired|wrong_item|excess|refused
 
 
 class DeliverRequest(BaseModel):
@@ -59,5 +61,5 @@ class DeliverRequest(BaseModel):
     pod: PODIn | None = None
     returns: list[ReturnIn] = Field(default=[], max_length=200)
     cash_collected: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
-    cash_method: str | None = None  # cash|upi|cheque
-    cash_reference: str | None = None
+    cash_method: str | None = Field(default=None, max_length=16)  # cash|upi|cheque
+    cash_reference: str | None = Field(default=None, max_length=64)

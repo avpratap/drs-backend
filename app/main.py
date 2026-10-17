@@ -40,6 +40,10 @@ if settings.ENV == "prod":
     # GST tax invoices are not legally valid without the seller's GSTIN.
     if not settings.SELLER_GSTIN:
         raise RuntimeError("SELLER_GSTIN required in prod (GST tax invoices)")
+    # Without the Shiprocket webhook token the tracking webhook is unauthenticated
+    # (anyone could drive a shipment to delivered + fire notifications). Refuse to boot.
+    if not settings.SHIPROCKET_WEBHOOK_TOKEN:
+        raise RuntimeError("SHIPROCKET_WEBHOOK_TOKEN required in prod")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):

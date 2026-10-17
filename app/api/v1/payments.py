@@ -76,11 +76,21 @@ async def _account(db: AsyncSession, user: User) -> CustomerAccount:
     res = await db.execute(select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id))
     account = res.scalar_one_or_none()
     if account is None:
-        account = CustomerAccount(
-            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
-        )
-        db.add(account)
-        await db.flush()
+        # Race-safe create: a concurrent first-touch may win uq_customer_accounts_owner;
+        # on collision re-select the row the other transaction committed.
+        try:
+            async with db.begin_nested():
+                account = CustomerAccount(
+                    owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+                )
+                db.add(account)
+                await db.flush()
+        except IntegrityError:
+            account = (
+                await db.execute(
+                    select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+                )
+            ).scalar_one()
     return account
 
 
@@ -264,33 +274,49 @@ async def refund_payment(
             status.HTTP_502_BAD_GATEWAY,
             "Refund could not be processed by the gateway; no money moved. Please retry.",
         ) from exc
+    # The gateway has moved the money. Persist the refund as 'processed' and COMMIT
+    # NOW — before touching the wallet/order — so a retry after any later failure sees
+    # this refund in `already` and can never issue a second gateway refund.
     refund.status = "processed"
-
-    if payment.payment_type == "wallet_topup":
-        # Reverse the top-up: pull the money back out of the wallet.
-        wallet = await billing_service.wallet_adjust(
-            db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
-            allow_negative=True,
-        )
-    else:  # order_payment -> store credit back to the wallet
-        wallet = await billing_service.wallet_adjust(
-            db, payment.account_id, amount, "refund", "refund", refund.id
-        )
-        if payment.ref_id:
-            order = await db.get(Order, payment.ref_id)
-            if order is not None:
-                order.payment_status = (
-                    "refunded" if already + amount >= float(payment.amount) else "partially_refunded"
-                )
-    # Tell the customer their refund landed (idempotent per refund).
-    owner = await _owner_user(db, payment.account_id)
-    if owner is not None:
-        await notify.emit_event(
-            db, "payment.refunded", owner,
-            {"amount": amount, "balance": float(wallet.balance)},
-            account_id=payment.account_id, dedupe_key=f"payment.refunded:{refund.id}",
-        )
     await db.commit()
+
+    # Apply the ledger effect in a follow-up transaction. If it fails, the refund is
+    # already recorded (no double-refund); surface 502 for manual reconciliation rather
+    # than rolling back the record of money that already left the gateway.
+    try:
+        if payment.payment_type == "wallet_topup":
+            # Reverse the top-up: pull the money back out of the wallet.
+            wallet = await billing_service.wallet_adjust(
+                db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
+                allow_negative=True,
+            )
+        else:  # order_payment -> store credit back to the wallet
+            wallet = await billing_service.wallet_adjust(
+                db, payment.account_id, amount, "refund", "refund", refund.id
+            )
+            if payment.ref_id:
+                order = await db.get(Order, payment.ref_id)
+                if order is not None:
+                    order.payment_status = (
+                        "refunded" if already + amount >= float(payment.amount)
+                        else "partially_refunded"
+                    )
+        # Tell the customer their refund landed (idempotent per refund; emit is isolated).
+        owner = await _owner_user(db, payment.account_id)
+        if owner is not None:
+            await notify.emit_event(
+                db, "payment.refunded", owner,
+                {"amount": amount, "balance": float(wallet.balance)},
+                account_id=payment.account_id, dedupe_key=f"payment.refunded:{refund.id}",
+            )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Refund {refund.id} recorded at gateway but the wallet/order update failed; "
+            "it will not be re-refunded — reconcile the ledger manually.",
+        ) from exc
     return {
         "refund_id": refund.id,
         "payment_id": payment.id,
@@ -318,15 +344,19 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         or payload.get("id")
         or hashlib.sha256(raw or b"").hexdigest()
     )
-    # Idempotent: a duplicate delivery is recorded once and acknowledged.
-    db.add(WebhookEvent(event_id=event_id, event_type=event_type, payload=payload))
+    # Record the dedupe row AND process the event in ONE transaction, committing once
+    # at the end — so the dedupe marker only becomes durable if the side effect also
+    # committed. (Previously the marker was committed first; a handler failure then let
+    # the retry be dismissed as "duplicate", permanently dropping payment finalization.)
     try:
-        await db.commit()
+        async with db.begin_nested():  # savepoint: detect duplicate event_id
+            db.add(WebhookEvent(event_id=event_id, event_type=event_type, payload=payload))
+            await db.flush()
     except IntegrityError:
-        await db.rollback()
         return {"status": "duplicate"}
 
     await _handle_webhook_event(db, event_type, payload)
+    await db.commit()
     return {"status": "ok"}
 
 
@@ -351,6 +381,8 @@ async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payloa
     payment = res.scalar_one_or_none()
     if payment is None or payment.status != "initiated":
         return
+    # No commits here — the caller (razorpay_webhook) commits the event record + this
+    # side effect together in one transaction.
     if event_type == "payment.failed":
         # Server-side failure the client never surfaced: mark failed + notify so the
         # order isn't left stuck 'initiated'. The key is released for a fresh attempt.
@@ -361,7 +393,5 @@ async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payloa
                 db, "payment.failed", owner, {"amount": float(payment.amount)},
                 account_id=payment.account_id, dedupe_key=f"payment.failed:{payment.id}",
             )
-        await db.commit()
         return
     await _finalize_payment(db, payment, gpid or "webhook")
-    await db.commit()

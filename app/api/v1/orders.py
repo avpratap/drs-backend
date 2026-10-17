@@ -31,11 +31,20 @@ async def _gst_rates(db: AsyncSession, product_ids: list[int]) -> dict[int, floa
 
 
 def _apply_tax(view: OrderOut, rates: dict[int, float]) -> None:
-    """Fill indicative tax-inclusive fields (unit_price is pre-tax; GST added on top)."""
+    """Fill indicative tax-inclusive fields (unit_price is pre-tax; GST added on top).
+
+    GST is computed on the discounted taxable value: an order-level coupon is
+    apportioned across lines by the subtotal ratio, so tax_total and total_incl_tax
+    stay consistent with the discounted `total` (these fields are indicative; the GST
+    invoice is authoritative)."""
+    subtotal = float(view.subtotal) or 0.0
+    # Fraction of each line that remains taxable after an order-level discount.
+    disc_factor = (float(view.total) / subtotal) if subtotal > 0 else 1.0
     tax_total = 0.0
     for it in view.items:
         it.gst_rate = rates.get(it.product_id, 0.0)
-        it.gst_amount = round(it.line_total * it.gst_rate / 100, 2)
+        taxable = it.line_total * disc_factor
+        it.gst_amount = round(taxable * it.gst_rate / 100, 2)
         it.price_incl_tax = round(it.unit_price * (1 + it.gst_rate / 100), 2)
         tax_total += it.gst_amount
     view.tax_total = round(tax_total, 2)

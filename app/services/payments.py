@@ -32,6 +32,8 @@ async def create_gateway_order(amount: float) -> str:
 
 def verify_signature(order_id: str, payment_id: str, signature: str) -> bool:
     if not gateway_enabled():
+        if settings.ENV == "prod":
+            return False  # never accept the dev stub in prod (fail closed)
         return signature == "dev"  # dev stub
     expected = hmac.new(
         settings.RAZORPAY_KEY_SECRET.encode(),
@@ -59,7 +61,7 @@ async def create_gateway_refund(gateway_payment_id: str | None, amount: float) -
 def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
     """Razorpay signs webhook bodies with the webhook secret (HMAC-SHA256)."""
     if not settings.RAZORPAY_WEBHOOK_SECRET:
-        return True  # dev stub: accept unsigned
+        return settings.ENV != "prod"  # dev stub accepts unsigned; prod fails closed
     if not signature:
         return False
     expected = hmac.new(

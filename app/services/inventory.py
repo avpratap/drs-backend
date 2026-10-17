@@ -1,6 +1,8 @@
 """Stock adjustments: lock the (product, location) row, update on-hand, append a
 movement. Location-aware; a default location is used when none is given."""
+from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockItem, StockMovement
@@ -14,21 +16,46 @@ async def default_location_id(db: AsyncSession) -> int | None:
     return lid
 
 
+async def require_location(db: AsyncSession, location_id: int | None) -> int:
+    """Resolve the location (given or default); 409 if none is configured — so a
+    missing location fails cleanly instead of a NOT-NULL IntegrityError 500 later."""
+    if location_id is None:
+        location_id = await default_location_id(db)
+    if location_id is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "No stock location configured")
+    return location_id
+
+
+async def _select_item_locked(db: AsyncSession, product_id: int, location_id: int) -> StockItem | None:
+    return (
+        await db.execute(
+            select(StockItem)
+            .where(StockItem.product_id == product_id, StockItem.location_id == location_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+
 async def _locked_item(db: AsyncSession, product_id: int, location_id: int) -> StockItem:
-    res = await db.execute(
-        select(StockItem)
-        .where(StockItem.product_id == product_id, StockItem.location_id == location_id)
-        .with_for_update()
-    )
-    item = res.scalar_one_or_none()
-    if item is None:
-        item = StockItem(product_id=product_id, location_id=location_id, qty_on_hand=0)
-        db.add(item)
-        await db.flush()
-        item = (
-            await db.execute(select(StockItem).where(StockItem.id == item.id).with_for_update())
-        ).scalar_one()
-    return item
+    item = await _select_item_locked(db, product_id, location_id)
+    if item is not None:
+        return item
+    # Create under a SAVEPOINT; a concurrent first-touch may win the unique
+    # (product_id, location_id) index — on conflict, re-select the now-committed row
+    # (locked) instead of crashing with an IntegrityError 500.
+    try:
+        async with db.begin_nested():
+            item = StockItem(product_id=product_id, location_id=location_id, qty_on_hand=0)
+            db.add(item)
+            await db.flush()
+    except IntegrityError:
+        item = await _select_item_locked(db, product_id, location_id)
+        if item is None:  # extremely unlikely; surface cleanly
+            raise
+        return item
+    return (
+        await db.execute(select(StockItem).where(StockItem.id == item.id).with_for_update())
+    ).scalar_one()
 
 
 async def adjust_stock(
@@ -44,8 +71,7 @@ async def adjust_stock(
     note: str | None = None,
     created_by: int | None = None,
 ) -> StockItem:
-    if location_id is None:
-        location_id = await default_location_id(db)
+    location_id = await require_location(db, location_id)
     item = await _locked_item(db, product_id, location_id)
     item.qty_on_hand = round(float(item.qty_on_hand) + change, 3)
     db.add(

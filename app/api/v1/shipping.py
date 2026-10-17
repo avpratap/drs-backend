@@ -105,7 +105,10 @@ async def serviceability(
 @router.post("/admin/shipments", response_model=ShipmentOut, operation_id="create_shipment",
              dependencies=[Depends(require_role("admin"))])
 async def create_shipment(data: ShipmentCreateIn, db: AsyncSession = Depends(get_db)):
-    order = await db.get(Order, data.order_id)
+    # Lock the order so two concurrent creates can't both make a shipment for it.
+    order = (
+        await db.execute(select(Order).where(Order.id == data.order_id).with_for_update())
+    ).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     dest = {
@@ -169,6 +172,9 @@ async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db))
     if settings.SHIPROCKET_WEBHOOK_TOKEN:
         if request.headers.get("x-api-key") != settings.SHIPROCKET_WEBHOOK_TOKEN:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook token")
+    elif settings.ENV == "prod":
+        # Fail closed in prod (defense in depth; the boot guard also requires the token).
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Webhook token not configured")
     import json
 
     try:

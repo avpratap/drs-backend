@@ -20,9 +20,15 @@ async def resolve_tier_id(db: AsyncSession, shop: Shop) -> int | None:
     return res.scalar_one_or_none()
 
 
-async def resolve_unit_price(db: AsyncSession, product_id: int, tier_id: int | None, qty: float) -> float:
+async def resolve_unit_price(
+    db: AsyncSession, product_id: int, tier_id: int | None, qty: float
+) -> float | None:
+    """Applicable unit price for the product+tier+qty, or None when NO price is
+    configured (no tier, or no ProductPrice row). None is distinct from a legitimately
+    zero price (a ProductPrice row with unit_price == 0) so callers can reject an
+    unpriced product instead of silently charging ₹0."""
     if tier_id is None:
-        return 0.0
+        return None
     today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
     res = await db.execute(
         select(ProductPrice)
@@ -36,7 +42,7 @@ async def resolve_unit_price(db: AsyncSession, product_id: int, tier_id: int | N
         .order_by(ProductPrice.min_qty.desc(), ProductPrice.valid_from.desc())
     )
     price = res.scalars().first()
-    return float(price.unit_price) if price else 0.0
+    return float(price.unit_price) if price else None
 
 
 class PriceBook:
@@ -60,13 +66,15 @@ class PriceBook:
             return account.price_tier_id
         return self.retail_tier_id
 
-    def unit_price(self, product_id: int, tier_id: int | None, qty: float) -> float:
+    def unit_price(self, product_id: int, tier_id: int | None, qty: float) -> float | None:
+        """Unit price, or None when NO price is configured (vs a legit zero price) —
+        lets the cutoff skip-and-log an unpriced line instead of charging ₹0."""
         if tier_id is None:
-            return 0.0
+            return None
         for p in self._by_key.get((tier_id, product_id), ()):
             if float(p.min_qty) <= qty:
                 return float(p.unit_price)
-        return 0.0
+        return None
 
 
 async def load_price_book(db: AsyncSession, today: dt.date | None = None) -> PriceBook:
