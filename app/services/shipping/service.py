@@ -1,5 +1,6 @@
 """Shipment lifecycle: create (→ courier order + AWB), apply tracking, cancel."""
 import datetime as dt
+from uuid import uuid4
 
 from fastapi import HTTPException
 from fastapi import status as http
@@ -77,7 +78,7 @@ async def create_shipment(db: AsyncSession, order: Order, dest: dict, weight_kg:
     if existing is not None:
         raise HTTPException(http.HTTP_409_CONFLICT, "A shipment already exists for this order")
     ship = Shipment(
-        shipment_no="PENDING",
+        shipment_no=f"PENDING-{uuid4().hex[:20]}",
         order_id=order.id,
         account_id=order.account_id,
         status="draft",

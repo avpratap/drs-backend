@@ -1,4 +1,6 @@
 """Support-ticket lifecycle: open, reply (threaded), status transitions."""
+from uuid import uuid4
+
 from fastapi import HTTPException
 from fastapi import status as http
 from sqlalchemy import select
@@ -19,7 +21,7 @@ async def _account_id_for(db: AsyncSession, user: User) -> int | None:
 
 async def create_ticket(db: AsyncSession, user: User, subject: str, category: str, body: str) -> SupportTicket:
     ticket = SupportTicket(
-        ticket_no="PENDING",
+        ticket_no=f"PENDING-{uuid4().hex[:20]}",
         account_id=await _account_id_for(db, user),
         created_by=user.id,
         subject=subject,

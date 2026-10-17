@@ -2,6 +2,8 @@
 (rebuild lots at destination). Cancel is allowed before dispatch only; once goods
 are in transit they must be received at the destination.
 """
+from uuid import uuid4
+
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +44,7 @@ async def create_transfer(db: AsyncSession, from_loc, to_loc, items, note, user_
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Source and destination must differ")
     await _validate_products(db, [it.product_id for it in items])
     tr = StockTransfer(
-        transfer_no="PENDING",
+        transfer_no=f"PENDING-{uuid4().hex[:20]}",
         from_location_id=from_loc,
         to_location_id=to_loc,
         status="draft",

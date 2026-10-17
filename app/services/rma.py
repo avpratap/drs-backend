@@ -3,6 +3,8 @@
 Refund credits the customer's wallet as store credit (append-only ledger via
 billing.wallet_adjust). State transitions are guarded with 409.
 """
+from uuid import uuid4
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,7 +71,7 @@ async def create_request(db: AsyncSession, user, order: Order, items, reason) ->
                 f"(already returned: {already.get(pid, 0.0)})",
             )
     rr = ReturnRequest(
-        rma_no="PENDING",
+        rma_no=f"PENDING-{uuid4().hex[:20]}",
         order_id=order.id,
         account_id=order.account_id,
         status="requested",

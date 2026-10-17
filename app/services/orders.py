@@ -1,4 +1,6 @@
 """One-time order checkout: auto-provisions a retail account + home shop, prices lines."""
+from uuid import uuid4
+
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -35,15 +37,22 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
 
 
 async def _get_or_create_home_shop(db: AsyncSession, account: CustomerAccount, address: str | None) -> Shop:
+    # D2C orders deliver to the account's dedicated "Home" shop. Select it by name so a
+    # B2B account's real stores are never picked (and never clobbered) by a D2C checkout.
     res = await db.execute(
-        select(Shop).where(Shop.account_id == account.id).order_by(Shop.id).limit(1)
+        select(Shop)
+        .where(Shop.account_id == account.id, Shop.name == "Home")
+        .order_by(Shop.id)
+        .limit(1)
     )
     shop = res.scalar_one_or_none()
     if shop is None:
         shop = Shop(account_id=account.id, name="Home", address=address, status="active")
         db.add(shop)
         await db.flush()
-    elif address:
+    elif address and not shop.address:
+        # Fill a missing address from this order, but never overwrite one the customer
+        # already saved (a later order with a blank/different address must not clobber it).
         shop.address = address
     return shop
 
@@ -59,8 +68,10 @@ async def create_order(
     shop = await _get_or_create_home_shop(db, account, address)
     tier_id = await resolve_tier_id(db, shop)
 
+    # A per-row unique placeholder (not a shared "PENDING" constant) so concurrent
+    # inserts don't collide on UNIQUE(order_no) before we assign the real DRS number.
     order = Order(
-        order_no="PENDING",
+        order_no=f"PENDING-{uuid4().hex[:20]}",
         account_id=account.id,
         shop_id=shop.id,
         order_type="one_time",

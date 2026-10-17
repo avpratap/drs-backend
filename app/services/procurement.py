@@ -1,4 +1,6 @@
 """Purchase-order lifecycle + goods receipt (GRN -> stock batches)."""
+from uuid import uuid4
+
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +15,7 @@ async def create_po(db: AsyncSession, supplier_id: int, location_id, items, expe
     if location_id is None:
         location_id = await default_location_id(db)
     po = PurchaseOrder(
-        po_no="PENDING",
+        po_no=f"PENDING-{uuid4().hex[:20]}",
         supplier_id=supplier_id,
         location_id=location_id,
         status="draft",

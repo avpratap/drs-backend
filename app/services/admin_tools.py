@@ -131,6 +131,11 @@ def _csv_safe(v):
     return v
 
 
+# Hard cap so an admin export can't load an unbounded table into memory. At the cap the
+# CSV is truncated (newest ids beyond the cap are omitted); a full dump is an offline job.
+_EXPORT_MAX_ROWS = 100_000
+
+
 def _rows_to_csv(header: list[str], rows: list[list]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -141,32 +146,37 @@ def _rows_to_csv(header: list[str], rows: list[list]) -> str:
 
 async def export_csv(db: AsyncSession, kind: str) -> str:
     if kind == "orders":
-        rows = (await db.execute(select(Order).order_by(Order.id))).scalars().all()
-        return _rows_to_csv(
-            ["id", "order_no", "account_id", "status", "payment_status", "subtotal", "discount", "total"],
-            [[o.id, o.order_no, o.account_id, o.status, o.payment_status,
-              float(o.subtotal), float(o.discount), float(o.total)] for o in rows],
-        )
-    if kind == "payments":
-        rows = (await db.execute(select(Payment).order_by(Payment.id))).scalars().all()
-        return _rows_to_csv(
-            ["id", "account_id", "payment_type", "gateway", "status", "amount", "created_at"],
-            [[p.id, p.account_id, p.payment_type, p.gateway, p.status, float(p.amount), p.created_at]
-             for p in rows],
-        )
-    if kind == "users":
-        rows = (await db.execute(select(User).order_by(User.id))).scalars().all()
-        return _rows_to_csv(
-            ["id", "phone", "email", "role", "status", "created_at"],
-            [[u.id, u.phone, u.email, u.role, u.status, u.created_at] for u in rows],
-        )
-    if kind == "invoices":
-        rows = (await db.execute(select(Invoice).order_by(Invoice.id))).scalars().all()
-        return _rows_to_csv(
-            ["id", "invoice_no", "fy", "account_id", "invoice_date", "taxable_value",
-             "cgst", "sgst", "igst", "total", "is_credit_note"],
-            [[i.id, i.invoice_no, i.fy, i.account_id, i.invoice_date, float(i.taxable_value),
-              float(i.cgst), float(i.sgst), float(i.igst), float(i.total), i.is_credit_note]
-             for i in rows],
-        )
-    raise ValueError(f"unknown export kind: {kind}")
+        rows = (
+            await db.execute(select(Order).order_by(Order.id).limit(_EXPORT_MAX_ROWS))
+        ).scalars().all()
+        header = ["id", "order_no", "account_id", "status", "payment_status",
+                  "subtotal", "discount", "total"]
+        data = [[o.id, o.order_no, o.account_id, o.status, o.payment_status,
+                 float(o.subtotal), float(o.discount), float(o.total)] for o in rows]
+    elif kind == "payments":
+        rows = (
+            await db.execute(select(Payment).order_by(Payment.id).limit(_EXPORT_MAX_ROWS))
+        ).scalars().all()
+        header = ["id", "account_id", "payment_type", "gateway", "status", "amount", "created_at"]
+        data = [[p.id, p.account_id, p.payment_type, p.gateway, p.status,
+                 float(p.amount), p.created_at] for p in rows]
+    elif kind == "users":
+        rows = (
+            await db.execute(select(User).order_by(User.id).limit(_EXPORT_MAX_ROWS))
+        ).scalars().all()
+        header = ["id", "phone", "email", "role", "status", "created_at"]
+        data = [[u.id, u.phone, u.email, u.role, u.status, u.created_at] for u in rows]
+    elif kind == "invoices":
+        rows = (
+            await db.execute(select(Invoice).order_by(Invoice.id).limit(_EXPORT_MAX_ROWS))
+        ).scalars().all()
+        header = ["id", "invoice_no", "fy", "account_id", "invoice_date", "taxable_value",
+                  "cgst", "sgst", "igst", "total", "is_credit_note"]
+        data = [[i.id, i.invoice_no, i.fy, i.account_id, i.invoice_date, float(i.taxable_value),
+                 float(i.cgst), float(i.sgst), float(i.igst), float(i.total), i.is_credit_note]
+                for i in rows]
+    else:
+        raise ValueError(f"unknown export kind: {kind}")
+    # The CSV string-build is CPU-bound — keep it off the event loop so a large export
+    # doesn't stall every other request on the worker.
+    return await asyncio.to_thread(_rows_to_csv, header, data)

@@ -5,6 +5,8 @@ finished-goods batch at the location). Cancel is allowed before start only; once
 components are issued the run must be completed. Component demand scales with
 planned_qty / BOM.output_qty.
 """
+from uuid import uuid4
+
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,7 +35,7 @@ async def create_order(db: AsyncSession, bom_id, planned_qty, location_id, user_
     if location_id is None:
         location_id = await inventory.default_location_id(db)
     pro = ProductionOrder(
-        pro_no="PENDING",
+        pro_no=f"PENDING-{uuid4().hex[:20]}",
         bom_id=bom.id,
         product_id=bom.product_id,
         location_id=location_id,
