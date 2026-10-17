@@ -109,13 +109,34 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/newsletter/confirm", response_model=StatusOut, operation_id="newsletter_confirm")
-async def confirm(token: str, db: AsyncSession = Depends(get_db)):
-    """Confirm a pending subscription via the emailed token — records consent."""
+class ConfirmIn(BaseModel):
+    token: str = Field(min_length=8, max_length=128)
+
+
+@router.get("/newsletter/confirm", response_model=StatusOut, operation_id="newsletter_confirm_status")
+async def confirm_status(token: str, db: AsyncSession = Depends(get_db)):
+    """NON-mutating: report whether a confirm token is still valid so the landing page can
+    render a 'Confirm subscription' button. Consent is NOT recorded here — an email client
+    or link-scanner that prefetches the GET link must not auto-confirm (DPDP intent). The
+    actual confirmation is the POST below, triggered by an explicit user click."""
     row = await db.scalar(
         select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == token)
     )
     if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")
+    return StatusOut(email=row.email, status=row.status)
+
+
+@router.post("/newsletter/confirm", response_model=StatusOut, operation_id="newsletter_confirm")
+async def confirm(data: ConfirmIn, db: AsyncSession = Depends(get_db)):
+    """Confirm a pending subscription via the emailed token — records consent. POST so a
+    prefetch/scanner GET of the email link can't record consent without a user action."""
+    row = await db.scalar(
+        select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == data.token)
+    )
+    if row is None:
+        # Idempotent: a token already consumed by a prior confirm is gone; if the caller
+        # was already subscribed, surface that instead of a hard 404 on a double-submit.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")
     row.status = "subscribed"
     row.consent_at = dt.datetime.now(dt.UTC)

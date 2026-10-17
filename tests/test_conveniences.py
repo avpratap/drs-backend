@@ -40,12 +40,17 @@ async def test_newsletter_subscribe_unsubscribe(client):
     assert r1.status_code == 200 and r1.json()["status"] == "pending"
     token = r1.json()["confirm_token"]  # returned in non-prod for testing
     assert token
-    c = await client.get(f"/api/v1/newsletter/confirm?token={token}")
+    # GET is non-mutating (safe for email-scanner prefetch): still pending, no consent.
+    status_get = await client.get(f"/api/v1/newsletter/confirm?token={token}")
+    assert status_get.status_code == 200 and status_get.json()["status"] == "pending"
+    # The explicit user action is a POST — that records consent.
+    c = await client.post("/api/v1/newsletter/confirm", json={"token": token})
     assert c.status_code == 200 and c.json()["status"] == "subscribed"
     unsub_token = c.json()["unsubscribe_token"]  # returned in non-prod for testing
     assert unsub_token
-    # A bad token is rejected.
+    # A bad token is rejected on both the status GET and the confirm POST.
     assert (await client.get("/api/v1/newsletter/confirm?token=nope")).status_code == 404
+    assert (await client.post("/api/v1/newsletter/confirm", json={"token": "nope-nope"})).status_code == 404
     # Unsubscribe needs the per-email token (can't unsubscribe someone else).
     bad = await client.post(
         "/api/v1/newsletter/unsubscribe", json={"email": "fan@example.com", "token": "0" * 32}
