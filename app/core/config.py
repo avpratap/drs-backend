@@ -1,5 +1,7 @@
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEV_JWT_SECRET = "dev-only-change-me-to-a-long-random-32plus-byte-string"
 
 
 class Settings(BaseSettings):
@@ -36,7 +38,7 @@ class Settings(BaseSettings):
     # Global per-IP rate limit (fixed window). Fail-open if Redis is down.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_PER_MIN: int = 300
-    JWT_SECRET: str = "dev-only-change-me-to-a-long-random-32plus-byte-string"
+    JWT_SECRET: str = _DEV_JWT_SECRET
     JWT_ALG: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 15
     REFRESH_TOKEN_DAYS: int = 14
@@ -113,6 +115,29 @@ class Settings(BaseSettings):
     AI_MAX_RETRIES: int = 2  # transient-failure retries (exponential backoff)
     AI_MAX_TOKENS: int = 1024  # output token ceiling per call
     AI_DAILY_CALLS_PER_USER: int = 50  # cost/abuse guard on customer-facing AI
+
+    @model_validator(mode="after")
+    def _prod_boot_guard(self) -> "Settings":
+        """Fail fast at boot if a prod deploy is missing a hard security/infra requirement,
+        rather than silently running insecurely. Only enforced when ENV == 'prod'."""
+        if self.ENV != "prod":
+            return self
+        problems: list[str] = []
+        if self.JWT_SECRET == _DEV_JWT_SECRET or len(self.JWT_SECRET) < 32:
+            problems.append("JWT_SECRET must be set to a unique value of at least 32 bytes")
+        if not self.DB_SSL:
+            problems.append("DB_SSL must be true in prod (TLS to the managed database)")
+        if self.DB_POOL_MODE not in {"direct", "pgbouncer"}:
+            problems.append("DB_POOL_MODE must be 'direct' or 'pgbouncer'")
+        if not self.RAZORPAY_WEBHOOK_SECRET:
+            problems.append(
+                "RAZORPAY_WEBHOOK_SECRET must be set in prod (else unsigned webhooks are accepted)"
+            )
+        if "localhost" in self.CORS_ORIGINS:
+            problems.append("CORS_ORIGINS must not include localhost in prod")
+        if problems:
+            raise ValueError("Insecure prod configuration: " + "; ".join(problems))
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:
