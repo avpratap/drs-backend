@@ -147,15 +147,16 @@ async def post_consent(
     c = await svc.record_consent(
         db, user.id, data.purpose, data.action, ip=meta["ip"], ua=meta["ua"]
     )
-    # Reflect WhatsApp/SMS/email marketing opt-in on the profile toggle.
     prof = await svc.get_or_create_profile(db, user)
     granted = data.action == "granted"
+    # Marketing consent gates MARKETING sends only (via marketing_opt_in + the recorded
+    # consent). It must NOT flip the per-channel notify_sms/notify_email toggles — those
+    # also gate TRANSACTIONAL messages (OTP, order/payment updates), so revoking marketing
+    # SMS/email must never silence a user's transactional SMS/email (#35).
     if data.purpose == "whatsapp_optin":
+        # WhatsApp is different: the business may message the user on WhatsApp at all only
+        # with an opt-in (Meta policy), so this toggle genuinely enables/disables the channel.
         prof.notify_whatsapp = granted
-    elif data.purpose == "marketing_sms":
-        prof.notify_sms = granted
-    elif data.purpose == "marketing_email":
-        prof.notify_email = granted
     if data.purpose in ("marketing_sms", "marketing_email", "whatsapp_optin"):
         prof.marketing_opt_in = granted
     await db.commit()
