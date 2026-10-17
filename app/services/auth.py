@@ -3,6 +3,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -21,7 +22,16 @@ async def get_or_create_user(db: AsyncSession, phone: str) -> User:
     if user is None:
         user = User(phone=phone, phone_verified=True, role=UserRole.customer.value)
         db.add(user)
-        await db.flush()
+        try:
+            async with db.begin_nested():  # savepoint: concurrent first-login race
+                await db.flush()
+        except IntegrityError:
+            # Another concurrent verify created this phone — use the committed row.
+            user = (
+                await db.execute(select(User).where(User.phone == phone))
+            ).scalar_one()
+            if not user.phone_verified:
+                user.phone_verified = True
     elif not user.phone_verified:
         user.phone_verified = True
     return user

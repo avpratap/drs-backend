@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,4 +31,7 @@ async def readyz(db: AsyncSession = Depends(get_db)):
         checks["redis"] = f"error: {exc}"
 
     ok = all(v == "ok" for v in checks.values())
-    return {"status": "ok" if ok else "degraded", "checks": checks}
+    payload = {"status": "ok" if ok else "degraded", "checks": checks}
+    # Readiness probes key off the HTTP status, not the body — return 503 when a
+    # dependency is down so the orchestrator pulls the pod out of rotation.
+    return JSONResponse(payload, status_code=200 if ok else 503)

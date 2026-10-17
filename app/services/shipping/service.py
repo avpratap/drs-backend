@@ -34,6 +34,13 @@ _STATUS_MAP = {
 
 _TERMINAL = {"delivered", "rto", "cancelled", "failed"}
 
+# Lifecycle rank so an out-of-order/late webhook can't regress a shipment (e.g. a stale
+# "in transit" arriving after "out for delivery").
+_RANK = {
+    "draft": 0, "created": 1, "in_transit": 2, "out_for_delivery": 3,
+    "delivered": 4, "rto": 4, "cancelled": 4, "failed": 4,
+}
+
 
 def map_status(raw: str | None) -> str | None:
     if not raw:
@@ -120,7 +127,8 @@ async def create_shipment(db: AsyncSession, order: Order, dest: dict, weight_kg:
 
 
 async def apply_tracking(
-    db: AsyncSession, ship: Shipment, raw_status: str, *, location=None, note=None, raw=None
+    db: AsyncSession, ship: Shipment, raw_status: str, *,
+    location=None, note=None, raw=None, event_time=None,
 ) -> Shipment:
     mapped = map_status(raw_status)
     # Truncate external courier strings to their column widths (location String(120),
@@ -131,9 +139,11 @@ async def apply_tracking(
         location=(location[:120] if location else None),
         note=(note[:255] if note else None),
         raw=raw,
+        event_time=event_time,  # courier's own timestamp (for ordering), not just created_at
     ))
-    # Don't regress out of a terminal state on a late/duplicate event.
-    if mapped and ship.status not in _TERMINAL:
+    # Advance only forward: never regress out of a terminal state, and never to a
+    # lower-rank status on a late/out-of-order webhook.
+    if mapped and ship.status not in _TERMINAL and _RANK.get(mapped, 0) >= _RANK.get(ship.status, 0):
         was_delivered = ship.status == "delivered"
         ship.status = mapped
         if mapped == "delivered" and not was_delivered:

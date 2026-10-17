@@ -114,18 +114,20 @@ def _r_review_request(d: dict) -> dict:
 
 # event_type -> (category, channels, renderer)
 REGISTRY: dict[str, tuple[str, list[str], Callable[[dict], dict]]] = {
-    "order.generated": (TRANSACTIONAL, ["whatsapp", "sms"], _r_order_generated),
-    "delivery.completed": (TRANSACTIONAL, ["whatsapp", "sms"], _r_delivery_completed),
-    "payment.success": (TRANSACTIONAL, ["whatsapp"], _r_payment_success),
-    "payment.failed": (TRANSACTIONAL, ["whatsapp", "sms"], _r_payment_failed),
-    "wallet.low": (TRANSACTIONAL, ["whatsapp", "sms"], _r_wallet_low),
+    # "push" = the in-app bell (inbox.py). Customer transactional events carry it so the
+    # in-app inbox shows order/payment/wallet/subscription activity, not just shipments.
+    "order.generated": (TRANSACTIONAL, ["whatsapp", "sms", "push"], _r_order_generated),
+    "delivery.completed": (TRANSACTIONAL, ["whatsapp", "sms", "push"], _r_delivery_completed),
+    "payment.success": (TRANSACTIONAL, ["whatsapp", "push"], _r_payment_success),
+    "payment.failed": (TRANSACTIONAL, ["whatsapp", "sms", "push"], _r_payment_failed),
+    "wallet.low": (TRANSACTIONAL, ["whatsapp", "sms", "push"], _r_wallet_low),
     "marketing.winback": (MARKETING, ["whatsapp"], _r_winback),
     "marketing.promo": (MARKETING, ["whatsapp", "sms"], _r_promo),
-    "payment.refunded": (TRANSACTIONAL, ["whatsapp", "sms"], _r_payment_refunded),
-    "subscription.created": (TRANSACTIONAL, ["whatsapp"], _r_subscription_created),
-    "subscription.paused": (TRANSACTIONAL, ["whatsapp"], _r_subscription_paused),
-    "subscription.resumed": (TRANSACTIONAL, ["whatsapp"], _r_subscription_resumed),
-    "subscription.cancelled": (TRANSACTIONAL, ["whatsapp"], _r_subscription_cancelled),
+    "payment.refunded": (TRANSACTIONAL, ["whatsapp", "sms", "push"], _r_payment_refunded),
+    "subscription.created": (TRANSACTIONAL, ["whatsapp", "push"], _r_subscription_created),
+    "subscription.paused": (TRANSACTIONAL, ["whatsapp", "push"], _r_subscription_paused),
+    "subscription.resumed": (TRANSACTIONAL, ["whatsapp", "push"], _r_subscription_resumed),
+    "subscription.cancelled": (TRANSACTIONAL, ["whatsapp", "push"], _r_subscription_cancelled),
     "shipment.delivered": (TRANSACTIONAL, ["whatsapp", "push"], _r_shipment_delivered),
     "review.request": (MARKETING, ["whatsapp", "push"], _r_review_request),
 }

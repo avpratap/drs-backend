@@ -21,8 +21,9 @@ async def check_and_increment(user_id: int, *, scope: str = "ai") -> None:
     key = f"aiquota:{scope}:{user_id}:{today}"
     try:
         n = await redis_client.incr(key)
-        if n == 1:
-            await redis_client.expire(key, 60 * 60 * 25)  # ~1 day + slack
+        # Set the TTL EVERY call (not just n==1): if the first EXPIRE ever failed the key
+        # would otherwise live forever with no reset. expire() is idempotent and cheap.
+        await redis_client.expire(key, 60 * 60 * 25)  # ~1 day + slack
     except Exception:
         return  # fail-open
     if n > limit:

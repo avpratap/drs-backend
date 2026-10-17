@@ -13,10 +13,20 @@ from app.core.config import settings
 log = logging.getLogger("drs.ai")
 
 _UNAVAILABLE = "Sorry, the assistant is temporarily unavailable. Please try again."
+_client = None  # lazily-built AsyncAnthropic singleton (reuse its httpx connection pool)
 
 
 def ai_enabled() -> bool:
     return bool(settings.ANTHROPIC_API_KEY)
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        from anthropic import AsyncAnthropic  # lazy import
+
+        _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _client
 
 
 async def complete(system: str, user_text: str, *, max_tokens: int | None = None) -> str:
@@ -32,9 +42,7 @@ async def complete(system: str, user_text: str, *, max_tokens: int | None = None
             + user_text.strip()[:200]
         )
     tokens = min(max_tokens or settings.AI_MAX_TOKENS, settings.AI_MAX_TOKENS)
-    from anthropic import AsyncAnthropic  # lazy import
-
-    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    client = _get_client()
     last_exc: Exception | None = None
     for attempt in range(settings.AI_MAX_RETRIES + 1):
         try:

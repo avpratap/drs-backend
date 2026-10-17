@@ -7,7 +7,14 @@ fail schema validation upstream.
 """
 import re
 
+_INDIAN_MOBILE = re.compile(r"^[6-9]\d{9}$")
+
 
 def normalize_phone(raw: str) -> str:
     digits = re.sub(r"\D", "", raw or "")
     return digits[-10:] if len(digits) >= 10 else digits
+
+
+def is_indian_mobile(phone: str) -> bool:
+    """A normalized number is a valid Indian mobile: 10 digits starting 6-9."""
+    return bool(_INDIAN_MOBILE.fullmatch(phone or ""))

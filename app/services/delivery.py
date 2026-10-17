@@ -30,6 +30,11 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     # not-delivered). Otherwise an omitted item would stay stuck 'planned' and billed
     # ₹0 with no way to correct it (the order is terminal after this call).
     submitted = {di.product_id for di in data.items}
+    if len(submitted) != len(data.items):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Duplicate product_id in delivery items; report each product once",
+        )
     missing = set(items.keys()) - submitted
     if missing:
         raise HTTPException(
@@ -80,6 +85,11 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     # could cancel the charge for delivered product A, or returning more than delivered
     # would synthesize phantom stock.
     returned_qty: dict[int, float] = {}
+    # Restockable returns (goods physically come back to the van/warehouse) vs destroyed
+    # (damaged/expired — they left stock and don't return). Only restockable units are
+    # excluded from the stock depletion below; destroyed ones are written off.
+    _RESTOCKABLE = {"refused", "excess", "wrong_item"}
+    restockable_qty: dict[int, float] = {}
     for r in data.returns:
         if r.product_id not in items:
             raise HTTPException(
@@ -87,6 +97,8 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
                 f"Return product {r.product_id} is not in this order",
             )
         returned_qty[r.product_id] = returned_qty.get(r.product_id, 0.0) + float(r.qty_returned)
+        if r.reason in _RESTOCKABLE:
+            restockable_qty[r.product_id] = restockable_qty.get(r.product_id, 0.0) + float(r.qty_returned)
     for pid, rq in returned_qty.items():
         if rq > float(items[pid].qty_delivered):
             raise HTTPException(
@@ -141,6 +153,13 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
         ),
         2,
     )
+    # Update the order/line totals to the ACTUAL delivered amounts (they held planned
+    # values from cutoff). Otherwise amount_due would mislead a COD driver on a partial.
+    for it in items.values():
+        it.line_total = round(float(it.unit_price) * float(it.qty_delivered), 2)
+    order.subtotal = round(sum(float(it.line_total) for it in items.values()), 2)
+    order.total = net
+    order.amount_due = net
     await bill_delivery(db, order, net)
 
     # Decrement stock for what actually went out (delivered - returned), once per
@@ -156,7 +175,9 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
         # is always >= 0 — we only ever deplete what the customer kept; returned units
         # were never dispatched out of stock, so nothing is added back.
         for pid, it in items.items():
-            out_qty = round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3)
+            # Deplete what physically left stock: delivered minus the units that came back
+            # restockable. Damaged/expired returns are NOT added back — they're written off.
+            out_qty = round(float(it.qty_delivered) - restockable_qty.get(pid, 0.0), 3)
             if out_qty > 0:  # FEFO: deplete earliest-expiry batches first
                 await batches.consume_fefo(
                     db, pid, out_qty, "delivery", location_id=loc,

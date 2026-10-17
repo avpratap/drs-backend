@@ -1,4 +1,11 @@
+from uuid import uuid4
+
 from conftest import auth, login
+
+
+def _idem(h: dict) -> dict:
+    """Auth headers + a fresh Idempotency-Key (required on the GRN receive endpoint)."""
+    return {**h, "Idempotency-Key": uuid4().hex}
 
 
 async def _product(client, h, sku) -> int:
@@ -78,7 +85,7 @@ async def test_po_full_receipt_flow(client):
     early = await client.post(
         f"/api/v1/admin/purchase-orders/{po_id}/receive",
         json={"lines": [{"product_id": pid, "qty_received": 5, "batch_no": "X"}]},
-        headers=h,
+        headers=_idem(h),
     )
     assert early.status_code == 409
 
@@ -88,7 +95,7 @@ async def test_po_full_receipt_flow(client):
     rec = await client.post(
         f"/api/v1/admin/purchase-orders/{po_id}/receive",
         json={"lines": [{"product_id": pid, "qty_received": 20, "batch_no": "GRN-FULL", "expiry_date": "2040-01-01"}]},
-        headers=h,
+        headers=_idem(h),
     )
     assert rec.status_code == 200, rec.text
     body = rec.json()
@@ -116,7 +123,7 @@ async def test_po_partial_then_complete(client):
     r1 = await client.post(
         f"/api/v1/admin/purchase-orders/{po_id}/receive",
         json={"lines": [{"product_id": pid, "qty_received": 12, "batch_no": "GRN-P1"}]},
-        headers=h,
+        headers=_idem(h),
     )
     assert r1.status_code == 200 and r1.json()["status"] == "partially_received"
 
@@ -124,14 +131,14 @@ async def test_po_partial_then_complete(client):
     over = await client.post(
         f"/api/v1/admin/purchase-orders/{po_id}/receive",
         json={"lines": [{"product_id": pid, "qty_received": 25, "batch_no": "GRN-OVER"}]},
-        headers=h,
+        headers=_idem(h),
     )
     assert over.status_code == 422
 
     r2 = await client.post(
         f"/api/v1/admin/purchase-orders/{po_id}/receive",
         json={"lines": [{"product_id": pid, "qty_received": 18, "batch_no": "GRN-P2"}]},
-        headers=h,
+        headers=_idem(h),
     )
     assert r2.status_code == 200 and r2.json()["status"] == "received"
 
@@ -151,7 +158,7 @@ async def test_po_receive_product_not_on_po_422(client):
     r = await client.post(
         f"/api/v1/admin/purchase-orders/{po_id}/receive",
         json={"lines": [{"product_id": other, "qty_received": 1, "batch_no": "NOPE"}]},
-        headers=h,
+        headers=_idem(h),
     )
     assert r.status_code == 422
 

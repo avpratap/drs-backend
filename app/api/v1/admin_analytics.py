@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import require_role
 from app.models.billing import CreditLedger, Wallet
@@ -89,7 +90,9 @@ async def revenue(
     days: int = Query(default=30, ge=1, le=365), db: AsyncSession = Depends(get_db)
 ):
     since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
-    day = func.date(Order.created_at)
+    # Bucket by IST calendar day, not the DB's UTC — else early-morning IST orders fall
+    # into the previous day's revenue.
+    day = func.date(func.timezone(settings.TIMEZONE, Order.created_at))
     rows = (
         await db.execute(
             select(

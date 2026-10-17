@@ -25,6 +25,12 @@ _CN_LOCK_NS = 555003  # serialize credit-note generation per source invoice
 _ORD_INV_LOCK_NS = 555004  # serialize invoice generation per one-time order
 
 
+def _lk(n: int) -> int:
+    """Mask a 64-bit id into the signed int4 range the 2-arg advisory-lock form needs
+    (ids beyond 2^31 would otherwise raise). Collisions are astronomically unlikely."""
+    return n & 0x7FFFFFFF
+
+
 def fy_for_date(d: dt.date) -> str:
     start = d.year if d.month >= 4 else d.year - 1
     return f"{start}-{(start + 1) % 100:02d}"
@@ -90,7 +96,7 @@ def _inclusive_split(
 async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:
     # Serialize concurrent generations for this order so the existence check below
     # is reliable (partial-unique index on delivery_order_id is the DB backstop).
-    await db.execute(select(func.pg_advisory_xact_lock(_INV_LOCK_NS, order.id)))
+    await db.execute(select(func.pg_advisory_xact_lock(_INV_LOCK_NS, _lk(order.id))))
     # Idempotent: reuse the existing tax invoice for this delivery order.
     existing = await db.scalar(
         select(Invoice).where(
@@ -171,9 +177,9 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
 
 
 async def _order_place_of_supply(db: AsyncSession, order: Order) -> str:
-    shop = await db.get(Shop, order.shop_id)
-    if shop is not None and shop.state:
-        return shop.state
+    """For a one-time D2C order, place of supply is the DELIVERY location — the buyer's
+    default address state (so an interstate shipment is correctly IGST). Fall back to the
+    storefront shop's state, then the seller state (intra-state) as a last resort."""
     state = await db.scalar(
         select(Address.state).where(
             Address.account_id == order.account_id,
@@ -181,12 +187,17 @@ async def _order_place_of_supply(db: AsyncSession, order: Order) -> str:
             Address.is_default.is_(True),
         ).limit(1)
     )
-    return state or settings.SELLER_STATE
+    if state:
+        return state
+    shop = await db.get(Shop, order.shop_id)
+    if shop is not None and shop.state:
+        return shop.state
+    return settings.SELLER_STATE
 
 
 async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
     """GST tax invoice for a one-time (D2C storefront) Order. Idempotent per order."""
-    await db.execute(select(func.pg_advisory_xact_lock(_ORD_INV_LOCK_NS, order.id)))
+    await db.execute(select(func.pg_advisory_xact_lock(_ORD_INV_LOCK_NS, _lk(order.id))))
     existing = await db.scalar(
         select(Invoice).where(Invoice.order_id == order.id, Invoice.is_credit_note.is_(False))
     )
@@ -264,7 +275,7 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
 async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str | None) -> Invoice:
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
-    await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, invoice.id)))
+    await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, _lk(invoice.id))))
     existing = await db.scalar(
         select(Invoice).where(
             Invoice.original_invoice_id == invoice.id, Invoice.is_credit_note.is_(True)
@@ -319,6 +330,68 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
                 line_total=round(-float(ln.line_total), 2),
             )
         )
+    await db.commit()
+    await db.refresh(note)
+    return note
+
+
+async def generate_credit_note_for_lines(
+    db: AsyncSession, invoice: Invoice, returned_qty: dict[int, float], reason: str | None
+) -> Invoice:
+    """Partial GST credit note: reverse only the RETURNED quantities, prorated per invoice
+    line (qty_returned / invoiced_qty). Used for RMA partial refunds so output GST isn't
+    over-reversed. NOT idempotent by itself — the caller (rma.refund) is single-shot under a
+    status guard, which is why multiple partial credit notes per invoice are allowed."""
+    if invoice.is_credit_note:
+        raise ValueError("cannot issue a credit note against a credit note")
+    fy = fy_for_date(dt.datetime.now(dt.UTC).date())
+    seq = await _next_seq(db, fy, is_credit_note=True)
+    note = Invoice(
+        invoice_no=f"{settings.INVOICE_PREFIX}/CN/{fy}/{seq:06d}",
+        fy=fy, seq_no=seq, account_id=invoice.account_id,
+        delivery_order_id=invoice.delivery_order_id, order_id=invoice.order_id,
+        invoice_date=dt.datetime.now(dt.UTC).date(),
+        seller_gstin=invoice.seller_gstin, buyer_gstin=invoice.buyer_gstin,
+        place_of_supply=invoice.place_of_supply, is_interstate=invoice.is_interstate,
+        is_credit_note=True, original_invoice_id=invoice.id, status="issued",
+    )
+    db.add(note)
+    await db.flush()
+
+    lines = (
+        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
+    ).scalars().all()
+    tax_val = cgst = sgst = igst = total = 0.0
+    for ln in lines:
+        rq = returned_qty.get(ln.product_id)
+        line_qty = float(ln.qty)
+        if not rq or line_qty <= 0:
+            continue
+        frac = min(float(rq), line_qty) / line_qty  # proportion of this line returned
+        taxable = round(-float(ln.taxable_value) * frac, 2)
+        c = round(-float(ln.cgst) * frac, 2)
+        s = round(-float(ln.sgst) * frac, 2)
+        i = round(-float(ln.igst) * frac, 2)
+        lt = round(-float(ln.line_total) * frac, 2)
+        db.add(
+            InvoiceLine(
+                invoice_id=note.id, product_id=ln.product_id, hsn_code=ln.hsn_code,
+                description=(reason or "Credit note") + f" — {ln.description or ''}",
+                qty=-min(float(rq), line_qty), unit_price=float(ln.unit_price),
+                taxable_value=taxable, gst_rate=float(ln.gst_rate),
+                cgst=c, sgst=s, igst=i, line_total=lt,
+            )
+        )
+        tax_val += taxable
+        cgst += c
+        sgst += s
+        igst += i
+        total += lt
+    note.taxable_value = round(tax_val, 2)
+    note.cgst = round(cgst, 2)
+    note.sgst = round(sgst, 2)
+    note.igst = round(igst, 2)
+    note.total = round(total, 2)
     await db.commit()
     await db.refresh(note)
     return note

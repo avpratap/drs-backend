@@ -1,7 +1,7 @@
 """ML endpoints: churn (admin), route optimization (admin), recommendations (public/customer)."""
 import datetime as dt
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from geoalchemy2 import Geometry
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
@@ -115,20 +115,24 @@ async def optimize_route(date: dt.date, db: AsyncSession = Depends(get_db)):
 # ---------- Recommendations ----------
 @router.get("/products/{product_id}/recommendations", response_model=list[RecommendationOut],
             operation_id="product_recommendations")
-async def product_recommendations(product_id: int, limit: int = 5, db: AsyncSession = Depends(get_db)):
+async def product_recommendations(
+    product_id: int, limit: int = Query(default=5, ge=1, le=20), db: AsyncSession = Depends(get_db)
+):
     if await db.get(Product, product_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
-    return _rec_rows(await rec_svc.co_purchase(db, product_id, min(limit, 20)))
+    return _rec_rows(await rec_svc.co_purchase(db, product_id, limit))
 
 
 @router.get("/me/recommendations", response_model=list[RecommendationOut],
             operation_id="my_recommendations")
 async def my_recommendations(
-    limit: int = 5, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    limit: int = Query(default=5, ge=1, le=20),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     account_ids = (
         await db.execute(select(CustomerAccount.id).where(CustomerAccount.owner_user_id == user.id))
     ).scalars().all()
     if not account_ids:
         return []
-    return _rec_rows(await rec_svc.personalized(db, account_ids[0], min(limit, 20)))
+    return _rec_rows(await rec_svc.personalized(db, account_ids[0], limit))

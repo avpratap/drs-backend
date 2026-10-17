@@ -41,9 +41,12 @@ async def list_my_notifications(
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    # Only channels a person actually sees in an inbox (not SMS/email/whatsapp sends).
+    # The in-app bell = the push channel, excluding delivery failures (a no-device
+    # "skipped" row is still a valid in-app message the user should see).
     q = select(Notification).where(
-        Notification.user_id == user.id, Notification.channel == "push"
+        Notification.user_id == user.id,
+        Notification.channel == "push",
+        Notification.status != "failed",
     )
     if unread_only:
         q = q.where(Notification.read_at.is_(None))
@@ -59,6 +62,7 @@ async def unread_count(user: User = Depends(get_current_user), db: AsyncSession 
         .where(
             Notification.user_id == user.id,
             Notification.channel == "push",
+            Notification.status != "failed",
             Notification.read_at.is_(None),
         )
     )

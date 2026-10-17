@@ -303,7 +303,7 @@ async def refund_payment(
             if payment.ref_id:
                 order = await db.get(Order, payment.ref_id)
                 if order is not None:
-                    fully = already + amount >= float(payment.amount)
+                    fully = round(already + amount, 2) >= round(float(payment.amount), 2)
                     order.payment_status = "refunded" if fully else "partially_refunded"
                     if fully:
                         inv = await db.scalar(

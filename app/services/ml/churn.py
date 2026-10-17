@@ -99,14 +99,31 @@ def _heuristic_score(f: dict) -> float:
     return _sigmoid(z)
 
 
-def _lgbm_score(f: dict) -> float | None:
-    """Score via a trained LightGBM model if the artifact exists; else None."""
+_booster_cache: tuple[float, object] | None = None  # (mtime, Booster) — reload on change
+
+
+def _get_booster():
+    """Load the LightGBM booster once and cache it, reloading only if the artifact's
+    mtime changes (not once per account as before)."""
+    global _booster_cache
     if not os.path.exists(_MODEL_PATH):
         return None
-    try:
-        import lightgbm as lgb  # lazy, optional
+    mtime = os.path.getmtime(_MODEL_PATH)
+    if _booster_cache is not None and _booster_cache[0] == mtime:
+        return _booster_cache[1]
+    import lightgbm as lgb  # lazy, optional
 
-        booster = lgb.Booster(model_file=_MODEL_PATH)
+    booster = lgb.Booster(model_file=_MODEL_PATH)
+    _booster_cache = (mtime, booster)
+    return booster
+
+
+def _lgbm_score(f: dict) -> float | None:
+    """Score via a trained LightGBM model if the artifact exists; else None."""
+    try:
+        booster = _get_booster()
+        if booster is None:
+            return None
         order = ["days_since_last_order", "order_count", "skip_count", "payment_failures", "has_active_sub"]
         pred = booster.predict([[float(f[k]) for k in order]])
         return float(pred[0])
@@ -126,7 +143,9 @@ async def score_account(db: AsyncSession, account_id: int) -> dict:
 async def score_all(db: AsyncSession) -> dict:
     account_ids = (await db.execute(select(CustomerAccount.id))).scalars().all()
     counts = {"low": 0, "medium": 0, "high": 0, "scored": 0}
-    for aid in account_ids:
+    # Commit in chunks so a large run never holds row locks on every ChurnScore in one
+    # giant transaction (matches the cutoff's chunking).
+    for i, aid in enumerate(account_ids, start=1):
         result = await score_account(db, aid)
         existing = await db.scalar(select(ChurnScore).where(ChurnScore.account_id == aid).with_for_update())
         if existing is None:
@@ -140,5 +159,7 @@ async def score_all(db: AsyncSession) -> dict:
             existing.computed_at = func.now()
         counts[result["risk"]] += 1
         counts["scored"] += 1
+        if i % 200 == 0:
+            await db.commit()
     await db.commit()
     return counts

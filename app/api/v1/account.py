@@ -353,6 +353,12 @@ async def create_mandate(
         await _owned_method(db, user, data.payment_method_id)
     if data.valid_from and data.valid_to and data.valid_to < data.valid_from:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    # RBI caps a UPI AutoPay / e-NACH per-debit at ₹15,000 (above it needs pre-debit auth).
+    if float(data.max_amount) > 15000:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "mandate max_amount cannot exceed ₹15,000 per debit (RBI UPI AutoPay limit)",
+        )
     mandate = PaymentMandate(
         account_id=account.id,
         payment_method_id=data.payment_method_id,

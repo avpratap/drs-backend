@@ -1,6 +1,8 @@
 """Regression tests for the final-audit fixes: GST-inclusive invoicing, refund-to-source
 credit notes, order cancellation guards, and input hardening.
 """
+from uuid import uuid4
+
 from conftest import auth, login
 
 
@@ -210,3 +212,105 @@ async def test_retail_prepaid_cutoff_skips_on_low_balance(client):
     # Wallet is 0 < order total -> no delivery order should have been generated.
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(admin))).json()
     assert all(o["shop_id"] != shop_id for o in orders)
+
+
+# ========== Second-pass (12-agent) audit fixes ==========
+async def test_phone_must_be_indian_mobile(client):
+    # A non-6-9 leading number is rejected (normalized but invalid).
+    r = await client.post("/api/v1/auth/otp/request", json={"phone": "1234567890"})
+    assert r.status_code == 422
+
+
+async def test_coupon_released_on_cancel(client):
+    admin = await login(client, "9999900001")
+    cust = await login(client, "9876543210")
+    milk = await _pid(client, cust, "MILK-1L")
+    # One-use coupon.
+    code = f"REL{uuid4().hex[:6].upper()}"
+    await client.post(
+        "/api/v1/admin/coupons",
+        json={"code": code, "discount_type": "flat", "value": 5, "usage_limit": 1},
+        headers=auth(admin),
+    )
+    o1 = (await client.post(
+        "/api/v1/orders",
+        json={"items": [{"product_id": milk, "qty": 2}], "coupon_code": code},
+        headers=auth(cust),
+    )).json()
+    # Cancel unpaid -> coupon use released.
+    assert (await client.post(f"/api/v1/orders/{o1['id']}/cancel", headers=auth(cust))).status_code == 200
+    # The coupon can be used again (not burned by the cancelled order).
+    o2 = await client.post(
+        "/api/v1/orders",
+        json={"items": [{"product_id": milk, "qty": 2}], "coupon_code": code},
+        headers=auth(cust),
+    )
+    assert o2.status_code == 200 and o2.json()["discount"] == 5.0
+
+
+async def test_po_duplicate_product_line_rejected(client):
+    admin = await login(client, "9999900001")
+    h = auth(admin)
+    sup = (await client.post("/api/v1/admin/suppliers", json={"name": f"DupSup{uuid4().hex[:5]}"}, headers=h)).json()["id"]
+    sku = f"DUP{uuid4().hex[:6]}"
+    pid = (await client.post("/api/v1/products", json={"sku": sku, "name": sku}, headers=h)).json()["id"]
+    r = await client.post(
+        "/api/v1/admin/purchase-orders",
+        json={"supplier_id": sup, "items": [
+            {"product_id": pid, "qty": 10, "unit_cost": 5},
+            {"product_id": pid, "qty": 20, "unit_cost": 5},
+        ]},
+        headers=h,
+    )
+    assert r.status_code == 422
+
+
+async def test_po_receive_requires_idempotency_key(client):
+    admin = await login(client, "9999900001")
+    h = auth(admin)
+    sup = (await client.post("/api/v1/admin/suppliers", json={"name": f"IdemSup{uuid4().hex[:5]}"}, headers=h)).json()["id"]
+    sku = f"IDM{uuid4().hex[:6]}"
+    pid = (await client.post("/api/v1/products", json={"sku": sku, "name": sku}, headers=h)).json()["id"]
+    po = (await client.post(
+        "/api/v1/admin/purchase-orders",
+        json={"supplier_id": sup, "items": [{"product_id": pid, "qty": 10, "unit_cost": 5}]},
+        headers=h,
+    )).json()["id"]
+    await client.post(f"/api/v1/admin/purchase-orders/{po}/place", headers=h)
+    # No Idempotency-Key -> 428.
+    nokey = await client.post(
+        f"/api/v1/admin/purchase-orders/{po}/receive",
+        json={"lines": [{"product_id": pid, "qty_received": 10, "batch_no": "B1"}]},
+        headers=h,
+    )
+    assert nokey.status_code == 428
+    # Same key retried -> idempotent (not double-received).
+    key = uuid4().hex
+    hk = {**h, "Idempotency-Key": key}
+    body = {"lines": [{"product_id": pid, "qty_received": 10, "batch_no": "B1", "expiry_date": "2040-01-01"}]}
+    r1 = await client.post(f"/api/v1/admin/purchase-orders/{po}/receive", json=body, headers=hk)
+    assert r1.status_code == 200 and r1.json()["status"] == "received"
+    r2 = await client.post(f"/api/v1/admin/purchase-orders/{po}/receive", json=body, headers=hk)
+    assert r2.status_code == 200  # replayed, not a second receipt
+    stock = next(s for s in (await client.get("/api/v1/admin/stock", headers=h)).json() if s["product_id"] == pid)
+    assert stock["qty_on_hand"] == 10.0  # not 20
+
+
+async def test_rma_aggregate_over_return_blocked(client):
+    cust = await login(client, "9876543210")
+    milk = await _pid(client, cust, "MILK-1L")
+    oid, _, _ = await _paid_order(client, cust, milk, qty=3)
+    # First RMA returns 2 of 3.
+    r1 = await client.post(
+        "/api/v1/returns",
+        json={"order_id": oid, "items": [{"product_id": milk, "qty": 2, "reason": "quality"}]},
+        headers=auth(cust),
+    )
+    assert r1.status_code == 200
+    # Second RMA for 2 more would exceed the 3 ordered (only 1 remains) -> 422.
+    r2 = await client.post(
+        "/api/v1/returns",
+        json={"order_id": oid, "items": [{"product_id": milk, "qty": 2, "reason": "quality"}]},
+        headers=auth(cust),
+    )
+    assert r2.status_code == 422

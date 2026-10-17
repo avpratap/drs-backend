@@ -10,8 +10,9 @@ from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -19,6 +20,15 @@ from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
 from app.models.content import Article, Banner, StaticPage
 from app.services import content as content_svc
+
+
+def _safe_web_url(v: str | None) -> str | None:
+    """Reject javascript:/data: (stored-XSS) — allow only http(s) or a relative path."""
+    if v is None:
+        return v
+    if v.strip().lower().startswith(("http://", "https://", "/")):
+        return v
+    raise ValueError("URL must be http(s) or a relative path")
 
 router = APIRouter(prefix="/admin/content", tags=["content"], dependencies=[Depends(require_role("admin"))])
 public_router = APIRouter(prefix="/content", tags=["content-public"])
@@ -110,6 +120,8 @@ class BannerIn(BaseModel):
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
 
+    _v_urls = field_validator("image_url", "cta_link")(lambda v: _safe_web_url(v))
+
 
 class BannerUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
@@ -119,6 +131,8 @@ class BannerUpdate(BaseModel):
     active: bool | None = None
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
+
+    _v_urls = field_validator("image_url", "cta_link")(lambda v: _safe_web_url(v))
 
 
 class BannerOut(BaseModel):
@@ -145,7 +159,11 @@ async def create_article(data: ArticleIn, db: AsyncSession = Depends(get_db)):
     await _slug_free(db, Article, data.slug)
     art = Article(**data.model_dump())
     db.add(art)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:  # concurrent create of the same slug
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "slug already in use") from None
     await db.refresh(art)
     return art
 
@@ -210,7 +228,11 @@ async def create_page(data: PageIn, db: AsyncSession = Depends(get_db)):
     await _slug_free(db, StaticPage, data.slug)
     page_obj = StaticPage(**data.model_dump())
     db.add(page_obj)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:  # concurrent create of the same slug
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "slug already in use") from None
     await db.refresh(page_obj)
     return page_obj
 

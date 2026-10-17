@@ -30,7 +30,10 @@ class StockMovement(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True, nullable=False)
     location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"), nullable=False)
-    batch_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # FK added in Wave B
+    # FK declared to match the DB constraint fk_stock_movements_batch (migration 0025).
+    batch_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("stock_batches.id"), nullable=True
+    )
     change: Mapped[float] = mapped_column(Numeric(12, 3), nullable=False)  # signed
     reason: Mapped[str] = mapped_column(
         String(16), nullable=False

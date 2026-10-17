@@ -4,12 +4,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.orders import _detail as _order_detail
 from app.core.db import get_db
 from app.deps.auth import get_current_user
-from app.models.order import OrderItem
 from app.models.product import Product
 from app.models.user import User
-from app.schemas.order import OrderItemOut, OrderOut
+from app.schemas.order import OrderOut
 from app.services import cart as cart_svc
 from app.services import orders as order_service
 from app.services import shipping
@@ -77,8 +77,8 @@ class QuoteOut(BaseModel):
     subtotal: float
     discount: float
     tax_total: float
-    total: float            # subtotal - discount (pre-tax)
-    total_incl_tax: float   # total + tax_total
+    total: float            # subtotal - discount = amount payable (GST-inclusive)
+    total_incl_tax: float   # == total (prices are GST-inclusive; tax is inside)
     serviceable: bool | None = None
     etd_days: int | None = None
     shipping_rate: float | None = None
@@ -169,7 +169,8 @@ async def cart_quote(
     total = round(subtotal - discount, 2)
     disc_factor = (total / subtotal) if subtotal > 0 else 1.0
 
-    # GST per line on the discounted taxable base (indicative; invoice is authoritative).
+    # Prices are GST-INCLUSIVE: back the tax OUT of the discounted line (indicative;
+    # the invoice is authoritative). gst_amount = charged - charged/(1+rate/100).
     pids = [ln["product_id"] for ln in view["items"]]
     rates: dict[int, float] = {}
     if pids:
@@ -181,7 +182,8 @@ async def cart_quote(
     tax_total = 0.0
     for ln in view["items"]:
         rate = rates.get(ln["product_id"], 0.0)
-        gst_amount = round(ln["line_total"] * disc_factor * rate / 100, 2)
+        charged = round(ln["line_total"] * disc_factor, 2)
+        gst_amount = round(charged - charged / (1 + rate / 100), 2)
         tax_total += gst_amount
         lines.append(QuoteLineOut(
             product_id=ln["product_id"], qty=ln["qty"], unit_price=ln["unit_price"],
@@ -197,7 +199,7 @@ async def cart_quote(
     await db.commit()  # persists a freshly-created empty cart, if any
     return QuoteOut(
         items=lines, subtotal=subtotal, discount=discount, tax_total=tax_total,
-        total=total, total_incl_tax=round(total + tax_total, 2),
+        total=total, total_incl_tax=total,  # GST already inside the inclusive price
         serviceable=serviceable, etd_days=etd_days, shipping_rate=shipping_rate,
     )
 
@@ -207,7 +209,5 @@ async def checkout_cart(
     data: CheckoutIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     order = await cart_svc.checkout(db, user, data.address, data.coupon_code)
-    res = await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
-    out = OrderOut.model_validate(order)
-    out.items = [OrderItemOut.model_validate(i) for i in res.scalars().all()]
-    return out
+    # Enrich with the GST breakdown (inclusive) so the checkout response matches POST /orders.
+    return await _order_detail(db, order)

@@ -23,8 +23,17 @@ async def create_po(db: AsyncSession, supplier_id: int, location_id, items, expe
     db.add(po)
     await db.flush()
     po.po_no = f"PO{po.id:06d}"
+    # Reject duplicate product lines — the receive path keys items by product_id, so two
+    # lines for one product would otherwise collapse (one silently never received).
+    seen_products: set[int] = set()
     subtotal = 0.0
     for it in items:
+        if it.product_id in seen_products:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Product {it.product_id} appears more than once; combine into one line",
+            )
+        seen_products.add(it.product_id)
         line = round(float(it.unit_cost) * float(it.qty), 2)
         subtotal += line
         db.add(
@@ -84,7 +93,7 @@ async def receive_po(db: AsyncSession, po: PurchaseOrder, lines, user_id) -> Pur
         await batch_svc.receive_batch(
             db, ln.product_id, ln.batch_no, float(ln.qty_received),
             location_id=po.location_id, mfg_date=ln.mfg_date, expiry_date=ln.expiry_date,
-            created_by=user_id,
+            created_by=user_id, reason="receipt", ref_type="purchase_order", ref_id=po.id,
         )
     fully = all(
         float(i.qty_received) >= float(i.qty_ordered) for i in po_items.values()

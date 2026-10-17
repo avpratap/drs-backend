@@ -592,7 +592,13 @@ async def reject_withdrawal(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    wd = await db.get(WithdrawalRequest, wd_id)
+    # Lock the row (like approve) so a concurrent approve+reject can't interleave into a
+    # paid-out-but-"rejected" state.
+    wd = (
+        await db.execute(
+            select(WithdrawalRequest).where(WithdrawalRequest.id == wd_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if wd is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Withdrawal not found")
     if wd.status != "requested":

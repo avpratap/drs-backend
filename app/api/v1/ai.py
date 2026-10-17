@@ -41,6 +41,15 @@ _COPILOT_SYSTEM = (
 )
 
 
+def _sanitize_user_text(s: str) -> str:
+    """Strip the delimiter so a user can't close the <user_question> block and inject
+    instructions; also drop raw angle brackets to prevent forging any tag."""
+    import re
+
+    s = re.sub(r"</?\s*user_question\s*>", " ", s, flags=re.IGNORECASE)
+    return s.replace("<", " ").replace(">", " ")
+
+
 class AskIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
@@ -84,7 +93,7 @@ async def ai_support(
             facts.append("- no recent orders on file")
     else:
         facts.append("- no account/orders yet")
-    prompt = f"{chr(10).join(facts)}\n\n<user_question>{data.message}</user_question>"
+    prompt = f"{chr(10).join(facts)}\n\n<user_question>{_sanitize_user_text(data.message)}</user_question>"
     answer = await ai.complete(_SUPPORT_SYSTEM, prompt)
     return {"answer": answer, "ai_live": ai.ai_enabled()}
 
@@ -117,6 +126,6 @@ async def admin_ai_copilot(
     )
     # Audit trail: who asked the copilot what (DPDP — question only, no customer PII).
     _audit.info("copilot_query", extra={"admin_user_id": user.id, "q": data.message[:500]})
-    prompt = f"{metrics}\n\n<user_question>{data.message}</user_question>"
+    prompt = f"{metrics}\n\n<user_question>{_sanitize_user_text(data.message)}</user_question>"
     answer = await ai.complete(_COPILOT_SYSTEM, prompt)
     return {"answer": answer, "ai_live": ai.ai_enabled()}

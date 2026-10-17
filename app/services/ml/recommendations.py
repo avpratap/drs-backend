@@ -22,7 +22,13 @@ async def co_purchase(db: AsyncSession, product_id: int, limit: int = 5) -> list
             select(oi2.c.product_id, func.count().label("n"))
             .select_from(OrderItem)
             .join(oi2, oi2.c.order_id == OrderItem.order_id)
-            .where(OrderItem.product_id == product_id, oi2.c.product_id != product_id)
+            # Filter inactive products BEFORE the LIMIT so we never return fewer than asked.
+            .join(Product, Product.id == oi2.c.product_id)
+            .where(
+                OrderItem.product_id == product_id,
+                oi2.c.product_id != product_id,
+                Product.status == "active",
+            )
             .group_by(oi2.c.product_id)
             .order_by(func.count().desc())
             .limit(limit)
@@ -41,7 +47,8 @@ async def personalized(db: AsyncSession, account_id: int, limit: int = 5) -> lis
                 func.max(Order.created_at).label("last"),
             )
             .join(Order, Order.id == OrderItem.order_id)
-            .where(Order.account_id == account_id)
+            .join(Product, Product.id == OrderItem.product_id)
+            .where(Order.account_id == account_id, Product.status == "active")
             .group_by(OrderItem.product_id)
             .order_by(func.count().desc(), func.max(Order.created_at).desc())
             .limit(limit)

@@ -16,7 +16,9 @@ log = logging.getLogger("drs.devices")
 
 
 class DeviceTokenIn(BaseModel):
-    token: str = Field(min_length=8, max_length=512)
+    # Real FCM registration tokens are ~150+ chars; a short min_length let a guessed
+    # string be claimed. 64 is comfortably below real tokens yet rejects junk.
+    token: str = Field(min_length=64, max_length=512)
     platform: str = Field(default="android", pattern="^(ios|android|web)$")
 
 

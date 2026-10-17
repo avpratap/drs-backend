@@ -4,15 +4,28 @@ Erasure is PII tombstoning, not hard-delete: financial/tax records (invoices,
 payments, ledgers) must be retained for legal compliance, so we anonymize the
 person while leaving the money trail intact, and revoke all consents.
 """
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.device_token import DeviceToken
 from app.models.invoice import Invoice
 from app.models.order import Order
-from app.models.profile import Address, Consent, PaymentMethod, UserProfile
+from app.models.profile import Address, Consent, PaymentMandate, PaymentMethod, UserProfile
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.services import profile as profile_svc
+
+
+def _b36(n: int) -> str:
+    """Compact base-36 so an erasure tombstone fits phone's VARCHAR(16) for any id."""
+    if n == 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    while n:
+        n, r = divmod(n, 36)
+        out = digits[r] + out
+    return out
 
 
 async def export_user_data(db: AsyncSession, user: User) -> dict:
@@ -25,6 +38,12 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
     methods = (
         await db.execute(select(PaymentMethod).where(PaymentMethod.account_id.in_(account_ids)))
     ).scalars().all() if account_ids else []
+    mandates = (
+        await db.execute(select(PaymentMandate).where(PaymentMandate.account_id.in_(account_ids)))
+    ).scalars().all() if account_ids else []
+    device_tokens = (
+        await db.execute(select(DeviceToken).where(DeviceToken.user_id == user.id))
+    ).scalars().all()
     orders = (
         await db.execute(select(Order).where(Order.account_id.in_(account_ids)))
     ).scalars().all() if account_ids else []
@@ -53,6 +72,19 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
             {"id": m.id, "type": m.method_type, "display": m.display, "brand": m.brand}
             for m in methods
         ],  # masked display only — no card/UPI credentials are stored
+        "payment_mandates": [
+            {
+                "id": m.id, "gateway": m.gateway, "max_amount": float(m.max_amount),
+                "frequency": m.frequency, "status": m.status,
+                "valid_from": str(m.valid_from) if m.valid_from else None,
+                "valid_to": str(m.valid_to) if m.valid_to else None,
+            }
+            for m in mandates
+        ],
+        "device_tokens": [
+            {"id": d.id, "platform": getattr(d, "platform", None), "active": d.active}
+            for d in device_tokens
+        ],
         "orders": [{"id": o.id, "order_no": o.order_no, "total": float(o.total)} for o in orders],
         "invoices": [
             {"invoice_no": i.invoice_no, "total": float(i.total), "date": str(i.invoice_date)}
@@ -66,8 +98,8 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
 
 async def erase_user(db: AsyncSession, user: User) -> dict:
     """Anonymize PII and revoke consent; retain financial records (append a withdrawal)."""
-    tomb = f"erased-{user.id}"
-    user.phone = tomb
+    # base-36 keeps the unique tombstone within phone's VARCHAR(16) for any id size.
+    user.phone = f"erz-{_b36(user.id)}"
     user.email = None
     user.full_name = None
     user.status = "erased"
@@ -93,6 +125,15 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
         for a in addresses:
             a.contact_name = None
             a.contact_phone = None
+            # Overwrite the physical-address PII too (line1/city/state/pincode are NOT NULL,
+            # so they get a tombstone rather than NULL) and drop the GPS point.
+            a.line1 = "erased"
+            a.line2 = None
+            a.landmark = None
+            a.city = "erased"
+            a.state = "erased"
+            a.pincode = "000000"
+            a.geo = None
             a.status = "archived"
         methods = (
             await db.execute(select(PaymentMethod).where(PaymentMethod.account_id.in_(account_ids)))
@@ -102,6 +143,11 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
             m.gateway_customer_id = None
             m.display = None
             m.status = "removed"
+
+    # Deactivate device tokens so an erased subject stops receiving push.
+    await db.execute(
+        update(DeviceToken).where(DeviceToken.user_id == user.id).values(active=False)
+    )
 
     for purpose in ("whatsapp_optin", "marketing_sms", "marketing_email", "data_processing"):
         db.add(Consent(user_id=user.id, purpose=purpose, action="withdrawn", source="erasure"))

@@ -7,6 +7,7 @@ the remainder is still decremented from the aggregate as an unbatched movement
 """
 import datetime as dt
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +32,13 @@ async def receive_batch(
 ) -> StockBatch:
     """Receive a lot. `reason`/`ref_type`/`ref_id` label the movement (default is a
     plain receipt referencing the batch; callers like transfers pass transfer_in)."""
+    # Central guard so EVERY receive path (GRN, production, transfer) rejects a lot whose
+    # expiry precedes manufacture — such a batch would poison FEFO (sorts first) / be
+    # wrongly written off.
+    if mfg_date and expiry_date and expiry_date < mfg_date:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "expiry_date cannot be before mfg_date"
+        )
     location_id = await require_location(db, location_id)
     batch = StockBatch(
         product_id=product_id,
@@ -124,7 +132,12 @@ async def expire_batches(db: AsyncSession, as_of: dt.date, *, created_by: int | 
     )
     groups = (
         await db.execute(
-            select(StockBatch.product_id, StockBatch.location_id).where(*_expired).distinct()
+            select(StockBatch.product_id, StockBatch.location_id)
+            .where(*_expired)
+            .distinct()
+            # Deterministic lock order (product, location) — matches the stock_item->batch
+            # lock order used elsewhere so concurrent jobs can't deadlock.
+            .order_by(StockBatch.product_id, StockBatch.location_id)
         )
     ).all()
     count = 0

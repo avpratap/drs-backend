@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -89,8 +89,22 @@ async def request_withdrawal(
     """Customer requests a wallet payout (must have the balance; admin approves)."""
     account = await _my_account(db, user)
     wallet = await billing_service.get_or_create_wallet(db, account.id)
-    if data.amount > float(wallet.balance):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Amount exceeds wallet balance")
+    # Reserve against already-pending requests so a customer can't open several requests
+    # that together exceed the balance (available = balance - sum of 'requested').
+    pending = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(WithdrawalRequest.amount), 0)).where(
+                WithdrawalRequest.account_id == account.id,
+                WithdrawalRequest.status == "requested",
+            )
+        )
+        or 0
+    )
+    if data.amount > round(float(wallet.balance) - pending, 2):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Amount exceeds available wallet balance (after pending withdrawals)",
+        )
     wd = WithdrawalRequest(account_id=account.id, amount=data.amount, note=data.note)
     db.add(wd)
     await db.commit()

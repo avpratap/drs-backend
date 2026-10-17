@@ -67,3 +67,23 @@ async def record_redemption(
             amount_discounted=amount,
         )
     )
+
+
+async def release_for_order(db: AsyncSession, order_id: int) -> None:
+    """Undo the coupon reservation when an order is cancelled/abandoned: decrement the
+    coupon's used_count (row-locked) and delete the redemption, so the code isn't burned
+    by an order that was never paid. Idempotent — a second call finds no redemption."""
+    redemptions = (
+        await db.execute(
+            select(CouponRedemption).where(CouponRedemption.order_id == order_id)
+        )
+    ).scalars().all()
+    for r in redemptions:
+        coupon = (
+            await db.execute(
+                select(Coupon).where(Coupon.id == r.coupon_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if coupon is not None and coupon.used_count > 0:
+            coupon.used_count -= 1
+        await db.delete(r)

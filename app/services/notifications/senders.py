@@ -3,6 +3,7 @@
 No credentials configured -> dev stub: the message is logged and treated as sent
 with a synthetic id, so the whole pipeline is testable without external accounts.
 """
+import json
 import logging
 import secrets
 
@@ -35,7 +36,9 @@ async def send_whatsapp(to_addr: str, body: str, payload: dict | None) -> tuple[
         "source": settings.GUPSHUP_SOURCE,
         "destination": _to_msg91_mobile(to_addr),
         "src.name": settings.GUPSHUP_SRC_NAME or settings.GUPSHUP_APP_NAME,
-        "message": f'{{"type":"text","text":{body!r}}}',
+        # Proper JSON (json.dumps) — Python repr produced single quotes / invalid JSON and
+        # broke on bodies containing quotes or newlines.
+        "message": json.dumps({"type": "text", "text": body}),
     }
     headers = {"apikey": settings.GUPSHUP_API_KEY, "Content-Type": "application/x-www-form-urlencoded"}
     try:

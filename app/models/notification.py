@@ -35,7 +35,9 @@ class Notification(Base):
         String(16), nullable=False
     )  # transactional|marketing
     template_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    to_addr: Mapped[str | None] = mapped_column(String(255), nullable=True)  # phone/token/email
+    # Text (not String(255)): a push row joins ALL of a user's device tokens (each up to
+    # 512 chars), which overflowed the old width and silently dropped the push.
+    to_addr: Mapped[str | None] = mapped_column(Text, nullable=True)  # phone/token(s)/email
     body: Mapped[str | None] = mapped_column(Text, nullable=True)  # rendered text
     payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(

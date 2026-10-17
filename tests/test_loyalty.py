@@ -70,13 +70,13 @@ async def test_gift_card_over_redeem_and_expired(client):
     over = await client.post("/api/v1/loyalty/gift-cards/redeem", json={"code": small["code"], "amount": 150}, headers=cust)
     assert over.status_code == 422
 
-    expired = (await client.post(
+    # Issuing a card that is ALREADY expired is rejected at issue time (422).
+    r = await client.post(
         "/api/v1/admin/gift-cards",
         json={"amount": 100, "issued_to_account_id": aid, "expires_at": "2020-01-01"},
         headers=admin,
-    )).json()
-    r = await client.post("/api/v1/loyalty/gift-cards/redeem", json={"code": expired["code"], "amount": 10}, headers=cust)
-    assert r.status_code == 409
+    )
+    assert r.status_code == 422
 
 
 async def test_loyalty_admin_gate(client):

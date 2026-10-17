@@ -17,16 +17,18 @@ class ProductCreate(BaseModel):
 
 
 class ProductUpdate(BaseModel):
+    # Bounded to the products column widths (clean 422 instead of a DB DataError 500),
+    # mirroring ProductCreate.
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = None
-    uom: str | None = None
+    description: str | None = Field(default=None, max_length=4096)
+    uom: str | None = Field(default=None, max_length=16)
     pack_size: float | None = Field(default=None, gt=0)
     is_subscribable: bool | None = None
     perishable: bool | None = None
-    hsn_code: str | None = None
+    hsn_code: str | None = Field(default=None, max_length=16)
     gst_rate: float | None = Field(default=None, ge=0, le=100)
-    category: str | None = None
-    image_url: str | None = None
+    category: str | None = Field(default=None, max_length=64)
+    image_url: str | None = Field(default=None, max_length=512)
 
 
 class ProductOut(ProductCreate):

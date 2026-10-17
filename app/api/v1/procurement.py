@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.procurement import PurchaseOrder, PurchaseOrderItem, Supplier
 from app.models.user import User
@@ -22,7 +23,7 @@ class SupplierIn(BaseModel):
     gstin: str | None = Field(default=None, max_length=15)
     contact_phone: str | None = Field(default=None, max_length=16)
     contact_email: str | None = Field(default=None, max_length=255)
-    address: str | None = None
+    address: str | None = Field(default=None, max_length=512)
     state: str | None = Field(default=None, max_length=120)
 
 
@@ -183,7 +184,11 @@ async def place_po(po_id: int, db: AsyncSession = Depends(get_db)):
     return await _po_out(db, po)
 
 
-@router.post("/purchase-orders/{po_id}/receive", response_model=POOut, operation_id="receive_purchase_order")
+@router.post(
+    "/purchase-orders/{po_id}/receive", response_model=POOut,
+    operation_id="receive_purchase_order",
+    dependencies=[Depends(require_idempotency_key)],
+)
 async def receive_po(
     po_id: int,
     data: GRNIn,

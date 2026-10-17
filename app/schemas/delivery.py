@@ -53,17 +53,17 @@ class PODIn(BaseModel):
     recipient_name: str | None = Field(default=None, max_length=255)
     photo_url: str | None = Field(default=None, max_length=512)
     signature_url: str | None = Field(default=None, max_length=512)
-    lat: float | None = None
-    lng: float | None = None
+    # Range-bounded so an out-of-range value is a clean 422, not a Numeric(9,6) 500.
+    lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    lng: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
     note: str | None = Field(default=None, max_length=255)
 
 
 class ReturnIn(BaseModel):
     product_id: int
     qty_returned: float = Field(gt=0, le=100_000, allow_inf_nan=False)
-    # Bounded to the returns.reason column (String(32)) so an over-long value is a clean
-    # 422, not a DataError 500 mid-transaction.
-    reason: str = Field(max_length=32)  # damaged|expired|wrong_item|excess|refused
+    # Constrained to the documented reason codes (also keeps it within String(32)).
+    reason: str = Field(pattern="^(damaged|expired|wrong_item|excess|refused)$")
 
 
 class DeliverRequest(BaseModel):

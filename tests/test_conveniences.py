@@ -42,9 +42,19 @@ async def test_newsletter_subscribe_unsubscribe(client):
     assert token
     c = await client.get(f"/api/v1/newsletter/confirm?token={token}")
     assert c.status_code == 200 and c.json()["status"] == "subscribed"
+    unsub_token = c.json()["unsubscribe_token"]  # returned in non-prod for testing
+    assert unsub_token
     # A bad token is rejected.
     assert (await client.get("/api/v1/newsletter/confirm?token=nope")).status_code == 404
-    u = await client.post("/api/v1/newsletter/unsubscribe", json={"email": "fan@example.com"})
+    # Unsubscribe needs the per-email token (can't unsubscribe someone else).
+    bad = await client.post(
+        "/api/v1/newsletter/unsubscribe", json={"email": "fan@example.com", "token": "0" * 32}
+    )
+    assert bad.status_code == 403
+    u = await client.post(
+        "/api/v1/newsletter/unsubscribe",
+        json={"email": "fan@example.com", "token": unsub_token},
+    )
     assert u.json()["status"] == "unsubscribed"
     # Admin list; admin-gate for customer.
     admin = await login(client, "9999900001")

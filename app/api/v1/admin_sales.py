@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
@@ -18,6 +19,7 @@ from app.models.shop import CustomerAccount
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.services import billing as billing_svc
+from app.services import coupons
 
 router = APIRouter(
     prefix="/admin", tags=["admin-sales"], dependencies=[Depends(require_role("admin"))]
@@ -101,9 +103,9 @@ async def list_payments(
     if ref_type:
         q = q.where(Payment.ref_type == ref_type)
     if date_from:
-        q = q.where(Payment.created_at >= date_from)
+        q = q.where(func.date(func.timezone(settings.TIMEZONE, Payment.created_at)) >= date_from)
     if date_to:
-        q = q.where(Payment.created_at < date_to + dt.timedelta(days=1))
+        q = q.where(func.date(func.timezone(settings.TIMEZONE, Payment.created_at)) <= date_to)
     return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
 
 
@@ -215,9 +217,9 @@ async def list_orders(
     if shop_id is not None:
         q = q.where(Order.shop_id == shop_id)
     if date_from:
-        q = q.where(Order.created_at >= date_from)
+        q = q.where(func.date(func.timezone(settings.TIMEZONE, Order.created_at)) >= date_from)
     if date_to:
-        q = q.where(Order.created_at < date_to + dt.timedelta(days=1))
+        q = q.where(func.date(func.timezone(settings.TIMEZONE, Order.created_at)) <= date_to)
     return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
 
 
@@ -240,6 +242,7 @@ async def cancel_order(order_id: int, db: AsyncSession = Depends(get_db)):
             "Order is paid; refund the payment before cancelling",
         )
     order.status = "cancelled"
+    await coupons.release_for_order(db, order.id)  # unburn the coupon on cancel
     await db.commit()
     await db.refresh(order)
     return order

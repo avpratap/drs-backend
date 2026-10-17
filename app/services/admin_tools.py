@@ -123,11 +123,19 @@ async def _attempt_delivery(hook: OutboundWebhook, delivery: OutboundWebhookDeli
         delivery.status = "failed"
 
 
+def _csv_safe(v):
+    """Neutralize spreadsheet formula injection: a text cell starting with = + - @ (or a
+    tab/CR) is prefixed with a quote so Excel/Sheets won't execute it on open."""
+    if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
 def _rows_to_csv(header: list[str], rows: list[list]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(header)
-    w.writerows(rows)
+    w.writerows([[_csv_safe(c) for c in row] for row in rows])
     return buf.getvalue()
 
 

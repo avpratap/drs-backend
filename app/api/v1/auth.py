@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.core.phone import normalize_phone
+from app.core.phone import is_indian_mobile, normalize_phone
 from app.deps.auth import get_current_user
 from app.models.user import User
 from app.schemas.auth import (
@@ -30,9 +30,12 @@ def _client_meta(request: Request) -> dict:
 
 @router.post("/otp/request", response_model=OTPRequestResponse, operation_id="request_otp")
 async def request_otp(data: OTPRequest, request: Request):
+    phone = normalize_phone(data.phone)
+    if not is_indian_mobile(phone):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid Indian mobile number")
     ip = request.client.host if request.client else None
     try:
-        dev_otp = await otp_service.request_otp(normalize_phone(data.phone), ip=ip)
+        dev_otp = await otp_service.request_otp(phone, ip=ip)
     except ValueError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
     return OTPRequestResponse(detail="OTP sent", dev_otp=dev_otp)
@@ -41,6 +44,8 @@ async def request_otp(data: OTPRequest, request: Request):
 @router.post("/otp/verify", response_model=TokenPair, operation_id="verify_otp")
 async def verify_otp(data: OTPVerify, request: Request, db: AsyncSession = Depends(get_db)):
     phone = normalize_phone(data.phone)
+    if not is_indian_mobile(phone):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid Indian mobile number")
     if not await otp_service.verify_otp(phone, data.otp):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired OTP")
     user = await auth_service.get_or_create_user(db, phone)

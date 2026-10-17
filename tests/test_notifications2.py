@@ -10,12 +10,13 @@ async def _customer_id(client, h) -> int:
 async def test_device_token_register_idempotent(client):
     cust = await login(client, "9876543210")
     h = auth(cust)
-    r1 = await client.post("/api/v1/account/device-tokens", json={"token": "tok-abc-123", "platform": "android"}, headers=h)
+    tok = "fcmtok" + "d" * 80  # realistic FCM token length (min_length=64)
+    r1 = await client.post("/api/v1/account/device-tokens", json={"token": tok, "platform": "android"}, headers=h)
     assert r1.status_code == 200 and r1.json()["active"] is True
     # Re-registering the same token is idempotent (stays one active row).
-    r2 = await client.post("/api/v1/account/device-tokens", json={"token": "tok-abc-123", "platform": "ios"}, headers=h)
+    r2 = await client.post("/api/v1/account/device-tokens", json={"token": tok, "platform": "ios"}, headers=h)
     assert r2.status_code == 200 and r2.json()["platform"] == "ios"
-    d = await client.delete("/api/v1/account/device-tokens/tok-abc-123", headers=h)
+    d = await client.delete(f"/api/v1/account/device-tokens/{tok}", headers=h)
     assert d.status_code == 204
 
 

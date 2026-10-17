@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import cache_delete, cache_get_json, cache_set_json
 from app.core.db import get_db
 from app.deps.auth import get_current_user, get_optional_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import DEFAULT_LIMIT, Page, pagination
 from app.models.inventory import StockItem
 from app.models.product import Product
 from app.models.rating import Rating, ReviewHelpful
@@ -70,10 +70,13 @@ async def list_products(
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    # Only the plain full-active list (no filters/sort) is cached; anything else hits DB.
+    # Only the plain default-page full-active list is cached; anything else hits DB.
+    # The limit MUST be in the cache condition — the cached payload is a `.limit(N)` slice,
+    # so caching a non-default limit would poison the shared entry for all callers.
     plain = (
         category is None and q is None and sort is None
-        and perishable is None and in_stock is None and page.offset == 0
+        and perishable is None and in_stock is None
+        and page.offset == 0 and page.limit == DEFAULT_LIMIT
     )
     if plain:
         cached = await cache_get_json(_CACHE_KEY)
@@ -83,8 +86,13 @@ async def list_products(
     if category is not None:
         query = query.where(Product.category == category)
     if q is not None:
-        like = f"%{q}%"
-        query = query.where(or_(Product.name.ilike(like), Product.sku.ilike(like)))
+        # Escape LIKE metacharacters so a `%`/`_` in the query is matched literally
+        # (otherwise `q=%` matches everything and forces a full scan).
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        query = query.where(
+            or_(Product.name.ilike(like, escape="\\"), Product.sku.ilike(like, escape="\\"))
+        )
     if perishable is not None:
         query = query.where(Product.perishable.is_(perishable))
     if in_stock:
@@ -133,7 +141,11 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
 async def create_product(data: ProductCreate, db: AsyncSession = Depends(get_db)):
     product = Product(**data.model_dump())
     db.add(product)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Product SKU already exists") from None
     await db.refresh(product)
     await cache_delete(_CACHE_KEY)
     return product
@@ -192,13 +204,26 @@ async def rate_product(
         existing.comment = data.comment
         existing.verified_purchase = verified
         row = existing
+        await db.flush()
     else:
         row = Rating(
             user_id=user.id, product_id=product_id, stars=data.stars, comment=data.comment,
             verified_purchase=verified,
         )
         db.add(row)
-    await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError:
+            # Concurrent first rating by the same user (uq_rating_user_product) — fall back
+            # to updating the row the other request committed.
+            await db.rollback()
+            row = await db.scalar(
+                select(Rating).where(Rating.user_id == user.id, Rating.product_id == product_id)
+            )
+            row.stars = data.stars
+            row.comment = data.comment
+            row.verified_purchase = verified
+            await db.flush()
     await review_svc.recompute_product_rating(db, product_id)
     await db.commit()
     await cache_delete(_CACHE_KEY)

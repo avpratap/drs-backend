@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.redis import redis_client
 from app.services.sms import send_otp_sms, sms_enabled
 
-OTP_TTL = 300  # 5 minutes
+OTP_TTL = settings.MSG91_OTP_EXPIRY_MIN * 60  # keep in sync with the SMS's stated expiry
 MAX_SENDS_PER_HOUR = 5
 MAX_SENDS_PER_IP_HOUR = 50  # across all phones from one device/IP
 MAX_VERIFY_ATTEMPTS = 5
@@ -23,16 +23,18 @@ def _hash_otp(phone: str, otp: str) -> str:
 
 async def request_otp(phone: str, ip: str | None = None) -> str | None:
     """Generate + store an OTP. Returns the OTP in non-prod for testing, else None."""
-    # Per-IP cap first — stops a single device cycling through many phone numbers.
+    # Cooldown first so a client that's merely resending too fast doesn't burn its hourly
+    # per-IP budget (the IP counter only increments once we're actually going to send).
+    if await redis_client.get(f"otp:cooldown:{phone}"):
+        raise ValueError("Please wait a moment before requesting another OTP")
+
+    # Per-IP cap — stops a single device cycling through many phone numbers.
     if ip:
         ip_sends = await redis_client.incr(f"otp:ip:{ip}")
         if ip_sends == 1:
             await redis_client.expire(f"otp:ip:{ip}", 3600)
         if ip_sends > MAX_SENDS_PER_IP_HOUR:
             raise ValueError("Too many OTP requests from this device. Try again later.")
-
-    if await redis_client.get(f"otp:cooldown:{phone}"):
-        raise ValueError("Please wait a moment before requesting another OTP")
 
     sends = await redis_client.incr(f"otp:send:{phone}")
     if sends == 1:

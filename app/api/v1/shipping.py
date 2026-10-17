@@ -3,9 +3,10 @@
 Admin creates shipments for one-time orders; customers track their own (IDOR-safe);
 Shiprocket posts tracking updates to the webhook. Dev-stubbed until creds are set.
 """
+import datetime as dt
 import hmac
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,8 +96,8 @@ async def _shipment_out(db: AsyncSession, ship: Shipment) -> ShipmentOut:
 # ---------- Serviceability (customer) ----------
 @router.get("/shipping/serviceability", response_model=ServiceabilityOut, operation_id="check_serviceability")
 async def serviceability(
-    pincode: str,
-    weight_kg: float = 0.5,
+    pincode: str = Query(pattern=r"^\d{6}$"),
+    weight_kg: float = Query(default=0.5, gt=0, le=100),
     cod: bool = False,
     _user: User = Depends(get_current_user),
 ):
@@ -202,9 +203,39 @@ async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db))
     if mapped and ship.status == mapped:  # idempotent: same status already applied
         return {"status": "duplicate"}
 
+    # Dedupe replays of the SAME event (incl. unmapped statuses, which don't change
+    # ship.status) so a re-POST doesn't append a duplicate tracking row.
+    loc = payload.get("location")
+    act = payload.get("activity")
+    event_status = mapped or str(raw_status)[:32]
+    last = await db.scalar(
+        select(ShipmentTrackingEvent)
+        .where(ShipmentTrackingEvent.shipment_id == ship.id)
+        .order_by(ShipmentTrackingEvent.id.desc())
+        .limit(1)
+    )
+    if (
+        last is not None
+        and last.status == event_status
+        and last.location == (loc[:120] if loc else None)
+        and last.note == (act[:255] if act else None)
+    ):
+        return {"status": "duplicate"}
+
+    # Parse the courier's own timestamp if present (best-effort) for event ordering.
+    event_time = None
+    for field in ("event_time", "timestamp", "date"):
+        val = payload.get(field)
+        if val:
+            try:
+                event_time = dt.datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+            except ValueError:
+                event_time = None
+            break
+
     await ship_svc.apply_tracking(
         db, ship, raw_status,
-        location=payload.get("location"), note=payload.get("activity"), raw=payload,
+        location=loc, note=act, raw=payload, event_time=event_time,
     )
     await db.commit()
     return {"status": "ok"}

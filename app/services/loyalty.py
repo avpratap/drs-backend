@@ -133,8 +133,13 @@ async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) 
     )
     if dup is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Referral already redeemed")
-    db.add(ReferralRedemption(code_id=rc.id, referee_account_id=referee_account_id))
-    await db.flush()
+    try:
+        async with db.begin_nested():  # savepoint: concurrent redeem of the same code
+            db.add(ReferralRedemption(code_id=rc.id, referee_account_id=referee_account_id))
+            await db.flush()
+    except IntegrityError:
+        # uq(code_id, referee_account_id) — the other request won; no double-award.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Referral already redeemed") from None
     await earn_points(db, rc.account_id, rc.reward_points, "referral", "referral_code", rc.id)
     return rc
 
@@ -142,6 +147,8 @@ async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) 
 async def issue_gift_card(db: AsyncSession, amount: float, issued_to=None, expires_at: dt.date | None = None) -> GiftCard:
     if amount <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount must be > 0")
+    if expires_at is not None and expires_at < dt.date.today():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "expires_at is in the past")
     for _ in range(10):
         code = _token(16)
         if await db.scalar(select(GiftCard.id).where(GiftCard.code == code)) is None:
@@ -170,7 +177,8 @@ async def redeem_gift_card(db: AsyncSession, code: str, account_id: int, amount:
     if gc.status in ("disabled", "redeemed", "expired"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Gift card is {gc.status}")
     if gc.expires_at is not None and gc.expires_at < dt.date.today():
-        gc.status = "expired"
+        # (Status is flipped to 'expired' by the expiry sweep, not here — a raise would
+        # roll back the write anyway; the check alone blocks redemption.)
         raise HTTPException(status.HTTP_409_CONFLICT, "Gift card has expired")
     amount = round(float(amount), 2)
     if amount <= 0:

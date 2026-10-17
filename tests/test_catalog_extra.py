@@ -79,8 +79,9 @@ async def test_cart_quote(client):
     body = q.json()
     assert body["subtotal"] == 500.0
     assert body["discount"] == 50.0           # 10% of 500
-    assert body["total"] == 450.0             # 500 - 50
-    assert body["tax_total"] == 54.0          # 12% of discounted 450
-    assert body["total_incl_tax"] == 504.0
+    assert body["total"] == 450.0             # 500 - 50 (GST-inclusive payable)
+    # Prices are GST-inclusive: tax is backed OUT of the discounted 450 → 450 - 450/1.12.
+    assert body["tax_total"] == 48.21
+    assert body["total_incl_tax"] == 450.0    # == total (GST already inside)
     assert body["serviceable"] is True        # dev-stub courier
     assert any(ln["product_id"] == ghee for ln in body["items"])

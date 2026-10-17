@@ -53,6 +53,7 @@ async def my_home(user: User = Depends(get_current_user), db: AsyncSession = Dep
     account = await order_svc._get_or_create_account(db, user)
 
     wallet = await billing_svc.get_or_create_wallet(db, account.id)
+    await db.commit()  # persist a first-touch wallet/account instead of re-creating each load
     credit = await billing_svc.credit_outstanding(db, account.id)
 
     active_subs = await db.scalar(

@@ -14,7 +14,7 @@ from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.schemas.order import OrderCreate, OrderItemOut, OrderOut
-from app.services import invoicing
+from app.services import coupons, invoicing
 from app.services import orders as order_service
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -234,6 +234,8 @@ async def cancel_order(
             status.HTTP_409_CONFLICT, f"Order is {order.status} and can no longer be cancelled"
         )
     order.status = "cancelled"
+    # Release any coupon reservation so an unpaid cancelled order doesn't burn the code.
+    await coupons.release_for_order(db, order.id)
     await db.commit()
     return await _detail(db, order)
 

@@ -5,6 +5,7 @@ gets at-most-once execution. The first call runs and its 2xx response is stored;
 retries replay the stored response. Non-2xx responses release the key so the
 client can genuinely retry. Reusing a key with a different body is a 422.
 """
+import datetime as dt
 import hashlib
 
 from sqlalchemy import select
@@ -19,6 +20,9 @@ from app.models.idempotency import IdempotencyKey
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _HOP_HEADERS = {"content-length", "content-type"}
+# An in-progress claim older than this is treated as abandoned (handler crashed / request
+# dropped between claim and response-store) so retries aren't wedged until the 48h prune.
+_INPROGRESS_TIMEOUT = dt.timedelta(seconds=120)
 
 
 def _subject(request: Request) -> str:
@@ -78,10 +82,19 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                         content={"detail": "Idempotency-Key reused with a different request"},
                     )
                 elif existing.response_status is None:
-                    return JSONResponse(
-                        status_code=409,
-                        content={"detail": "A request with this Idempotency-Key is in progress"},
-                    )
+                    # In progress — unless the claim is stale (handler crashed before
+                    # storing a response), in which case re-claim it so the client can retry.
+                    age = dt.datetime.now(dt.UTC) - existing.created_at
+                    if age > _INPROGRESS_TIMEOUT:
+                        existing.request_hash = req_hash
+                        existing.created_at = dt.datetime.now(dt.UTC)
+                        await db.commit()
+                        claimed = True
+                    else:
+                        return JSONResponse(
+                            status_code=409,
+                            content={"detail": "A request with this Idempotency-Key is in progress"},
+                        )
                 else:
                     return Response(
                         content=existing.response_body or "",
@@ -90,8 +103,21 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                         headers={"Idempotent-Replay": "true"},
                     )
 
-        # We hold the claim: execute and buffer the response.
-        response = await call_next(request)
+        # We hold the claim: execute and buffer the response. If the handler raises an
+        # unhandled error (e.g. a transient gateway/DB fault that Starlette turns into a
+        # 500), release the claim so the client can genuinely retry instead of being
+        # wedged on a 409 "in progress" until the 48h prune.
+        try:
+            response = await call_next(request)
+        except Exception:
+            async with SessionLocal() as db_err:
+                row = await db_err.scalar(
+                    select(IdempotencyKey).where(IdempotencyKey.key == key)
+                )
+                if row is not None and row.response_status is None:
+                    await db_err.delete(row)
+                    await db_err.commit()
+            raise
         chunks = [chunk async for chunk in response.body_iterator]
         out = b"".join(chunks)
 

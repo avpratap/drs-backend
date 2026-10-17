@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -51,7 +52,14 @@ async def add_to_wishlist(
     )
     if existing is None:  # idempotent add
         db.add(WishlistItem(account_id=account.id, product_id=data.product_id))
-    await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Concurrent add of the same product (uq_wishlist_account_product) — already
+            # present, so treat as success.
+            await db.rollback()
+    else:
+        await db.commit()
     rows = (
         await db.execute(
             select(WishlistItem)

@@ -1,6 +1,6 @@
 import datetime as dt
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,9 +28,9 @@ async def run_cutoff_endpoint(date: dt.date | None = None, db: AsyncSession = De
 
 class NotifyTestIn(BaseModel):
     user_id: int
-    event_type: str
+    event_type: str = Field(max_length=48)
     data: dict = Field(default_factory=dict)
-    dedupe_key: str | None = None
+    dedupe_key: str | None = Field(default=None, max_length=128)
 
 
 class NotifyRowOut(BaseModel):
@@ -136,8 +136,8 @@ async def resend_notification(notif_id: int, db: AsyncSession = Depends(get_db))
 async def list_notifications(
     user_id: int | None = None,
     status_filter: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Notification).order_by(Notification.id.desc())
@@ -145,7 +145,7 @@ async def list_notifications(
         q = q.where(Notification.user_id == user_id)
     if status_filter:
         q = q.where(Notification.status == status_filter)
-    q = q.limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+    q = q.limit(limit).offset(offset)
     res = await db.execute(q)
     return [
         {

@@ -14,7 +14,18 @@ async def _order(client, h, qty=3) -> tuple[int, int]:
         headers=h,
     )
     assert r.status_code == 200, r.text
-    return r.json()["id"], pid
+    oid = r.json()["id"]
+    # Returns require a PAID order — drive it through the dev payment gateway.
+    create = await client.post(
+        "/api/v1/payments/create", json={"purpose": "order_payment", "order_id": oid}, headers=h
+    )
+    goid = create.json()["gateway_order_id"]
+    await client.post(
+        "/api/v1/payments/verify",
+        json={"gateway_order_id": goid, "gateway_payment_id": "p", "signature": "dev"},
+        headers=h,
+    )
+    return oid, pid
 
 
 async def _wallet_balance(client, h) -> float:

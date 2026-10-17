@@ -62,16 +62,9 @@ app = FastAPI(
     servers=[{"url": "/", "description": "same origin"}],
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(RateLimitMiddleware)  # reject abusive IPs before heavy work
-app.add_middleware(RequestContextMiddleware)  # outermost: times & tags every request
+app.add_middleware(RequestContextMiddleware)  # times & tags every request
 
 
 # Hard cap on request body size (defense against a single huge-body DoS). Generous
@@ -109,6 +102,18 @@ async def security_headers(request: Request, call_next):
             "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
         )
     return response
+
+
+# Registered LAST so it is the OUTERMOST middleware — error responses produced by the
+# inner middleware (429 rate-limit, 413 body-size, 409/422 idempotency) then still carry
+# Access-Control-* headers so a browser on an allowed origin can read them.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _sanitize(obj):

@@ -4,16 +4,24 @@ Refund credits the customer's wallet as store credit (append-only ledger via
 billing.wallet_adjust). State transitions are guarded with 409.
 """
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.invoice import Invoice
 from app.models.order import Order, OrderItem
 from app.models.rma import ReturnRequest, ReturnRequestItem
-from app.services import billing
+from app.services import billing, invoicing
 
 
 async def create_request(db: AsyncSession, user, order: Order, items, reason) -> ReturnRequest:
-    """Each requested line must be on the order and not exceed the ordered qty."""
+    """Each requested line must be on the order and not exceed the (un-returned) ordered qty.
+    Only a paid, non-cancelled order can be returned."""
+    if order.payment_status != "paid":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Only a paid order can be returned"
+        )
+    if order.status == "cancelled":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Order is cancelled; nothing to return")
     ordered = {
         i.product_id: float(i.qty)
         for i in (
@@ -22,16 +30,32 @@ async def create_request(db: AsyncSession, user, order: Order, items, reason) ->
     }
     if not items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A return must have at least one item")
+    # Subtract quantities already returned on this order by OTHER live RMAs so the total
+    # returned per product can never exceed what was ordered (prevents multi-RMA over-refund).
+    already_rows = (
+        await db.execute(
+            select(ReturnRequestItem.product_id, func.sum(ReturnRequestItem.qty))
+            .join(ReturnRequest, ReturnRequest.id == ReturnRequestItem.return_request_id)
+            .where(
+                ReturnRequest.order_id == order.id,
+                ReturnRequest.status.notin_(("rejected", "cancelled")),
+            )
+            .group_by(ReturnRequestItem.product_id)
+        )
+    ).all()
+    already = {pid: float(q or 0) for pid, q in already_rows}
     for it in items:
         if it.product_id not in ordered:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 f"Product {it.product_id} is not on order {order.order_no}",
             )
-        if float(it.qty) <= 0 or float(it.qty) > ordered[it.product_id]:
+        remaining = round(ordered[it.product_id] - already.get(it.product_id, 0.0), 3)
+        if float(it.qty) <= 0 or float(it.qty) > remaining:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Return qty for product {it.product_id} must be in (0, {ordered[it.product_id]}]",
+                f"Return qty for product {it.product_id} must be in (0, {remaining}] "
+                f"(already returned: {already.get(it.product_id, 0.0)})",
             )
     rr = ReturnRequest(
         rma_no="PENDING",
@@ -69,7 +93,10 @@ async def reject(db: AsyncSession, rr: ReturnRequest, note: str | None) -> Retur
 
 
 async def _returned_value(db: AsyncSession, rr: ReturnRequest) -> float:
-    """Value of the returned lines = sum of original order unit_price * returned qty."""
+    """Value actually PAID for the returned lines = sum(unit_price * returned qty), scaled
+    by the order's discount factor (total/subtotal) so a refund can never exceed what the
+    customer paid when an order-level discount/coupon applied. Prices are GST-inclusive."""
+    order = await db.get(Order, rr.order_id)
     prices = {
         i.product_id: float(i.unit_price)
         for i in (
@@ -81,7 +108,10 @@ async def _returned_value(db: AsyncSession, rr: ReturnRequest) -> float:
             select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
         )
     ).scalars().all()
-    return round(sum(prices.get(li.product_id, 0.0) * float(li.qty) for li in lines), 2)
+    gross = sum(prices.get(li.product_id, 0.0) * float(li.qty) for li in lines)
+    subtotal = float(order.subtotal) if order and order.subtotal else 0.0
+    factor = (float(order.total) / subtotal) if subtotal > 0 else 1.0
+    return round(gross * factor, 2)
 
 
 async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRequest:
@@ -89,7 +119,7 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
         raise HTTPException(status.HTTP_409_CONFLICT, f"RMA is {rr.status}, must be approved to refund")
     if amount <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Refund amount must be > 0")
-    # Never credit more than the value of the returned goods.
+    # Never credit more than the (discount-adjusted) value of the returned goods.
     cap = await _returned_value(db, rr)
     if round(float(amount), 2) > cap:
         raise HTTPException(
@@ -99,6 +129,25 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
     await billing.wallet_adjust(db, rr.account_id, round(float(amount), 2), "refund", "rma", rr.id)
     rr.refund_amount = round(float(amount), 2)
     rr.status = "refunded"
+    # Issue a GST credit note for the returned lines against the order's tax invoice, if one
+    # was generated. One-shot: refund is guarded approved->refunded under a row lock.
+    inv = await db.scalar(
+        select(Invoice).where(
+            Invoice.order_id == rr.order_id, Invoice.is_credit_note.is_(False)
+        )
+    )
+    if inv is not None:
+        returned = {
+            li.product_id: float(li.qty)
+            for li in (
+                await db.execute(
+                    select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
+                )
+            ).scalars().all()
+        }
+        await invoicing.generate_credit_note_for_lines(
+            db, inv, returned, reason=f"Return {rr.rma_no}"
+        )
     return rr
 
 

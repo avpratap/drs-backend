@@ -1,5 +1,7 @@
 """Newsletter subscription (public double opt-in) + admin subscriber list."""
 import datetime as dt
+import hashlib
+import hmac
 import logging
 import secrets
 
@@ -21,6 +23,14 @@ log = logging.getLogger("drs.newsletter")
 _EMAIL = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
 
+def _unsub_token(email: str) -> str:
+    """Stateless per-email unsubscribe token (HMAC) — goes in the emailed one-click link,
+    so only someone who received the email (or the owner) can unsubscribe that address."""
+    return hmac.new(
+        settings.JWT_SECRET.encode(), f"unsub:{email}".encode(), hashlib.sha256
+    ).hexdigest()
+
+
 class SubscribeIn(BaseModel):
     email: str = Field(pattern=_EMAIL, max_length=255)
     name: str | None = Field(default=None, max_length=120)
@@ -28,6 +38,7 @@ class SubscribeIn(BaseModel):
 
 class UnsubscribeIn(BaseModel):
     email: str = Field(pattern=_EMAIL, max_length=255)
+    token: str = Field(min_length=16, max_length=128)
 
 
 class SubscriberOut(BaseModel):
@@ -43,6 +54,7 @@ class StatusOut(BaseModel):
     status: str
     # Returned only in non-prod so tests/dev can confirm without reading the email.
     confirm_token: str | None = None
+    unsubscribe_token: str | None = None
 
 
 @router.post("/newsletter/subscribe", response_model=StatusOut, operation_id="newsletter_subscribe")
@@ -93,12 +105,18 @@ async def confirm(token: str, db: AsyncSession = Depends(get_db)):
     row.consent_at = dt.datetime.now(dt.UTC)
     row.confirm_token = None
     await db.commit()
-    return StatusOut(email=row.email, status="subscribed")
+    return StatusOut(
+        email=row.email, status="subscribed",
+        unsubscribe_token=_unsub_token(row.email) if settings.ENV != "prod" else None,
+    )
 
 
 @router.post("/newsletter/unsubscribe", response_model=StatusOut, operation_id="newsletter_unsubscribe")
 async def unsubscribe(data: UnsubscribeIn, db: AsyncSession = Depends(get_db)):
     email = str(data.email).lower()
+    # Require the per-email token (from the emailed link) so one can't unsubscribe others.
+    if not hmac.compare_digest(data.token, _unsub_token(email)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid unsubscribe token")
     row = await db.scalar(select(NewsletterSubscriber).where(NewsletterSubscriber.email == email))
     if row is not None:
         row.status = "unsubscribed"
