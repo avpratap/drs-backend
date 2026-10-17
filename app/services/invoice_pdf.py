@@ -31,18 +31,24 @@ def _render(invoice: Invoice, lines: list[InvoiceLine]) -> bytes:
                         f"  ({'Inter-state/IGST' if invoice.is_interstate else 'Intra-state/CGST+SGST'})")
     y -= 24
 
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(50, y, "HSN")
-    c.drawString(110, y, "Description")
-    c.drawString(320, y, "Qty")
-    c.drawString(360, y, "Rate")
-    c.drawString(410, y, "Taxable")
-    c.drawString(470, y, "Tax")
-    c.drawString(520, y, "Total")
-    y -= 4
-    c.line(50, y, width - 40, y)
-    y -= 14
-    c.setFont("Helvetica", 9)
+    def _table_header(top: float) -> float:
+        """Draw the column header + rule and leave the cursor on the first body row,
+        with the 9pt body font active. Reused on every (continuation) page."""
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(50, top, "HSN")
+        c.drawString(110, top, "Description")
+        c.drawString(320, top, "Qty")
+        c.drawString(360, top, "Rate")
+        c.drawString(410, top, "Taxable")
+        c.drawString(470, top, "Tax")
+        c.drawString(520, top, "Total")
+        top -= 4
+        c.line(50, top, width - 40, top)
+        top -= 14
+        c.setFont("Helvetica", 9)
+        return top
+
+    y = _table_header(y)
     for ln in lines:
         tax = float(ln.cgst) + float(ln.sgst) + float(ln.igst)
         c.drawString(50, y, (ln.hsn_code or "-")[:10])
@@ -55,7 +61,10 @@ def _render(invoice: Invoice, lines: list[InvoiceLine]) -> bytes:
         y -= 14
         if y < 90:
             c.showPage()
-            y = height - 60
+            # showPage() resets the graphics state (incl. the font) to reportlab's
+            # default — re-draw the header, which re-selects the 9pt body font, so
+            # continued rows aren't rendered in the wrong (default 12pt) font (#73).
+            y = _table_header(height - 60)
 
     y -= 6
     c.line(50, y, width - 40, y)
