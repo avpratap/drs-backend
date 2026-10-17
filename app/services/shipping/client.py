@@ -20,6 +20,26 @@ def enabled() -> bool:
     return bool(settings.SHIPROCKET_EMAIL and settings.SHIPROCKET_PASSWORD)
 
 
+def _as_float(v, default: float) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(v) -> int | None:
+    """Best-effort int from a number or a string like '3' or '3-5 Days' (leading int)."""
+    if v is None:
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        import re
+
+        m = re.match(r"\s*(\d+)", str(v))
+        return int(m.group(1)) if m else None
+
+
 class ShippingError(Exception):
     pass
 
@@ -69,12 +89,14 @@ async def check_serviceability(
         couriers = data.get("available_courier_companies", [])
         if not couriers:
             return {"serviceable": False, "etd_days": None, "courier": None, "rate": None}
-        best = min(couriers, key=lambda x: x.get("rate", 1e9))
+        # Shiprocket returns rate/etd as numbers OR strings ("45.5", "3-5 Days"); coerce
+        # defensively so a string field can't crash min() or the response serializer.
+        best = min(couriers, key=lambda x: _as_float(x.get("rate"), 1e9))
         return {
             "serviceable": True,
-            "etd_days": best.get("estimated_delivery_days"),
+            "etd_days": _as_int(best.get("estimated_delivery_days")),
             "courier": best.get("courier_name"),
-            "rate": float(best.get("rate", 0)),
+            "rate": _as_float(best.get("rate"), 0.0),
         }
     except Exception as exc:
         log.warning("serviceability check failed: %s", exc)

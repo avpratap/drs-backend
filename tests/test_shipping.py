@@ -10,7 +10,20 @@ async def _order_id(client, cust_h, qty=2) -> int:
         headers=cust_h,
     )
     assert r.status_code == 200, r.text
-    return r.json()["id"]
+    oid = r.json()["id"]
+    # A non-COD (prepaid) order must be PAID before it can ship — drive it through the
+    # dev payment gateway so the realistic prepaid flow is exercised.
+    create = await client.post(
+        "/api/v1/payments/create", json={"purpose": "order_payment", "order_id": oid},
+        headers=cust_h,
+    )
+    goid = create.json()["gateway_order_id"]
+    await client.post(
+        "/api/v1/payments/verify",
+        json={"gateway_order_id": goid, "gateway_payment_id": "p", "signature": "dev"},
+        headers=cust_h,
+    )
+    return oid
 
 
 async def _create_shipment(client, admin_h, oid, **over):
@@ -94,6 +107,31 @@ async def test_cancel_shipment(client):
     # Cannot cancel a terminal shipment again.
     again = await client.post(f"/api/v1/admin/shipments/{ship['id']}/cancel", headers=ah)
     assert again.status_code == 409
+
+
+async def _unpaid_order_id(client, cust_h, qty=1) -> int:
+    prods = (await client.get("/api/v1/products", headers=cust_h)).json()
+    pid = next(p["id"] for p in prods if p["sku"] == "MILK-1L")
+    r = await client.post(
+        "/api/v1/orders",
+        json={"items": [{"product_id": pid, "qty": qty}], "address": "7 Station Rd, Jaipur"},
+        headers=cust_h,
+    )
+    return r.json()["id"]
+
+
+async def test_prepaid_unpaid_order_cannot_ship_but_cod_can(client):
+    """#79: a non-COD shipment requires a paid order; a COD shipment may ship unpaid."""
+    ah = auth(await login(client, "9999900001"))
+    ch = auth(await login(client, "9876543210"))
+
+    oid = await _unpaid_order_id(client, ch)
+    blocked = await _create_shipment(client, ah, oid)  # non-COD, order still pending
+    assert blocked.status_code == 409
+
+    oid2 = await _unpaid_order_id(client, ch)
+    cod_ok = await _create_shipment(client, ah, oid2, cod=True)
+    assert cod_ok.status_code == 200, cod_ok.text
 
 
 async def test_create_shipment_unknown_order_404(client):

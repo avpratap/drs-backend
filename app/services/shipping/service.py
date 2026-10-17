@@ -71,6 +71,13 @@ async def create_shipment(db: AsyncSession, order: Order, dest: dict, weight_kg:
         raise HTTPException(http.HTTP_409_CONFLICT, f"Order is {order.payment_status}, cannot ship")
     if order.status in ("cancelled", "refunded"):
         raise HTTPException(http.HTTP_409_CONFLICT, f"Order is {order.status}, cannot ship")
+    # A prepaid (non-COD) order must be PAID before goods leave — only COD shipments
+    # (money collected on delivery) may ship while payment is still pending.
+    if not cod and order.payment_status != "paid":
+        raise HTTPException(
+            http.HTTP_409_CONFLICT,
+            "Prepaid order must be paid before a non-COD shipment",
+        )
     # One live shipment per order (a cancelled one may be superseded).
     existing = await db.scalar(
         select(Shipment.id).where(Shipment.order_id == order.id, Shipment.status != "cancelled")
