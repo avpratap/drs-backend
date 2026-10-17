@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal
 from app.services.cutoff import run_cutoff
 from app.services.maintenance import prune
+from app.services.ml import churn as churn_svc
 from app.services.notifications import process_outbox
 from app.services.subscription import today_ist
 
@@ -39,13 +40,20 @@ async def housekeeping(ctx: dict) -> dict:
         return await prune(db)
 
 
+async def score_churn(ctx: dict) -> dict:
+    """Nightly churn scoring over all accounts (ML on our infra; aggregate data only)."""
+    async with SessionLocal() as db:
+        return await churn_svc.score_all(db)
+
+
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    functions = [scheduled_cutoff, drain_outbox, housekeeping]
+    functions = [scheduled_cutoff, drain_outbox, housekeeping, score_churn]
     cron_jobs = [
         cron(scheduled_cutoff, hour=17, minute=35),  # 23:05 IST
         cron(drain_outbox),  # every minute
         cron(housekeeping, hour=1, minute=0),  # daily prune
+        cron(score_churn, hour=2, minute=0),  # nightly churn scoring
     ]
     # Resilience: retry failed jobs with backoff; a job that exhausts max_tries
     # lands in ARQ's result store with its error (our dead-letter surface).

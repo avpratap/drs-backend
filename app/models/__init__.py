@@ -9,6 +9,7 @@ from app.models.base import Base
 from app.models.batch import StockBatch
 from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
 from app.models.cart import Cart, CartItem
+from app.models.churn import ChurnScore
 from app.models.content import Article, Banner, StaticPage
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
@@ -66,6 +67,7 @@ __all__ = [
     "Cart",
     "CartItem",
     "CashCollection",
+    "ChurnScore",
     "Consent",
     "Coupon",
     "CouponRedemption",

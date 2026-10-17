@@ -15,6 +15,7 @@ from app.api.v1 import (
     invoices,
     loyalty,
     management,
+    ml,
     newsletter,
     orders,
     payments,
@@ -60,4 +61,5 @@ api_router.include_router(admin_tools.router)
 api_router.include_router(devices.router)
 api_router.include_router(wishlist.router)
 api_router.include_router(newsletter.router)
+api_router.include_router(ml.router)
 api_router.include_router(ai.router)

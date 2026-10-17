@@ -25,6 +25,30 @@ Z_SERVICE = 1.28
 DEFAULT_HISTORY_DAYS = 28
 
 
+def _statsforecast_point(daily_qtys: list[float]) -> float | None:
+    """AutoARIMA/ETS point forecast via statsforecast, if the lib is importable and
+    there is enough history. Returns None to fall back to the EWMA baseline — so with
+    the lib absent (the default), behaviour is identical to the dependency-free path."""
+    if len(daily_qtys) < 14:
+        return None
+    try:
+        import numpy as np  # noqa: F401  (statsforecast needs numpy)
+        import pandas as pd
+        from statsforecast import StatsForecast
+        from statsforecast.models import AutoARIMA
+
+        df = pd.DataFrame({
+            "unique_id": "s",
+            "ds": pd.date_range("2000-01-01", periods=len(daily_qtys), freq="D"),
+            "y": daily_qtys,
+        })
+        sf = StatsForecast(models=[AutoARIMA()], freq="D")
+        fc = sf.forecast(df=df, h=1)
+        return max(0.0, float(fc["AutoARIMA"].iloc[0]))
+    except Exception:
+        return None
+
+
 def forecast_variable(daily_qtys: list[float]) -> dict:
     """Point forecast + safety buffer for one product's variable daily demand."""
     if not daily_qtys or sum(daily_qtys) == 0:
@@ -32,6 +56,10 @@ def forecast_variable(daily_qtys: list[float]) -> dict:
 
     nonzero = [q for q in daily_qtys if q > 0]
     intermittent = len(nonzero) < len(daily_qtys) * 0.5
+    sf_point = None if intermittent else _statsforecast_point(daily_qtys)
+    if sf_point is not None:
+        sd = statistics.pstdev(daily_qtys) if len(daily_qtys) > 1 else 0.0
+        return {"point": round(sf_point, 2), "safety": round(Z_SERVICE * sd, 2), "method": "autoarima"}
     if intermittent:
         # Croston-style: average demand size * probability of a demand day.
         prob = len(nonzero) / len(daily_qtys)
