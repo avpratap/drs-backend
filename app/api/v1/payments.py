@@ -230,10 +230,13 @@ async def verify_payment(
 async def refund_payment(
     payment_id: int, data: RefundIn, db: AsyncSession = Depends(get_db)
 ):
-    """Refund a successful payment (full or partial). Idempotency-Key recommended.
-    Top-up refunds reverse the wallet credit; order-payment refunds return store
-    credit to the wallet and mark the order refunded. The payment row is locked
-    FOR UPDATE, so concurrent refunds for the same payment serialize."""
+    """Refund a successful payment (full or partial). Top-up refunds reverse the wallet
+    credit; order-payment refunds return money to source and mark the order refunded.
+
+    Double-refund safety: the payment row is locked FOR UPDATE for the whole read-cap +
+    insert-'initiated' section, and the over-refund cap counts EVERY non-'failed' refund
+    (initiated/pending/processed), so a concurrent or duplicate request sees the in-flight
+    refund in `already` and is capped before a second gateway call is ever issued."""
     res = await db.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
     payment = res.scalar_one_or_none()
     if payment is None:
@@ -241,10 +244,13 @@ async def refund_payment(
     if payment.status != "success":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only successful payments can be refunded")
 
+    # Count every refund that is NOT definitively failed (money-moved OR possibly-moved):
+    # processed, initiated, and pending (ambiguous gateway outcome). Only a 'failed' refund
+    # (gateway rejected, no money moved) frees its amount back to the cap.
     already = float(
         await db.scalar(
             select(func.coalesce(func.sum(Refund.amount), 0)).where(
-                Refund.payment_id == payment.id, Refund.status == "processed"
+                Refund.payment_id == payment.id, Refund.status != "failed"
             )
         )
         or 0
@@ -269,21 +275,23 @@ async def refund_payment(
     # after a crash reuses the same id → the same gateway Idempotency-Key → Razorpay
     # returns the original refund instead of issuing a second one.
     await db.commit()
-    # The gateway call can time out. If it fails, persist the refund as 'failed'
-    # (audit trail, no wallet effect — it never counts toward `already`) and surface
-    # 502 so an admin can retry, rather than a silent stuck row. The gateway idempotency
-    # key makes even a succeeded-but-lost response safe to retry.
+    # The gateway call can time out AFTER Razorpay actually processed the refund, so a
+    # failure here is AMBIGUOUS — we must not assume "no money moved". Persist the refund
+    # as 'pending' (NOT 'failed'): pending keeps counting toward `already`, so a blind
+    # retry can never issue a second gateway refund. An admin reconciles a pending refund
+    # against the gateway (mark it processed, or failed to free the cap).
     try:
         refund.gateway_refund_id = await pay_service.create_gateway_refund(
             payment.gateway_payment_id, amount, idempotency_key=f"drs-refund-{refund.id}"
         )
     except Exception as exc:
-        refund.status = "failed"
-        refund.reason = (refund.reason or "") + f" [gateway error: {str(exc)[:80]}]"
+        refund.status = "pending"
+        refund.reason = (refund.reason or "") + f" [gateway error, needs reconcile: {str(exc)[:60]}]"
         await db.commit()
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
-            "Refund could not be processed by the gateway; no money moved. Please retry.",
+            "Refund is pending at the gateway and needs reconciliation; it was NOT retried "
+            "automatically to avoid a double refund.",
         ) from exc
     # The gateway has moved the money. Persist the refund as 'processed' and COMMIT
     # NOW — before touching the wallet/order — so a retry after any later failure sees

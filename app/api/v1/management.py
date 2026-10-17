@@ -549,7 +549,16 @@ async def admin_settle_credit(
     db: AsyncSession = Depends(get_db),
 ):
     """Record a payment received against a B2B postpaid account's outstanding credit."""
-    account = await db.get(CustomerAccount, account_id)
+    # Lock the account row FIRST so the overpay check and the credit write are atomic:
+    # credit_entry serializes all credit writes for an account on this same row, so holding
+    # it here prevents a TOCTOU where two concurrent settlements both read the same
+    # `outstanding`, both pass the guard, and together overpay into a negative (drawable)
+    # credit balance.
+    account = (
+        await db.execute(
+            select(CustomerAccount).where(CustomerAccount.id == account_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     if account.billing_mode != "postpaid_credit":
@@ -557,8 +566,7 @@ async def admin_settle_credit(
             status.HTTP_409_CONFLICT,
             "Account is not on postpaid credit; nothing to settle",
         )
-    # Don't let a settlement overpay the outstanding credit into a negative ledger
-    # (which would silently become a credit the customer can draw on).
+    # Read outstanding UNDER the lock so no concurrent settlement can slip in between.
     outstanding = await billing_svc.credit_outstanding(db, account_id)
     if round(float(data.amount), 2) > round(float(outstanding), 2):
         raise HTTPException(
