@@ -44,10 +44,11 @@ class ShippingError(Exception):
     pass
 
 
-async def _token() -> str:
-    cached = await redis_client.get(_TOKEN_KEY)
-    if cached:
-        return cached
+async def _token(*, force: bool = False) -> str:
+    if not force:
+        cached = await redis_client.get(_TOKEN_KEY)
+        if cached:
+            return cached
     import httpx
 
     async with httpx.AsyncClient(timeout=15) as c:
@@ -61,8 +62,25 @@ async def _token() -> str:
     return token
 
 
-async def _headers() -> dict:
-    return {"Authorization": f"Bearer {await _token()}", "Content-Type": "application/json"}
+async def _headers(*, force: bool = False) -> dict:
+    return {
+        "Authorization": f"Bearer {await _token(force=force)}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _authed(method: str, path: str, **kw):
+    """Call Shiprocket with the cached auth token; on a 401 (token revoked/expired early)
+    refresh the token ONCE and retry, so a stale cached token self-heals (#72)."""
+    import httpx
+
+    url = f"{settings.SHIPROCKET_BASE_URL}{path}"
+    timeout = kw.pop("timeout", 20)
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        resp = await c.request(method, url, headers=await _headers(), **kw)
+        if resp.status_code == 401:
+            resp = await c.request(method, url, headers=await _headers(force=True), **kw)
+    return resp
 
 
 async def check_serviceability(
@@ -71,20 +89,17 @@ async def check_serviceability(
     """Return {serviceable, etd_days, courier, rate}. Dev-stub: always serviceable."""
     if not enabled():
         return {"serviceable": True, "etd_days": 3, "courier": "DEV-Courier", "rate": 0.0}
-    import httpx
-
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get(
-                f"{settings.SHIPROCKET_BASE_URL}/courier/serviceability/",
-                headers=await _headers(),
-                params={
-                    "pickup_postcode": settings.PICKUP_PINCODE,
-                    "delivery_postcode": delivery_pincode,
-                    "weight": weight_kg,
-                    "cod": 1 if cod else 0,
-                },
-            )
+        r = await _authed(
+            "GET", "/courier/serviceability/",
+            params={
+                "pickup_postcode": settings.PICKUP_PINCODE,
+                "delivery_postcode": delivery_pincode,
+                "weight": weight_kg,
+                "cod": 1 if cod else 0,
+            },
+            timeout=15,
+        )
         data = r.json().get("data", {})
         couriers = data.get("available_courier_companies", [])
         if not couriers:
@@ -120,25 +135,13 @@ async def create_shipment(payload: dict) -> dict:
             "label_url": None,
             "tracking_url": f"https://shiprocket.co/tracking/{awb}",
         }
-    import httpx
-
-    async with httpx.AsyncClient(timeout=20) as c:
-        headers = await _headers()
-        order = await c.post(
-            f"{settings.SHIPROCKET_BASE_URL}/orders/create/adhoc",
-            headers=headers,
-            json=payload["order"],
-        )
-        order.raise_for_status()
-        oj = order.json()
-        gsid = oj.get("shipment_id")
-        awb_resp = await c.post(
-            f"{settings.SHIPROCKET_BASE_URL}/courier/assign/awb",
-            headers=headers,
-            json={"shipment_id": gsid},
-        )
-        awb_resp.raise_for_status()
-        ad = awb_resp.json().get("response", {}).get("data", {})
+    order = await _authed("POST", "/orders/create/adhoc", json=payload["order"])
+    order.raise_for_status()
+    oj = order.json()
+    gsid = oj.get("shipment_id")
+    awb_resp = await _authed("POST", "/courier/assign/awb", json={"shipment_id": gsid})
+    awb_resp.raise_for_status()
+    ad = awb_resp.json().get("response", {}).get("data", {})
     return {
         "gateway_order_id": str(oj.get("order_id")),
         "gateway_shipment_id": str(gsid),
@@ -152,15 +155,10 @@ async def create_shipment(payload: dict) -> dict:
 async def cancel_shipment(gateway_shipment_id: str) -> bool:
     if not enabled():
         return True
-    import httpx
-
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(
-                f"{settings.SHIPROCKET_BASE_URL}/orders/cancel",
-                headers=await _headers(),
-                json={"ids": [gateway_shipment_id]},
-            )
+        r = await _authed(
+            "POST", "/orders/cancel", json={"ids": [gateway_shipment_id]}, timeout=15
+        )
         return r.status_code < 300
     except Exception as exc:
         log.warning("cancel failed: %s", exc)

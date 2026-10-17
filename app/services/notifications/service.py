@@ -172,15 +172,28 @@ async def _emit_event_inner(
 
 
 async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
-    """Send one queued notification. Returns True on success."""
+    """Send one queued notification, committing its own state. Returns True on success.
+
+    Two-phase to avoid a provider DOUBLE-SEND (#N4): the row is durably claimed as
+    'sending' BEFORE the provider call, then set to 'sent'/'queued'/'failed' after. A
+    crash between those two commits leaves the row 'sending' — it is NOT auto-retried
+    (the candidate scan only picks 'queued'), so a paid WhatsApp/SMS can't be re-sent
+    behind our back. A stuck 'sending' row is recovered via admin resend (resets to
+    queued). This trades at-least-once for at-most-once, which is correct for paid sends.
+    """
     if notif.status != "queued":
         return notif.status == "sent"
     sender = sender_mod.SENDERS.get(notif.channel)
     if sender is None:
         notif.status, notif.error = "failed", "no sender"
+        await db.commit()
         return False
+    # Phase 1 — claim durably so a crash mid-send can't resurface this as 'queued'.
+    notif.status = "sending"
     notif.attempts = (notif.attempts or 0) + 1
     notif.last_attempt_at = dt.datetime.now(dt.UTC)
+    await db.commit()
+    # Phase 2 — call the provider, then record the terminal state.
     ok, msg_id, err = await sender(notif.to_addr or "", notif.body or "", notif.payload)
     if ok:
         notif.status = "sent"
@@ -194,8 +207,10 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
         if notif.attempts >= MAX_ATTEMPTS:
             notif.status = "failed"
         else:
-            # Exponential backoff: retry no sooner than 2**attempts minutes out.
+            # Back to queued with exponential backoff: retry no sooner than 2**attempts min.
+            notif.status = "queued"
             notif.next_attempt_at = notif.last_attempt_at + dt.timedelta(minutes=2**notif.attempts)
+    await db.commit()
     return ok
 
 
@@ -233,20 +248,25 @@ async def process_outbox(db: AsyncSession, *, limit: int = 100) -> dict:
             continue
         processed += 1
         try:
+            # deliver_notification commits its own claim + terminal state (two-phase).
             ok = await deliver_notification(db, notif)
-            await db.commit()
             sent += int(ok)
             failed += int(not ok)
         except Exception:
             await db.rollback()
             failed += 1
             log.exception("deliver_notification crashed for notification %s", nid)
-            # Best-effort: mark it failed in a fresh transaction so it isn't retried forever.
+            # Best-effort: only a row still 'queued' (crash BEFORE the provider call) is
+            # marked failed. A 'sending' row (crash AFTER the call) is left as-is — the
+            # provider may have delivered it, so we must not auto-retry; admin resend
+            # recovers it deliberately.
             try:
                 n = await db.get(Notification, nid)
                 if n is not None and n.status == "queued":
                     n.status, n.error = "failed", "delivery crashed"
                     await db.commit()
+                else:
+                    await db.rollback()
             except Exception:
                 await db.rollback()
     return {"processed": processed, "sent": sent, "failed": failed}
