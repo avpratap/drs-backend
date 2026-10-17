@@ -149,6 +149,11 @@ async def create_payment(
     else:  # wallet_topup — client amount is authoritative and required
         if amount is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount required for top-up")
+        # Quantize to 2dp ONCE so the gateway charge (round(amount*100) paise) and the
+        # stored/credited Numeric(12,2) can't diverge at sub-paisa inputs (free balance).
+        amount = round(float(amount), 2)
+        if amount <= 0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount must be > 0")
 
     gateway_order_id = await pay_service.create_gateway_order(amount)
     payment = Payment(
@@ -260,13 +265,17 @@ async def refund_payment(
         status="initiated",
     )
     db.add(refund)
-    await db.flush()
+    # COMMIT the 'initiated' row BEFORE the gateway call so refund.id is durable: a retry
+    # after a crash reuses the same id → the same gateway Idempotency-Key → Razorpay
+    # returns the original refund instead of issuing a second one.
+    await db.commit()
     # The gateway call can time out. If it fails, persist the refund as 'failed'
     # (audit trail, no wallet effect — it never counts toward `already`) and surface
-    # 502 so an admin can retry with a fresh refund, rather than a silent stuck row.
+    # 502 so an admin can retry, rather than a silent stuck row. The gateway idempotency
+    # key makes even a succeeded-but-lost response safe to retry.
     try:
         refund.gateway_refund_id = await pay_service.create_gateway_refund(
-            payment.gateway_payment_id, amount
+            payment.gateway_payment_id, amount, idempotency_key=f"drs-refund-{refund.id}"
         )
     except Exception as exc:
         refund.status = "failed"
@@ -385,8 +394,11 @@ def _payment_ids_from_payload(payload: dict) -> tuple[str | None, str | None]:
 
 
 async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payload: dict) -> None:
-    if event_type not in ("payment.captured", "payment.authorized", "payment.failed"):
-        return  # other events are logged only (MVP)
+    # Only 'captured' (funds settled) finalizes. 'authorized' means funds are merely held
+    # (auto-capture via payment_capture:1 follows as 'captured'); crediting on authorize
+    # would credit money that could still fail to capture / be voided.
+    if event_type not in ("payment.captured", "payment.failed"):
+        return  # authorized + everything else are logged only
     order_id, gpid = _payment_ids_from_payload(payload)
     if not order_id:
         return

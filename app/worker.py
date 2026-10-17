@@ -7,8 +7,9 @@ standing orders are materialized into delivery_orders automatically every night.
 ARQ cron times are UTC; adjust if CUTOFF_HOUR changes.
 """
 import datetime as dt
+import logging
 
-from arq import cron
+from arq import Retry, cron
 from arq.connections import RedisSettings
 
 from app.core.config import settings
@@ -19,11 +20,21 @@ from app.services.ml import churn as churn_svc
 from app.services.notifications import process_outbox
 from app.services.subscription import today_ist
 
+log = logging.getLogger("drs.worker")
+
 
 async def scheduled_cutoff(ctx: dict) -> dict:
     delivery_date = today_ist() + dt.timedelta(days=1)
-    async with SessionLocal() as db:
-        result = await run_cutoff(db, delivery_date)
+    try:
+        async with SessionLocal() as db:
+            result = await run_cutoff(db, delivery_date)
+    except Exception as exc:
+        # arq only auto-retries on an explicit Retry, not a plain exception. run_cutoff is
+        # idempotent, so re-raise as Retry (bounded by max_tries) with backoff so a
+        # transient DB blip doesn't silently skip tomorrow's standing orders.
+        attempt = ctx.get("job_try", 1)
+        log.warning("scheduled_cutoff attempt %s failed: %s", attempt, exc)
+        raise Retry(defer=min(60 * attempt, 300)) from exc
     result["delivery_date"] = str(result["delivery_date"])
     return result
 
@@ -49,11 +60,14 @@ async def score_churn(ctx: dict) -> dict:
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     functions = [scheduled_cutoff, drain_outbox, housekeeping, score_churn]
+    # arq's cron() takes PER-JOB max_tries/keep_result that OVERRIDE the worker-level
+    # settings (and default to max_tries=1, keep_result=0), so they must be set here or
+    # the "retry + 1h result retention" below would NOT apply to these scheduled jobs.
     cron_jobs = [
-        cron(scheduled_cutoff, hour=17, minute=35),  # 23:05 IST
-        cron(drain_outbox),  # every minute
-        cron(housekeeping, hour=1, minute=0),  # daily prune
-        cron(score_churn, hour=2, minute=0),  # nightly churn scoring
+        cron(scheduled_cutoff, hour=17, minute=35, max_tries=4, keep_result=3600),  # 23:05 IST
+        cron(drain_outbox, max_tries=2, keep_result=300),  # every minute
+        cron(housekeeping, hour=1, minute=0, max_tries=3, keep_result=3600),  # daily prune
+        cron(score_churn, hour=2, minute=0, max_tries=3, keep_result=3600),  # nightly churn
     ]
     # Resilience: retry failed jobs with backoff; a job that exhausts max_tries
     # lands in ARQ's result store with its error (our dead-letter surface).

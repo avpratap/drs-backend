@@ -47,7 +47,7 @@ class _Ctx:
     book: PriceBook
 
 
-async def _load_ctx(db: AsyncSession) -> _Ctx:
+async def _load_ctx(db: AsyncSession, delivery_date: dt.date) -> _Ctx:
     rows = (
         await db.execute(
             select(Subscription.shop_id, Subscription.account_id).where(
@@ -96,7 +96,9 @@ async def _load_ctx(db: AsyncSession) -> _Ctx:
             )
         ).all()
         wallets = {aid: float(bal) for aid, bal in wrows}
-    return _Ctx(shops, accounts, owners, wallets, await load_price_book(db))
+    # Price AS OF the delivery date (not "now") so a price scheduled to take effect on the
+    # delivery day is applied and an expiring price isn't used past its date.
+    return _Ctx(shops, accounts, owners, wallets, await load_price_book(db, today=delivery_date))
 
 
 async def _materialize_one(
@@ -128,6 +130,7 @@ async def _materialize_one(
         priced.append((line["product_id"], line["qty"], unit_price, line_total))
     if not priced:
         return False  # nothing priced -> nothing to deliver
+    subtotal = round(subtotal, 2)  # re-round the float accumulation before the funds gate
 
     res = await db.execute(
         select(DeliveryOrder)
@@ -138,8 +141,12 @@ async def _materialize_one(
         .with_for_update()
     )
     order = res.scalar_one_or_none()
-    if order is not None and order.status not in ("generated", "frozen"):
-        return False  # never clobber assigned/dispatched/delivered
+    if order is not None and (
+        order.status not in ("generated", "frozen") or order.origin != "subscription"
+    ):
+        # Never clobber an assigned/dispatched/delivered order, nor a non-subscription
+        # (one-time/manual) order that happens to share this (shop, date).
+        return False
 
     # Retail prepaid funds gate: never deliver a prepaid retail account into the negative.
     # If the wallet can't cover tomorrow's order, skip it, drop any stale pending order
@@ -201,6 +208,10 @@ async def _materialize_one(
     order.subtotal = subtotal
     order.total = subtotal
     order.amount_due = subtotal
+    # Decrement the preloaded wallet snapshot so a SECOND subscription of the same prepaid
+    # account this run is gated against the remaining (not the original) balance.
+    if sub.account_id in ctx.wallets:
+        ctx.wallets[sub.account_id] = round(ctx.wallets[sub.account_id] - subtotal, 2)
 
     # Tell the account owner tomorrow's order is set (idempotent per delivery_order;
     # a cutoff re-run hits the dedupe savepoint and skips silently).
@@ -210,7 +221,7 @@ async def _materialize_one(
             db,
             "order.generated",
             owner,
-            {"date": str(delivery_date), "summary": f"{len(lines)} item(s)", "total": subtotal},
+            {"date": str(delivery_date), "summary": f"{len(priced)} item(s)", "total": subtotal},
             account_id=sub.account_id,
             dedupe_key=f"order.generated:{order.id}",
         )
@@ -245,7 +256,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
         run_id = run.id
         await db.commit()  # persist the run row up front
 
-        ctx = await _load_ctx(db)  # reference data preloaded once (no per-sub N+1)
+        ctx = await _load_ctx(db, delivery_date)  # reference data preloaded once (no per-sub N+1)
         ids = (
             await db.execute(
                 select(Subscription.id)

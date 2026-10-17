@@ -43,16 +43,24 @@ def verify_signature(order_id: str, payment_id: str, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-async def create_gateway_refund(gateway_payment_id: str | None, amount: float) -> str:
-    """Issue a refund against a captured payment. Dev stub returns a synthetic id."""
+async def create_gateway_refund(
+    gateway_payment_id: str | None, amount: float, *, idempotency_key: str | None = None
+) -> str:
+    """Issue a refund against a captured payment. Dev stub returns a synthetic id.
+
+    A stable `idempotency_key` (derived from our Refund row id) is sent as Razorpay's
+    `Idempotency-Key` header so a retry after a lost response / crash cannot issue a
+    SECOND real refund — the gateway returns the original refund instead."""
     if not gateway_enabled() or not gateway_payment_id:
         return "rfnd_dev_" + secrets.token_hex(8)
     paise = round(amount * 100)
+    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             f"https://api.razorpay.com/v1/payments/{gateway_payment_id}/refund",
             auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
             json={"amount": paise},
+            headers=headers,
         )
     resp.raise_for_status()
     return resp.json()["id"]

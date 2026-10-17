@@ -77,12 +77,19 @@ async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -
         )
         overrides = {o.subscription_item_id: o for o in res.scalars().all()}
 
-    lines: list[dict] = []
+    # Aggregate by product_id so a product covered by >1 subscription item produces ONE
+    # line (delivery/invoice key by product_id; duplicate lines would be mis-handled).
+    by_product: dict[int, float] = {}
     for it in items:
-        if not _matches(it, sub, for_date):
-            continue
         ov = overrides.get(it.id)
-        qty = float(ov.override_qty) if ov is not None else float(it.default_qty)
+        if ov is not None:
+            # An override FORCES the day regardless of cadence (qty 0 = skip); this is how
+            # a customer adds a one-off delivery on an otherwise off day.
+            qty = float(ov.override_qty)
+        elif _matches(it, sub, for_date):
+            qty = float(it.default_qty)
+        else:
+            continue
         if qty > 0:
-            lines.append({"product_id": it.product_id, "qty": qty})
-    return lines
+            by_product[it.product_id] = by_product.get(it.product_id, 0.0) + qty
+    return [{"product_id": pid, "qty": qty} for pid, qty in by_product.items()]
