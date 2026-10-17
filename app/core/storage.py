@@ -35,7 +35,12 @@ def put_object(key: str, data: bytes, content_type: str = "application/octet-str
         return f"{base.rstrip('/')}/{key}"
 
     # Dev stub: persist locally so the object is actually retrievable in dev.
-    path = os.path.join(settings.STORAGE_DIR, key)
+    root = os.path.abspath(settings.STORAGE_DIR)
+    path = os.path.abspath(os.path.join(root, key))
+    # Defense-in-depth: a key containing '..' or an absolute path must not escape the
+    # storage root (path traversal → arbitrary file write).
+    if os.path.commonpath([root, path]) != root:
+        raise ValueError("invalid storage key")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(data)

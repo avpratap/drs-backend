@@ -10,7 +10,9 @@ from app.core.config import settings
 from app.core.redis import redis_client
 from app.services.sms import send_otp_sms, sms_enabled
 
-OTP_TTL = settings.MSG91_OTP_EXPIRY_MIN * 60  # keep in sync with the SMS's stated expiry
+# Floor at 60s so a misconfigured MSG91_OTP_EXPIRY_MIN=0 can't make every OTP expire
+# instantly (redis SET ex=0 is rejected) and lock users out of login.
+OTP_TTL = max(60, settings.MSG91_OTP_EXPIRY_MIN * 60)  # keep in sync with the SMS's stated expiry
 MAX_SENDS_PER_HOUR = 5
 MAX_SENDS_PER_IP_HOUR = 50  # across all phones from one device/IP
 MAX_VERIFY_ATTEMPTS = 5

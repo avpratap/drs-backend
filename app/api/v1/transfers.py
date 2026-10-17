@@ -88,7 +88,25 @@ async def list_transfers(
     if status_filter:
         q = q.where(StockTransfer.status == status_filter)
     rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _out(db, tr) for tr in rows]
+    if not rows:
+        return []
+    # Fetch all line items for the page in ONE query (no N+1 across transfers).
+    items = (
+        await db.execute(
+            select(StockTransferItem).where(
+                StockTransferItem.transfer_id.in_([t.id for t in rows])
+            )
+        )
+    ).scalars().all()
+    by_tr: dict[int, list] = {}
+    for it in items:
+        by_tr.setdefault(it.transfer_id, []).append(it)
+    out = []
+    for tr in rows:
+        o = TransferOut.model_validate(tr)
+        o.items = [TransferItemOut.model_validate(i) for i in by_tr.get(tr.id, [])]
+        out.append(o)
+    return out
 
 
 @router.get("/transfers/{transfer_id}", response_model=TransferOut, operation_id="get_transfer")

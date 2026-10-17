@@ -103,28 +103,35 @@ async def create_order(
     await db.flush()
     order.order_no = f"DRS{order.id:06d}"
 
-    subtotal = 0.0
+    # Merge duplicate product lines in the request so one product becomes one order line
+    # (two lines for the same product otherwise mis-price qty-break tiers and clutter the
+    # invoice). Preserve first-seen order for stable output.
+    merged: dict[int, float] = {}
     for it in items:
-        product = await db.get(Product, it.product_id)
+        merged[it.product_id] = merged.get(it.product_id, 0.0) + float(it.qty)
+
+    subtotal = 0.0
+    for product_id, qty in merged.items():
+        product = await db.get(Product, product_id)
         if product is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Product {it.product_id} not found")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Product {product_id} not found")
         if product.status != "active":
             raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Product {it.product_id} is not available"
+                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Product {product_id} is not available"
             )
-        unit_price = await resolve_unit_price(db, it.product_id, tier_id, it.qty)
+        unit_price = await resolve_unit_price(db, product_id, tier_id, qty)
         if unit_price is None:  # no price/tier configured — never charge ₹0 silently
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"No price configured for product {it.product_id}",
+                f"No price configured for product {product_id}",
             )
-        line_total = round(unit_price * it.qty, 2)
+        line_total = round(unit_price * qty, 2)
         subtotal += line_total
         db.add(
             OrderItem(
                 order_id=order.id,
-                product_id=it.product_id,
-                qty=it.qty,
+                product_id=product_id,
+                qty=qty,
                 unit_price=unit_price,
                 line_total=line_total,
             )

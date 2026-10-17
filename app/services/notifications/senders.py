@@ -76,7 +76,11 @@ def _fcm_access_token() -> str:
     from google.oauth2 import service_account  # lazy
 
     raw = settings.FCM_CREDENTIALS_JSON
-    info = json.loads(raw) if raw.strip().startswith("{") else json.load(open(raw))
+    if raw.strip().startswith("{"):
+        info = json.loads(raw)
+    else:
+        with open(raw) as fh:  # path to the service-account file — close the fd
+            info = json.load(fh)
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/firebase.messaging"]
     )

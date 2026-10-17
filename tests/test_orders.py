@@ -121,3 +121,18 @@ async def test_interstate_d2c_order_invoice_uses_igst(client):
     inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=ch)).json()
     assert inv["is_interstate"] is True
     assert inv["igst"] > 0 and inv["cgst"] == 0.0 and inv["sgst"] == 0.0
+
+
+async def test_duplicate_product_lines_merged(client):
+    """P3 #7: two request lines for the same product collapse into one order line (summed
+    qty), so qty-break pricing and the invoice aren't distorted by duplicate lines."""
+    cust = await login(client, "9000000771")
+    r = await client.post(
+        "/api/v1/orders",
+        json={"items": [{"product_id": 1, "qty": 2}, {"product_id": 1, "qty": 3}]},
+        headers=auth(cust),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    lines = [li for li in body["items"] if li["product_id"] == 1]
+    assert len(lines) == 1 and lines[0]["qty"] == 5.0

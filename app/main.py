@@ -79,7 +79,7 @@ async def limit_body_size(request: Request, call_next):
         try:
             if int(cl) > _MAX_BODY_BYTES:
                 return JSONResponse(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                     content={"detail": "Request body too large", "error_code": "payload_too_large"},
                 )
         except ValueError:

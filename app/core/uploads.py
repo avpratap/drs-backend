@@ -24,7 +24,7 @@ def precheck_upload_size(request: Request) -> None:
     # Allow a little multipart framing overhead over the raw file cap.
     if declared > MAX_UPLOAD + 8192:
         raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 5 MB)"
+            status.HTTP_413_CONTENT_TOO_LARGE, "File too large (max 5 MB)"
         )
 
 
@@ -34,7 +34,7 @@ async def read_validated_image(file: UploadFile) -> tuple[bytes, str, str]:
     data = await file.read()
     if len(data) > MAX_UPLOAD:
         raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 5 MB)"
+            status.HTTP_413_CONTENT_TOO_LARGE, "File too large (max 5 MB)"
         )
     for sig, ext, ctype in _SIGS:
         if data.startswith(sig):
