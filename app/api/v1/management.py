@@ -321,6 +321,9 @@ async def set_account_tier(account_id: int, data: TierAssignIn, db: AsyncSession
 
 # ---------- User management ----------
 _VALID_ROLES = {"admin", "customer", "subscriber", "delivery"}
+# Roles an admin may PROVISION directly (phone-verified, no OTP). Retail "customer"
+# accounts must self-register via OTP so an admin can't mint a verified retail identity.
+_STAFF_CREATABLE_ROLES = {"admin", "subscriber", "delivery"}
 
 
 class StaffUserIn(BaseModel):
@@ -334,10 +337,11 @@ async def admin_create_user(data: StaffUserIn, db: AsyncSession = Depends(get_db
     """Provision a staff account (delivery/admin/subscriber) by phone. Customers still
     self-register via OTP; this is how drivers/staff get onboarded. The account is
     phone-verified so the user can log in with an OTP immediately."""
-    if data.role not in _VALID_ROLES:
+    if data.role not in _STAFF_CREATABLE_ROLES:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"role must be one of: {', '.join(sorted(_VALID_ROLES))}",
+            f"role must be one of: {', '.join(sorted(_STAFF_CREATABLE_ROLES))} "
+            "(retail customers self-register via OTP)",
         )
     if await db.scalar(select(User).where(User.phone == data.phone)):
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with this phone already exists")
@@ -545,8 +549,22 @@ async def admin_settle_credit(
     db: AsyncSession = Depends(get_db),
 ):
     """Record a payment received against a B2B postpaid account's outstanding credit."""
-    if await db.get(CustomerAccount, account_id) is None:
+    account = await db.get(CustomerAccount, account_id)
+    if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    if account.billing_mode != "postpaid_credit":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Account is not on postpaid credit; nothing to settle",
+        )
+    # Don't let a settlement overpay the outstanding credit into a negative ledger
+    # (which would silently become a credit the customer can draw on).
+    outstanding = await billing_svc.credit_outstanding(db, account_id)
+    if round(float(data.amount), 2) > round(float(outstanding), 2):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Settlement {data.amount} exceeds outstanding credit {outstanding}",
+        )
     new_balance = await billing_svc.credit_entry(
         db, account_id, -data.amount, "payment", "settlement", None
     )
@@ -669,8 +687,10 @@ async def reports_summary(db: AsyncSession = Depends(get_db)):
         .group_by(CreditLedger.account_id)
         .subquery()
     )
+    # Only accounts that OWE money count toward outstanding — an overpaid (negative)
+    # account's credit balance must not net down the total others owe.
     outstanding = await db.scalar(
-        select(func.coalesce(func.sum(CreditLedger.balance_after), 0)).join(
+        select(func.coalesce(func.sum(func.greatest(CreditLedger.balance_after, 0)), 0)).join(
             latest, CreditLedger.id == latest.c.mx
         )
     )

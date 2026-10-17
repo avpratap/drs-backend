@@ -76,3 +76,39 @@ async def test_admin_finance_requires_admin(client):
     cust = await login(client, "9876543210")
     assert (await client.get("/api/v1/admin/shops", headers=auth(cust))).status_code == 403
     assert (await client.post("/api/v1/admin/accounts/1/credit/settle", json={"amount": 1}, headers=idem(auth(cust)))).status_code == 403
+
+
+async def test_settle_credit_overpay_rejected(client):
+    """AD6: a settlement larger than the outstanding credit is refused (no negative ledger)."""
+    admin = await login(client, "9999900001")
+    sub = await login(client, "9999900002")
+    delivery = await login(client, "9999900003")
+    acct = await _subscriber_account(client, auth(admin), auth(sub))
+    date = "2037-05-05"
+    await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
+    orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(delivery))).json()
+    order = orders[0]
+    item = order["items"][0]
+    await client.post(
+        f"/api/v1/delivery/orders/{order['id']}/deliver",
+        json={"items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}], "returns": []},
+        headers=auth(delivery),
+    )
+    outstanding = (await client.get(f"/api/v1/admin/accounts/{acct}/billing", headers=auth(admin))).json()["credit_outstanding"]
+    r = await client.post(
+        f"/api/v1/admin/accounts/{acct}/credit/settle",
+        json={"amount": outstanding + 100, "note": "overpay"},
+        headers=idem(auth(admin)),
+    )
+    assert r.status_code == 422
+
+
+async def test_admin_cannot_mint_retail_customer(client):
+    """AD8: admin provisioning is staff-only; retail customers self-register via OTP."""
+    admin = await login(client, "9999900001")
+    r = await client.post(
+        "/api/v1/admin/users",
+        json={"phone": "9112229999", "role": "customer"},
+        headers=auth(admin),
+    )
+    assert r.status_code == 422
