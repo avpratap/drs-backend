@@ -7,6 +7,7 @@
   with negated amounts for returns/refunds.
 """
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,13 @@ from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.profile import Address, UserProfile
 from app.models.shop import CustomerAccount, Shop
+
+
+def _today() -> dt.date:
+    """Invoice/credit-note date in IST (not UTC) so the FY serial and invoice_date are
+    correct at the Apr-1 boundary and during the 00:00-05:30 IST window."""
+    return dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+
 
 _SEQ_LOCK_NS = 555001
 _INV_LOCK_NS = 555002  # serialize invoice generation per delivery order
@@ -109,7 +117,7 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
 
     place = await _place_of_supply(db, order)
     interstate = place.strip().lower() != settings.SELLER_STATE.strip().lower()
-    today = dt.datetime.now(dt.UTC).date()
+    today = _today()
     fy = fy_for_date(today)
     seq = await _next_seq(db, fy)
 
@@ -217,7 +225,7 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
 
     place = await _order_place_of_supply(db, order)
     interstate = place.strip().lower() != settings.SELLER_STATE.strip().lower()
-    today = dt.datetime.now(dt.UTC).date()
+    today = _today()
     fy = fy_for_date(today)
     seq = await _next_seq(db, fy)
     inv = Invoice(
@@ -299,7 +307,7 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
     if existing is not None:
         return existing
 
-    fy = fy_for_date(dt.datetime.now(dt.UTC).date())
+    fy = fy_for_date(_today())
     seq = await _next_seq(db, fy, is_credit_note=True)
     note = Invoice(
         invoice_no=f"{settings.INVOICE_PREFIX}/CN/{fy}/{seq:06d}",
@@ -308,7 +316,7 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
         account_id=invoice.account_id,
         delivery_order_id=invoice.delivery_order_id,
         order_id=invoice.order_id,
-        invoice_date=dt.datetime.now(dt.UTC).date(),
+        invoice_date=_today(),
         seller_gstin=invoice.seller_gstin,
         buyer_gstin=invoice.buyer_gstin,
         place_of_supply=invoice.place_of_supply,
@@ -363,13 +371,13 @@ async def generate_credit_note_for_lines(
     commit (and the single-shot RMA status guard is what prevents duplicates)."""
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
-    fy = fy_for_date(dt.datetime.now(dt.UTC).date())
+    fy = fy_for_date(_today())
     seq = await _next_seq(db, fy, is_credit_note=True)
     note = Invoice(
         invoice_no=f"{settings.INVOICE_PREFIX}/CN/{fy}/{seq:06d}",
         fy=fy, seq_no=seq, account_id=invoice.account_id,
         delivery_order_id=invoice.delivery_order_id, order_id=invoice.order_id,
-        invoice_date=dt.datetime.now(dt.UTC).date(),
+        invoice_date=_today(),
         seller_gstin=invoice.seller_gstin, buyer_gstin=invoice.buyer_gstin,
         place_of_supply=invoice.place_of_supply, is_interstate=invoice.is_interstate,
         is_credit_note=True, is_partial=True, original_invoice_id=invoice.id, status="issued",

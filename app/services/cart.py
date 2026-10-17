@@ -173,8 +173,15 @@ async def checkout(db: AsyncSession, user: User, address, coupon_code) -> Order:
     # can't both convert one cart into two orders. The lock is held until create_order
     # commits (which also persists the 'converted' flip set below), so a racing
     # checkout blocks here and then sees 'converted' -> 409.
+    # populate_existing so the locked re-read refreshes the ALREADY-loaded cart's columns
+    # (expire_on_commit=False keeps the stale 'active' in the identity map otherwise, and
+    # the guard would read cached data — letting a concurrent checkout convert twice).
     locked = (
-        await db.execute(select(Cart).where(Cart.id == cart.id).with_for_update())
+        await db.execute(
+            select(Cart).where(Cart.id == cart.id).with_for_update().execution_options(
+                populate_existing=True
+            )
+        )
     ).scalar_one()
     if locked.status != "active":
         raise HTTPException(status.HTTP_409_CONFLICT, "Cart is already being checked out")

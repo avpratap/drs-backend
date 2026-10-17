@@ -15,7 +15,10 @@ async def healthz():
     return {"status": "ok"}
 
 
-@router.get("/readyz", operation_id="readyz")
+@router.get(
+    "/readyz", operation_id="readyz",
+    responses={503: {"description": "a dependency (DB/Redis) is unreachable"}},
+)
 async def readyz(db: AsyncSession = Depends(get_db)):
     """Readiness — can reach Postgres + Redis."""
     checks: dict[str, str] = {}

@@ -6,7 +6,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -41,12 +41,13 @@ async def list_my_notifications(
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    # The in-app bell = the push channel, excluding delivery failures (a no-device
-    # "skipped" row is still a valid in-app message the user should see).
+    # The in-app bell = push-channel rows, EXCLUDING only those skipped because the user
+    # turned push OFF (channel_off). A no-device "skipped" (no_address) or an FCM-delivery
+    # "failed" row is still a valid in-app message — the bell doesn't depend on FCM.
     q = select(Notification).where(
         Notification.user_id == user.id,
         Notification.channel == "push",
-        Notification.status != "failed",
+        or_(Notification.skip_reason.is_(None), Notification.skip_reason != "channel_off"),
     )
     if unread_only:
         q = q.where(Notification.read_at.is_(None))
@@ -62,7 +63,7 @@ async def unread_count(user: User = Depends(get_current_user), db: AsyncSession 
         .where(
             Notification.user_id == user.id,
             Notification.channel == "push",
-            Notification.status != "failed",
+            or_(Notification.skip_reason.is_(None), Notification.skip_reason != "channel_off"),
             Notification.read_at.is_(None),
         )
     )
@@ -93,6 +94,7 @@ async def mark_all_read(user: User = Depends(get_current_user), db: AsyncSession
         .where(
             Notification.user_id == user.id,
             Notification.channel == "push",
+            or_(Notification.skip_reason.is_(None), Notification.skip_reason != "channel_off"),
             Notification.read_at.is_(None),
         )
         .values(read_at=dt.datetime.now(dt.UTC))
