@@ -178,11 +178,16 @@ async def _notify_delivered(db: AsyncSession, ship: Shipment) -> None:
 async def cancel_shipment(db: AsyncSession, shipment_id: int) -> Shipment:
     """Cancel a shipment WITHOUT holding a DB row lock across the courier HTTP call (#74).
 
-    Three phases: (A) lock + validate + claim 'cancelling' + commit (releases the lock),
-    (B) call the courier with no lock held, (C) re-lock + finalize to 'cancelled' (or
-    revert to the prior status on courier failure) + commit.
+    No persisted intermediate status (an earlier 'cancelling' claim could be clobbered by
+    a concurrent tracking webhook and could get permanently stuck on a crash). Instead:
+    (A) validate under a short lock, then release it WITHOUT changing status; (B) call the
+    courier with no lock held; (C) re-lock and finalize — but only if a webhook hasn't
+    meanwhile moved the shipment to a terminal state (then that real status wins). A crash
+    anywhere leaves the original status, so the operation is naturally retryable. Two
+    concurrent cancels at worst duplicate the (idempotent) courier call; the DB is
+    serialized to a single 'cancelled'.
     """
-    # Phase A — claim under a short lock, then release it.
+    # Phase A — validate under a short lock; do NOT persist an intermediate state.
     ship = (
         await db.execute(
             select(Shipment).where(Shipment.id == shipment_id).with_for_update()
@@ -192,25 +197,29 @@ async def cancel_shipment(db: AsyncSession, shipment_id: int) -> Shipment:
         raise HTTPException(http.HTTP_404_NOT_FOUND, "Shipment not found")
     if ship.status in _TERMINAL:
         raise HTTPException(http.HTTP_409_CONFLICT, f"Shipment is {ship.status}, cannot cancel")
-    if ship.status == "cancelling":
-        raise HTTPException(http.HTTP_409_CONFLICT, "A cancel is already in progress")
-    prior_status = ship.status
     gsid = ship.gateway_shipment_id or ""
-    ship.status = "cancelling"
-    await db.commit()  # releases the FOR UPDATE lock before the network call
+    await db.commit()  # release the lock before the network call (no state change)
 
     # Phase B — courier call with NO DB lock/transaction held open.
     ok = await client.cancel_shipment(gsid)
 
-    # Phase C — re-lock and record the outcome.
+    # Phase C — re-lock and finalize, respecting any terminal state a webhook set meanwhile.
     ship = (
         await db.execute(
             select(Shipment).where(Shipment.id == shipment_id).with_for_update()
         )
     ).scalar_one()
-    if not ok:
-        ship.status = prior_status  # revert the claim so it can be retried
+    if ship.status in _TERMINAL:
+        # A tracking webhook reached a terminal state (e.g. delivered) during the courier
+        # call — that real outcome wins; don't clobber it.
         await db.commit()
+        if ship.status == "cancelled":
+            return ship
+        raise HTTPException(
+            http.HTTP_409_CONFLICT, f"Shipment is now {ship.status}; cancellation not applied"
+        )
+    if not ok:
+        await db.commit()  # nothing changed — naturally retryable
         raise HTTPException(http.HTTP_502_BAD_GATEWAY, "Courier cancel failed; try again")
     ship.status = "cancelled"
     db.add(ShipmentTrackingEvent(shipment_id=ship.id, status="cancelled", note="Cancelled by admin"))
