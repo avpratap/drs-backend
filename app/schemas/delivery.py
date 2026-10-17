@@ -40,12 +40,14 @@ class DeliverItem(BaseModel):
 
 
 class PODIn(BaseModel):
-    recipient_name: str | None = None
-    photo_url: str | None = None
-    signature_url: str | None = None
+    # Bounded to the proof_of_delivery column widths so an over-long value is a clean
+    # 422, never a DataError 500 mid-delivery.
+    recipient_name: str | None = Field(default=None, max_length=255)
+    photo_url: str | None = Field(default=None, max_length=512)
+    signature_url: str | None = Field(default=None, max_length=512)
     lat: float | None = None
     lng: float | None = None
-    note: str | None = None
+    note: str | None = Field(default=None, max_length=255)
 
 
 class ReturnIn(BaseModel):
