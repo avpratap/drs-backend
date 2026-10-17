@@ -56,9 +56,18 @@ async def test_full_refund_issues_credit_note(client):
     assert r.status_code == 200
     o = (await client.get(f"/api/v1/orders/{oid}", headers=auth(cust))).json()
     assert o["payment_status"] == "refunded"
-    # A credit note mirroring the invoice was generated (negated total).
-    note = (await client.get(f"/api/v1/invoices/{inv['id']}", headers=auth(admin))).json()
-    assert note["id"] == inv["id"]  # original invoice still readable
+    # T1: assert a CREDIT NOTE mirroring the invoice was actually generated — find it among
+    # the account's invoices (is_credit_note, original_invoice_id == inv) and check the
+    # totals/tax are the negation of the original, not just that the invoice still reads.
+    invoices = (await client.get("/api/v1/invoices", headers=auth(admin))).json()
+    cn = next(
+        (i for i in invoices if i["is_credit_note"] and i["original_invoice_id"] == inv["id"]),
+        None,
+    )
+    assert cn is not None, "full refund must generate a credit note"
+    assert cn["total"] == -inv["total"]
+    assert cn["taxable_value"] == -inv["taxable_value"]
+    assert cn["cgst"] == -inv["cgst"] and cn["sgst"] == -inv["sgst"] and cn["igst"] == -inv["igst"]
 
 
 # ---------- cancellation guards ----------

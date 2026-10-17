@@ -39,7 +39,7 @@ async def test_marketing_skipped_without_consent(client):
 
 async def test_consent_then_flush_delivers(client):
     admin = await login(client, "9999900001")
-    cust = await login(client, "9876543210")
+    cust = await login(client, "9000000946")  # T6: own throwaway user, not shared 9876543210
     cid = await _customer_id(client, cust)
     await client.post(
         "/api/v1/consents",

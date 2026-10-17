@@ -94,6 +94,11 @@ async def test_credit_note_negates(client):
     note = cn.json()
     assert note["is_credit_note"] is True
     assert note["total"] == -inv["total"]
+    # T5: every tax component is negated, not just the total.
+    assert note["taxable_value"] == -inv["taxable_value"]
+    assert note["cgst"] == -inv["cgst"]
+    assert note["sgst"] == -inv["sgst"]
+    assert note["igst"] == -inv["igst"]
     assert note["original_invoice_id"] == inv["id"]
     assert note["invoice_no"].startswith("DRS/CN/")
 

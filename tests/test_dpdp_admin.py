@@ -21,14 +21,28 @@ async def test_export_my_data(client):
 
 
 async def test_erase_my_account(client):
-    # Use the 'other' customer so we don't disturb the main test customer.
-    other = await login(client, "9191919191")
-    await client.patch("/api/v1/profile", json={"display_name": "Zap", "email": "z@x.com"}, headers=auth(other))
-    r = await client.post("/api/v1/account/erase", headers=auth(other))
+    # T3: a THROWAWAY user (not the shared 9191919191 attacker) so erasing it mid-suite
+    # can't disturb other tests.
+    admin = await login(client, "9999900001")
+    victim = await login(client, "9000000822")
+    uid = (await client.get("/api/v1/profile", headers=auth(victim))).json()["user_id"]
+    await client.patch(
+        "/api/v1/profile", json={"display_name": "Zap", "email": "z@x.com"}, headers=auth(victim)
+    )
+    r = await client.post("/api/v1/account/erase", headers=auth(victim))
     assert r.status_code == 200
     # Token is invalidated (token_version bumped) -> old token now rejected.
-    me = await client.get("/api/v1/auth/me", headers=auth(other))
+    me = await client.get("/api/v1/auth/me", headers=auth(victim))
     assert me.status_code == 401
+    # T2: assert the PII was actually scrubbed, not merely that the token died. The admin
+    # view shows the phone tombstoned (erz-*), the name/email cleared and status 'erased'.
+    rows = (await client.get("/api/v1/admin/users?status_filter=erased", headers=auth(admin))).json()
+    erased = next((u for u in rows if u["id"] == uid), None)
+    assert erased is not None, "erased user should be findable by admin"
+    assert erased["phone"].startswith("erz-")
+    assert erased["status"] == "erased"
+    assert not erased.get("full_name")
+    assert not erased.get("email")
 
 
 async def test_admin_user_management(client):

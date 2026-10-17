@@ -53,3 +53,27 @@ async def test_cutoff_emits_order_generated(client):
     gen = [n for n in notes if n["event_type"] == "order.generated"]
     assert gen, "cutoff should emit order.generated"
     assert any(n["channel"] == "whatsapp" for n in gen)
+
+
+async def test_concurrent_cutoff_runs_no_duplicate_orders(client):
+    """T4: two concurrent cutoff runs for the same date must not double-materialize —
+    UNIQUE(shop_id, delivery_date) + idempotency keep it to one delivery order per shop."""
+    import asyncio
+
+    admin = await login(client, "9999900001")
+    delivery = await login(client, "9999900003")
+    date = "2033-07-07"
+    r1, r2 = await asyncio.gather(
+        client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin)),
+        client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin)),
+        return_exceptions=True,
+    )
+    for r in (r1, r2):
+        assert not isinstance(r, Exception) and r.status_code == 200, getattr(r, "text", r)
+    # The seeded subscription has one shop -> exactly one delivery order for the date,
+    # regardless of which run won the race.
+    orders = (
+        await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(delivery))
+    ).json()
+    shop_ids = [o["shop_id"] for o in orders]
+    assert len(shop_ids) == len(set(shop_ids)), "no duplicate delivery order per shop"
