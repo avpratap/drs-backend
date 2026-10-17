@@ -36,7 +36,13 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
     return account
 
 
-async def _get_or_create_home_shop(db: AsyncSession, account: CustomerAccount, address: str | None) -> Shop:
+async def _get_or_create_home_shop(
+    db: AsyncSession,
+    account: CustomerAccount,
+    address: str | None,
+    state: str | None = None,
+    pincode: str | None = None,
+) -> Shop:
     # D2C orders deliver to the account's dedicated "Home" shop. Select it by name so a
     # B2B account's real stores are never picked (and never clobbered) by a D2C checkout.
     res = await db.execute(
@@ -47,25 +53,40 @@ async def _get_or_create_home_shop(db: AsyncSession, account: CustomerAccount, a
     )
     shop = res.scalar_one_or_none()
     if shop is None:
-        shop = Shop(account_id=account.id, name="Home", address=address, status="active")
+        shop = Shop(
+            account_id=account.id, name="Home", address=address,
+            state=state, pincode=pincode, status="active",
+        )
         db.add(shop)
         await db.flush()
-    elif address and not shop.address:
-        # Fill a missing address from this order, but never overwrite one the customer
-        # already saved (a later order with a blank/different address must not clobber it).
-        shop.address = address
+    else:
+        # Fill MISSING fields from this order (so GST place-of-supply becomes accurate),
+        # but never overwrite values the customer already saved.
+        if address and not shop.address:
+            shop.address = address
+        if state and not shop.state:
+            shop.state = state
+        if pincode and not shop.pincode:
+            shop.pincode = pincode
     return shop
 
 
 async def create_order(
-    db: AsyncSession, user: User, items, address: str | None, coupon_code: str | None = None
+    db: AsyncSession,
+    user: User,
+    items,
+    address: str | None,
+    coupon_code: str | None = None,
+    *,
+    state: str | None = None,
+    pincode: str | None = None,
 ) -> Order:
     # NOTE: one-time orders do NOT reserve or decrement stock at order time. DRS is
     # make-to-order (daily production + standing supply), so stock is consumed at
     # fulfillment, not at checkout — overselling at order time is an accepted,
     # deliberate design choice, not an oversight.
     account = await _get_or_create_account(db, user)
-    shop = await _get_or_create_home_shop(db, account, address)
+    shop = await _get_or_create_home_shop(db, account, address, state, pincode)
     tier_id = await resolve_tier_id(db, shop)
 
     # A per-row unique placeholder (not a shared "PENDING" constant) so concurrent

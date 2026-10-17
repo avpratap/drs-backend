@@ -99,7 +99,8 @@ async def create_order(
     if not data.items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Order must have items")
     order = await order_service.create_order(
-        db, user, data.items, data.address, data.coupon_code
+        db, user, data.items, data.address, data.coupon_code,
+        state=data.state, pincode=data.pincode,
     )
     return await _detail(db, order)
 
@@ -171,6 +172,14 @@ class InvoiceOut(BaseModel):
     id: int
     invoice_no: str
     invoice_date: dt.date
+    # A GST tax invoice must show the place of supply and the tax split so the buyer can
+    # see CGST+SGST (intra-state) vs IGST (inter-state).
+    place_of_supply: str | None = None
+    is_interstate: bool = False
+    taxable_value: float = 0.0
+    cgst: float = 0.0
+    sgst: float = 0.0
+    igst: float = 0.0
     total: float
 
 

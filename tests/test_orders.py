@@ -86,3 +86,38 @@ async def test_no_double_open_order_payment(client):
         headers=auth(cust),
     )
     assert second.status_code == 409
+
+
+async def test_interstate_d2c_order_invoice_uses_igst(client):
+    """#M12: a D2C order that captures an interstate delivery state must invoice IGST
+    (not CGST/SGST). Seller state is Rajasthan; delivering to Maharashtra is interstate."""
+    cust = await login(client, "9000000712")  # fresh retail user, no prior home shop
+    ch = auth(cust)
+    # Ghee is a 12% GST item so tax is non-zero and the split is observable.
+    prods = (await client.get("/api/v1/products", headers=ch)).json()
+    ghee = next(p["id"] for p in prods if p["sku"] == "GHEE-1KG")
+    oid = (
+        await client.post(
+            "/api/v1/orders",
+            json={
+                "items": [{"product_id": ghee, "qty": 1}],
+                "address": "1 Linking Rd, Mumbai",
+                "state": "Maharashtra",
+                "pincode": "400050",
+            },
+            headers=ch,
+        )
+    ).json()["id"]
+    # Pay it (invoice is issued only for a paid order).
+    create = await client.post(
+        "/api/v1/payments/create", json={"purpose": "order_payment", "order_id": oid}, headers=ch
+    )
+    goid = create.json()["gateway_order_id"]
+    await client.post(
+        "/api/v1/payments/verify",
+        json={"gateway_order_id": goid, "gateway_payment_id": "p", "signature": "dev"},
+        headers=ch,
+    )
+    inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=ch)).json()
+    assert inv["is_interstate"] is True
+    assert inv["igst"] > 0 and inv["cgst"] == 0.0 and inv["sgst"] == 0.0

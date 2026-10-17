@@ -9,6 +9,10 @@ class OrderItemIn(BaseModel):
 class OrderCreate(BaseModel):
     items: list[OrderItemIn] = Field(min_length=1, max_length=100)
     address: str | None = Field(default=None, max_length=1024)
+    # Delivery state/pincode — captured onto the D2C home shop so GST place-of-supply
+    # (CGST+SGST vs IGST) is correct for interstate orders (#M12).
+    state: str | None = Field(default=None, max_length=120)
+    pincode: str | None = Field(default=None, max_length=10)
     coupon_code: str | None = Field(default=None, max_length=32)
 
 
