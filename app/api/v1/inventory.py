@@ -2,7 +2,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -82,6 +82,9 @@ class StockMovementOut(BaseModel):
 @router.post("/locations", response_model=LocationOut, operation_id="create_location")
 async def create_location(data: LocationIn, db: AsyncSession = Depends(get_db)):
     if data.is_default:  # only one default
+        # Serialize concurrent default-location creates (a fixed advisory lock) so two
+        # requests can't each clear + set is_default and leave the system with two defaults.
+        await db.execute(select(func.pg_advisory_xact_lock(0x10C0DEF)))
         for loc in (await db.execute(select(Location).where(Location.is_default))).scalars():
             loc.is_default = False
     loc = Location(**data.model_dump())

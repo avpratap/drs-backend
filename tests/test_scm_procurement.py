@@ -202,3 +202,15 @@ async def test_procurement_requires_admin(client):
     assert (await client.get("/api/v1/admin/suppliers", headers=hc)).status_code == 403
     assert (await client.get("/api/v1/admin/purchase-orders", headers=hc)).status_code == 403
     assert (await client.post("/api/v1/admin/suppliers", json={"name": "x"}, headers=hc)).status_code == 403
+
+
+async def test_create_po_unknown_product_422(client):
+    """#31: an unknown product_id on a PO line returns 422, not a FK 500."""
+    h = auth(await login(client, "9999900001"))
+    sup = await _supplier(client, h, "Ghost Supplier")
+    r = await client.post(
+        "/api/v1/admin/purchase-orders",
+        json={"supplier_id": sup, "items": [{"product_id": 99999999, "qty": 1, "unit_cost": 10}]},
+        headers=h,
+    )
+    assert r.status_code == 422

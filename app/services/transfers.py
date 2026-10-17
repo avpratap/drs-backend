@@ -7,10 +7,24 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.batch import StockBatch
+from app.models.product import Product
 from app.models.transfer import StockTransfer, StockTransferItem, StockTransferLot
 from app.models.warehouse import Location
 from app.services import batches as batch_svc
 from app.services import inventory
+
+
+async def _validate_products(db: AsyncSession, product_ids) -> None:
+    """422 (not a FK 500) if any transfer line references an unknown product."""
+    wanted = set(product_ids)
+    found = set(
+        (await db.execute(select(Product.id).where(Product.id.in_(wanted)))).scalars().all()
+    )
+    missing = sorted(wanted - found)
+    if missing:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown product_id(s): {missing}"
+        )
 
 
 async def _loc_or_404(db: AsyncSession, location_id: int) -> int:
@@ -26,6 +40,7 @@ async def create_transfer(db: AsyncSession, from_loc, to_loc, items, note, user_
     await _loc_or_404(db, to_loc)
     if from_loc == to_loc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Source and destination must differ")
+    await _validate_products(db, [it.product_id for it in items])
     tr = StockTransfer(
         transfer_no="PENDING",
         from_location_id=from_loc,

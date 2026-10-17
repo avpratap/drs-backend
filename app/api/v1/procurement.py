@@ -10,8 +10,22 @@ from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.procurement import PurchaseOrder, PurchaseOrderItem, Supplier
+from app.models.product import Product
 from app.models.user import User
 from app.services import procurement
+
+
+async def _validate_products(db: AsyncSession, product_ids: list[int]) -> None:
+    """422 (not a FK 500) if any referenced product doesn't exist."""
+    wanted = set(product_ids)
+    found = set(
+        (await db.execute(select(Product.id).where(Product.id.in_(wanted)))).scalars().all()
+    )
+    missing = sorted(wanted - found)
+    if missing:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown product_id(s): {missing}"
+        )
 
 router = APIRouter(
     prefix="/admin", tags=["procurement"], dependencies=[Depends(require_role("admin"))]
@@ -118,6 +132,9 @@ async def create_po(
 ):
     if await db.get(Supplier, data.supplier_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Supplier not found")
+    # Validate every product up front — an unknown product_id would otherwise FK-fail
+    # the line insert and surface as a 500 instead of a clean 422.
+    await _validate_products(db, [i.product_id for i in data.items])
     location_id = await procurement.resolve_location(db, data.location_id)
     po = await procurement.create_po(
         db, data.supplier_id, location_id, data.items, data.expected_date, user.id
