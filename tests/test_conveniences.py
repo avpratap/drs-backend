@@ -35,11 +35,15 @@ async def test_wishlist_isolated_per_customer(client):
 
 
 async def test_newsletter_subscribe_unsubscribe(client):
+    # Double opt-in: subscribe is PENDING until confirmed (no forged consent).
     r1 = await client.post("/api/v1/newsletter/subscribe", json={"email": "fan@example.com", "name": "Fan"})
-    assert r1.status_code == 200 and r1.json()["status"] == "subscribed"
-    # Idempotent re-subscribe.
-    r2 = await client.post("/api/v1/newsletter/subscribe", json={"email": "fan@example.com"})
-    assert r2.status_code == 200
+    assert r1.status_code == 200 and r1.json()["status"] == "pending"
+    token = r1.json()["confirm_token"]  # returned in non-prod for testing
+    assert token
+    c = await client.get(f"/api/v1/newsletter/confirm?token={token}")
+    assert c.status_code == 200 and c.json()["status"] == "subscribed"
+    # A bad token is rejected.
+    assert (await client.get("/api/v1/newsletter/confirm?token=nope")).status_code == 404
     u = await client.post("/api/v1/newsletter/unsubscribe", json={"email": "fan@example.com"})
     assert u.json()["status"] == "unsubscribed"
     # Admin list; admin-gate for customer.

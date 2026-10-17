@@ -188,7 +188,7 @@ async def delivery_route(
         if not ids:
             return []
         q = q.where(DeliveryOrder.shop_id.in_(ids))
-    orders = (await db.execute(q.order_by(DeliveryOrder.shop_id))).scalars().all()
+    orders = (await db.execute(q.order_by(DeliveryOrder.shop_id).limit(1000))).scalars().all()
     details = await _order_details(db, list(orders))
     return [RouteStopOut(sequence=i + 1, order=d) for i, d in enumerate(details)]
 

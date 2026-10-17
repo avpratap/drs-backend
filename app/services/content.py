@@ -36,6 +36,7 @@ async def active_banners(db: AsyncSession) -> list[Banner]:
                 or_(Banner.valid_to.is_(None), Banner.valid_to >= today),
             )
             .order_by(Banner.position, Banner.id)
+            .limit(200)  # bounded: homepage banner set is small
         )
     ).scalars().all()
     return rows

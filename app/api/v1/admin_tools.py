@@ -104,7 +104,7 @@ async def export_csv(
 # ---------- Feature flags ----------
 @router.get("/feature-flags", response_model=list[FeatureFlagOut], operation_id="list_feature_flags")
 async def list_feature_flags(db: AsyncSession = Depends(get_db)):
-    return (await db.execute(select(FeatureFlag).order_by(FeatureFlag.key))).scalars().all()
+    return (await db.execute(select(FeatureFlag).order_by(FeatureFlag.key).limit(500))).scalars().all()
 
 
 @router.put("/feature-flags", response_model=FeatureFlagOut, operation_id="upsert_feature_flag")

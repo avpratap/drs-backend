@@ -28,7 +28,10 @@ async def list_wishlist(user: User = Depends(get_current_user), db: AsyncSession
     account = await _get_or_create_account(db, user)
     rows = (
         await db.execute(
-            select(WishlistItem).where(WishlistItem.account_id == account.id).order_by(WishlistItem.id)
+            select(WishlistItem)
+            .where(WishlistItem.account_id == account.id)
+            .order_by(WishlistItem.id)
+            .limit(500)
         )
     ).scalars().all()
     return rows
@@ -51,7 +54,10 @@ async def add_to_wishlist(
     await db.commit()
     rows = (
         await db.execute(
-            select(WishlistItem).where(WishlistItem.account_id == account.id).order_by(WishlistItem.id)
+            select(WishlistItem)
+            .where(WishlistItem.account_id == account.id)
+            .order_by(WishlistItem.id)
+            .limit(500)
         )
     ).scalars().all()
     return rows

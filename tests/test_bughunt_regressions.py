@@ -92,6 +92,19 @@ async def test_return_of_undelivered_product_rejected(client):
     assert r.status_code == 422  # return product not in this order
 
 
+async def test_over_delivery_rejected(client):
+    """BUG: delivering more than planned could over-bill beyond consent."""
+    admin = await login(client, "9999900001")
+    h = auth(admin)
+    pid, order = await _delivery_order(client, h, "OVER")  # planned qty 5
+    r = await client.post(
+        f"/api/v1/delivery/orders/{order['id']}/deliver",
+        json={"items": [{"product_id": pid, "qty_delivered": 9}], "returns": []},
+        headers=h,
+    )
+    assert r.status_code == 422  # 9 > planned 5
+
+
 async def test_shipping_cancelled_order_rejected(client):
     """BUG: create_shipment only checked payment_status, shipping cancelled orders."""
     import sqlalchemy as sa

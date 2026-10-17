@@ -38,6 +38,14 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 f"qty_delivered must be >= 0 for product {di.product_id}",
             )
+        # Cap at the planned (consented) quantity: any increase must go through a
+        # pre-cutoff subscription override, so delivering more can't over-bill.
+        if di.qty_delivered > float(it.qty_planned):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"qty_delivered ({di.qty_delivered}) exceeds planned ({float(it.qty_planned)}) "
+                f"for product {di.product_id}",
+            )
         it.qty_delivered = di.qty_delivered
         planned = float(it.qty_planned)
         if di.qty_delivered <= 0:

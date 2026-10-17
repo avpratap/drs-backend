@@ -1,18 +1,22 @@
-"""Newsletter subscription (public opt-in/out) + admin subscriber list."""
+"""Newsletter subscription (public double opt-in) + admin subscriber list."""
 import datetime as dt
+import logging
+import secrets
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
 from app.models.newsletter import NewsletterSubscriber
+from app.services.notifications import senders as sender_mod
 
 router = APIRouter(tags=["newsletter"])
-
+log = logging.getLogger("drs.newsletter")
 
 _EMAIL = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
@@ -37,26 +41,59 @@ class SubscriberOut(BaseModel):
 class StatusOut(BaseModel):
     email: str
     status: str
+    # Returned only in non-prod so tests/dev can confirm without reading the email.
+    confirm_token: str | None = None
 
 
 @router.post("/newsletter/subscribe", response_model=StatusOut, operation_id="newsletter_subscribe")
 async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
-    """Idempotent: a repeat subscribe (or re-subscribe after opt-out) reactivates."""
+    """Double opt-in: a subscribe creates/keeps a PENDING record with a confirm token
+    and emails a confirmation link. Consent (consent_at) is recorded only when the real
+    email owner confirms — so one can't subscribe or forge consent for someone else.
+    Already-subscribed emails stay subscribed (idempotent)."""
     email = str(data.email).lower()
     row = await db.scalar(select(NewsletterSubscriber).where(NewsletterSubscriber.email == email))
+    if row is not None and row.status == "subscribed":
+        return StatusOut(email=email, status="subscribed")  # already confirmed
+    token = secrets.token_urlsafe(24)
     if row is None:
         row = NewsletterSubscriber(
-            email=email, name=data.name, status="subscribed",
-            source="web", consent_at=dt.datetime.now(dt.UTC),
+            email=email, name=data.name, status="pending", source="web", confirm_token=token
         )
         db.add(row)
-    else:
-        row.status = "subscribed"
-        row.consent_at = dt.datetime.now(dt.UTC)
+    else:  # re-subscribe (was pending/unsubscribed) — issue a fresh confirmation
+        row.status = "pending"
+        row.confirm_token = token
         if data.name:
             row.name = data.name
     await db.commit()
-    return StatusOut(email=email, status="subscribed")
+    # Best-effort confirmation email (dev-stub when SMTP is off).
+    try:
+        link = f"{getattr(settings, 'SITE_BASE_URL', 'https://drs.co.in')}/newsletter/confirm?token={token}"
+        await sender_mod.send_email(
+            email, f"Confirm your DRS newsletter subscription: {link}", None
+        )
+    except Exception:
+        log.warning("newsletter confirmation email failed for %s", email)
+    return StatusOut(
+        email=email, status="pending",
+        confirm_token=token if settings.ENV != "prod" else None,
+    )
+
+
+@router.get("/newsletter/confirm", response_model=StatusOut, operation_id="newsletter_confirm")
+async def confirm(token: str, db: AsyncSession = Depends(get_db)):
+    """Confirm a pending subscription via the emailed token — records consent."""
+    row = await db.scalar(
+        select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == token)
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")
+    row.status = "subscribed"
+    row.consent_at = dt.datetime.now(dt.UTC)
+    row.confirm_token = None
+    await db.commit()
+    return StatusOut(email=row.email, status="subscribed")
 
 
 @router.post("/newsletter/unsubscribe", response_model=StatusOut, operation_id="newsletter_unsubscribe")

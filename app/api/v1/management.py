@@ -161,7 +161,7 @@ async def create_price_tier(data: PriceTierIn, db: AsyncSession = Depends(get_db
 
 @router.get("/price-tiers", response_model=list[PriceTierOut], operation_id="list_price_tiers")
 async def list_price_tiers(db: AsyncSession = Depends(get_db)):
-    return (await db.execute(select(PriceTier).order_by(PriceTier.id))).scalars().all()
+    return (await db.execute(select(PriceTier).order_by(PriceTier.id).limit(500))).scalars().all()
 
 
 # ---------- Product prices ----------

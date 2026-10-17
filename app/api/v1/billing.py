@@ -107,5 +107,6 @@ async def my_withdrawals(
         select(WithdrawalRequest)
         .where(WithdrawalRequest.account_id == account.id)
         .order_by(WithdrawalRequest.id.desc())
+        .limit(500)  # bounded: a single account's withdrawals
     )
     return res.scalars().all()

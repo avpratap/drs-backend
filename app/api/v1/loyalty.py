@@ -124,7 +124,7 @@ async def my_gift_cards(user: User = Depends(get_current_user), db: AsyncSession
     await db.commit()
     rows = (
         await db.execute(
-            select(GiftCard).where(GiftCard.issued_to_account_id == acct.id).order_by(GiftCard.id.desc())
+            select(GiftCard).where(GiftCard.issued_to_account_id == acct.id).order_by(GiftCard.id.desc()).limit(500)
         )
     ).scalars().all()
     return rows

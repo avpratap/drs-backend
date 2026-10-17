@@ -1,4 +1,6 @@
 """FCM device-token registration (customer apps register for push)."""
+import logging
+
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -10,6 +12,7 @@ from app.models.device_token import DeviceToken
 from app.models.user import User
 
 router = APIRouter(prefix="/account/device-tokens", tags=["devices"])
+log = logging.getLogger("drs.devices")
 
 
 class DeviceTokenIn(BaseModel):
@@ -27,13 +30,18 @@ class DeviceTokenOut(BaseModel):
 async def register_device_token(
     data: DeviceTokenIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    """Register (or re-activate) this device for push. Idempotent on the token:
-    re-registering reassigns it to the caller and marks it active."""
+    """Register (or re-activate) this device for push. Idempotent on the token.
+
+    An FCM token is per app-install, not per user: when a different user signs in on
+    the same device, re-registering legitimately moves the token to them (which detaches
+    the previous owner). We audit that reassignment rather than doing it silently."""
     row = await db.scalar(select(DeviceToken).where(DeviceToken.token == data.token))
     if row is None:
         row = DeviceToken(user_id=user.id, token=data.token, platform=data.platform, active=True)
         db.add(row)
     else:
+        if row.user_id != user.id:
+            log.info("device token reassigned from user %s to user %s", row.user_id, user.id)
         row.user_id = user.id
         row.platform = data.platform
         row.active = True

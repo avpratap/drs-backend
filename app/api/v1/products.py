@@ -345,7 +345,7 @@ async def list_variants(
     # Only admins may request inactive variants via ?all=true; everyone else sees active.
     if not (all and user is not None and user.role == "admin"):
         q = q.where(ProductVariant.status == "active")
-    q = q.order_by(ProductVariant.sort_order, ProductVariant.id)
+    q = q.order_by(ProductVariant.sort_order, ProductVariant.id).limit(200)
     return (await db.execute(q)).scalars().all()
 
 
