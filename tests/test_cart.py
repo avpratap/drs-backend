@@ -7,7 +7,7 @@ async def _milk_id(client, h) -> int:
 
 
 async def test_add_update_remove_item(client):
-    cust = await login(client, "9876543210")
+    cust = await login(client, "9100000701")  # isolated cart (shared customer leaked state)
     h = auth(cust)
     pid = await _milk_id(client, h)
 
@@ -35,7 +35,7 @@ async def test_add_update_remove_item(client):
 
 async def test_coupon_preview_does_not_consume(client):
     admin = await login(client, "9999900001")
-    cust = await login(client, "9876543210")
+    cust = await login(client, "9100000702")  # isolated cart (shared customer leaked state)
     hc = auth(cust)
     pid = await _milk_id(client, hc)
     # Flat ₹5 coupon, one use per user.
@@ -60,7 +60,7 @@ async def test_coupon_preview_does_not_consume(client):
 
 
 async def test_checkout_converts_cart(client):
-    cust = await login(client, "9876543210")
+    cust = await login(client, "9100000703")  # isolated cart (shared customer leaked state)
     h = auth(cust)
     pid = await _milk_id(client, h)
     await client.post("/api/v1/cart/items", json={"product_id": pid, "qty": 3}, headers=h)
@@ -83,7 +83,7 @@ async def test_checkout_empty_cart_422(client):
 
 
 async def test_cart_item_idor_404(client):
-    a = await login(client, "9876543210")
+    a = await login(client, "9100000704")  # isolated cart (shared customer leaked state)
     pid = await _milk_id(client, auth(a))
     cart_a = (await client.post("/api/v1/cart/items", json={"product_id": pid, "qty": 1}, headers=auth(a))).json()
     a_item = cart_a["items"][0]["id"]

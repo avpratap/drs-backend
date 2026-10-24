@@ -195,9 +195,13 @@ async def rate_product(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if await db.get(Product, product_id) is None:
+    product = await db.get(Product, product_id)
+    if product is None or product.status != "active":  # retired products can't be rated
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     verified = await review_svc.is_verified_purchase(db, user.id, product_id)
+    # Only a verified purchase publishes immediately; anyone else's review is held for
+    # moderation (it was auto-approved, letting any account drive a product's rating).
+    initial_status = "approved" if verified else "pending"
     # One rating per user per product — upsert.
     existing = await db.scalar(
         select(Rating).where(Rating.user_id == user.id, Rating.product_id == product_id)
@@ -208,14 +212,14 @@ async def rate_product(
         existing.verified_purchase = verified
         # Editing a review an admin REJECTED must not quietly keep the old verdict on new
         # text — send it back to moderation (hidden from public) instead of auto-publishing.
-        if existing.status == "rejected":
+        if existing.status == "rejected" or (not verified and existing.status == "approved"):
             existing.status = "pending"
         row = existing
         await db.flush()
     else:
         row = Rating(
             user_id=user.id, product_id=product_id, stars=data.stars, comment=data.comment,
-            verified_purchase=verified,
+            verified_purchase=verified, status=initial_status,
         )
         db.add(row)
         try:
@@ -422,6 +426,10 @@ async def list_variants(
     user: User | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
+    is_admin = user is not None and user.role == "admin"
+    product = await db.get(Product, product_id)
+    if product is None or (product.status != "active" and not is_admin):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     q = select(ProductVariant).where(ProductVariant.product_id == product_id)
     # Only admins may request inactive variants via ?all=true; everyone else sees active.
     if not (all and user is not None and user.role == "admin"):

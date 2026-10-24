@@ -31,7 +31,11 @@ class CouponPreviewIn(BaseModel):
 
 
 class CheckoutIn(BaseModel):
-    address: str | None = None
+    address: str | None = Field(default=None, max_length=1024)
+    # Delivery state/pincode → the order's GST place of supply (was dropped at checkout,
+    # so an interstate buyer was taxed CGST+SGST).
+    state: str | None = Field(default=None, max_length=120)
+    pincode: str | None = Field(default=None, max_length=10)
     coupon_code: str | None = Field(default=None, max_length=32)
 
 
@@ -208,6 +212,8 @@ async def cart_quote(
 async def checkout_cart(
     data: CheckoutIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    order = await cart_svc.checkout(db, user, data.address, data.coupon_code)
+    order = await cart_svc.checkout(
+        db, user, data.address, data.coupon_code, state=data.state, pincode=data.pincode
+    )
     # Enrich with the GST breakdown (inclusive) so the checkout response matches POST /orders.
     return await _order_detail(db, order)

@@ -2,7 +2,7 @@
 from uuid import uuid4
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,10 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
     return account
 
 
+MAX_LINE_QTY = 100_000  # same ceiling as OrderItemIn.qty, applied after merging
+WHOLE_UNIT_UOMS = {"piece", "pack"}  # countable units can't be ordered fractionally
+
+
 async def _get_or_create_home_shop(
     db: AsyncSession,
     account: CustomerAccount,
@@ -54,12 +58,22 @@ async def _get_or_create_home_shop(
     )
     shop = res.scalar_one_or_none()
     if shop is None:
-        shop = Shop(
-            account_id=account.id, name="Home", address=address,
-            state=state, pincode=pincode, status="active", is_home=True,
-        )
-        db.add(shop)
-        await db.flush()
+        # Race-safe: uq_shops_one_home_per_account lets only one concurrent first order
+        # create the home shop; the loser re-selects it instead of making a duplicate.
+        try:
+            async with db.begin_nested():
+                shop = Shop(
+                    account_id=account.id, name="Home", address=address,
+                    state=state, pincode=pincode, status="active", is_home=True,
+                )
+                db.add(shop)
+                await db.flush()
+        except IntegrityError:
+            shop = (
+                await db.execute(
+                    select(Shop).where(Shop.account_id == account.id, Shop.is_home.is_(True))
+                )
+            ).scalar_one()
     else:
         # Fill MISSING fields from this order (so GST place-of-supply becomes accurate),
         # but never overwrite values the customer already saved.
@@ -112,6 +126,17 @@ async def create_order(
     merged: dict[int, float] = {}
     for it in items:
         merged[it.product_id] = merged.get(it.product_id, 0.0) + float(it.qty)
+    for product_id, qty in merged.items():
+        # Quantize to the stored precision BEFORE pricing (qty is Numeric(12,3)) so the
+        # stored qty x unit_price always equals the charged line_total, and cap the
+        # MERGED qty (the per-line cap was bypassable by repeating a product).
+        q = round(qty, 3)
+        if q <= 0 or q > MAX_LINE_QTY:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Quantity for product {product_id} must be in (0, {MAX_LINE_QTY:g}]",
+            )
+        merged[product_id] = q
 
     subtotal = 0.0
     for product_id, qty in merged.items():
@@ -121,6 +146,11 @@ async def create_order(
         if product.status != "active":
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, f"Product {product_id} is not available"
+            )
+        if product.uom in WHOLE_UNIT_UOMS and qty != int(qty):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Product {product_id} is sold per {product.uom}; quantity must be a whole number",
             )
         unit_price = await resolve_unit_price(db, product_id, tier_id, qty)
         if unit_price is None:  # no price/tier configured — never charge ₹0 silently
@@ -155,3 +185,15 @@ async def create_order(
     await db.commit()
     await db.refresh(order)
     return order
+
+
+async def has_live_shipment(db: AsyncSession, order_id: int) -> bool:
+    """A non-cancelled courier shipment (draft included: a create may be in flight)."""
+    from app.models.shipment import Shipment
+
+    n = await db.scalar(
+        select(func.count()).select_from(Shipment).where(
+            Shipment.order_id == order_id, Shipment.status.notin_(("cancelled", "failed", "rto"))
+        )
+    )
+    return bool(n)

@@ -128,16 +128,25 @@ async def _retail_home_shop(db: AsyncSession, user: User, data: SubscriptionCrea
         .limit(1)
     )
     if shop is None:
-        shop = Shop(
-            account_id=acct.id,
-            name=data.home_name or "Home",
-            address=data.home_address,
-            state=data.home_state,
-            pincode=data.home_pincode,
-            is_home=True,
-        )
-        db.add(shop)
-        await db.flush()
+        # uq_shops_one_home_per_account: a concurrent first create loses and re-selects.
+        try:
+            async with db.begin_nested():
+                shop = Shop(
+                    account_id=acct.id,
+                    name=data.home_name or "Home",
+                    address=data.home_address,
+                    state=data.home_state,
+                    pincode=data.home_pincode,
+                    is_home=True,
+                )
+                db.add(shop)
+                await db.flush()
+        except IntegrityError:
+            shop = (
+                await db.execute(
+                    select(Shop).where(Shop.account_id == acct.id, Shop.is_home.is_(True))
+                )
+            ).scalar_one()
     return shop
 
 

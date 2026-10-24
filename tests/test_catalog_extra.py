@@ -52,7 +52,7 @@ async def test_category_filter_and_list(client):
 async def test_cart_quote(client):
     admin = await login(client, "9999900001")
     ah = auth(admin)
-    cust = await login(client, "9876543210")
+    cust = await login(client, "9100000790")  # isolated cart: don't leak items to test_cart
     ch = auth(cust)
     # Seeded GHEE-1KG: RETAIL price 500, gst 12%.
     prods = (await client.get("/api/v1/products", headers=ch)).json()

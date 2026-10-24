@@ -7,11 +7,12 @@ class ProductCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=4096)
     uom: str = Field(default="piece", max_length=16)
-    pack_size: float = 1
+    pack_size: float = Field(default=1, gt=0, le=100_000, allow_inf_nan=False)
     is_subscribable: bool = True
     perishable: bool = True
     hsn_code: str | None = Field(default=None, max_length=16)
-    gst_rate: float = 0
+    # Column is Numeric(4,2): 100+ overflowed (500) and negatives were accepted.
+    gst_rate: float = Field(default=0, ge=0, lt=100, allow_inf_nan=False)
     category: str | None = Field(default=None, max_length=64)
     image_url: str | None = Field(default=None, max_length=512)
 
@@ -26,7 +27,7 @@ class ProductUpdate(BaseModel):
     is_subscribable: bool | None = None
     perishable: bool | None = None
     hsn_code: str | None = Field(default=None, max_length=16)
-    gst_rate: float | None = Field(default=None, ge=0, le=100)
+    gst_rate: float | None = Field(default=None, ge=0, lt=100, allow_inf_nan=False)
     category: str | None = Field(default=None, max_length=64)
     image_url: str | None = Field(default=None, max_length=512)
 

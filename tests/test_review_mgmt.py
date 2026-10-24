@@ -6,8 +6,16 @@ async def _product(client, h, sku) -> int:
     return (await client.post("/api/v1/products", json={"sku": sku, "name": sku}, headers=h)).json()["id"]
 
 
-async def _rate(client, h, pid, stars, comment="ok"):
-    return await client.post(f"/api/v1/products/{pid}/ratings", json={"stars": stars, "comment": comment}, headers=h)
+async def _rate(client, h, pid, stars, comment="ok", approve=True):
+    """Post a review. Unverified reviews are held for moderation (O8), so by default an
+    admin approves it — the tests below are about aggregates/listing, not moderation."""
+    r = await client.post(f"/api/v1/products/{pid}/ratings", json={"stars": stars, "comment": comment}, headers=h)
+    if approve and r.status_code == 200 and r.json()["status"] == "pending":
+        ah = auth(await login(client, "9999900001"))
+        m = await client.post(f"/api/v1/admin/ratings/{r.json()['id']}/moderate",
+                              json={"status": "approved"}, headers=ah)
+        assert m.status_code == 200
+    return r
 
 
 async def test_review_creates_and_updates_product_aggregate(client):
@@ -16,11 +24,16 @@ async def test_review_creates_and_updates_product_aggregate(client):
     cust = await login(client, "9876543210")
     pid = await _product(client, ah, "REV-AGG")
 
-    r = await _rate(client, auth(cust), pid, 4)
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "approved"
+    # O8: an unverified review is held for moderation and doesn't move the aggregate.
+    held = await _rate(client, auth(cust), pid, 4, approve=False)
+    assert held.status_code == 200
+    body = held.json()
+    assert body["status"] == "pending"
     assert body["verified_purchase"] is False  # never bought this product
+    assert (await client.get(f"/api/v1/products/{pid}", headers=ah)).json()["rating_count"] == 0
+    assert (await client.get(f"/api/v1/products/{pid}/ratings")).json()["count"] == 0
+    r = await _rate(client, auth(cust), pid, 4)  # re-post (upsert) + admin approval
+    assert r.status_code == 200
 
     prod = (await client.get(f"/api/v1/products/{pid}", headers=ah)).json()
     assert float(prod["avg_rating"]) == 4.0 and prod["rating_count"] == 1

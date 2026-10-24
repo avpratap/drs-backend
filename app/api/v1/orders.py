@@ -164,7 +164,8 @@ async def reorder(
     if not src_items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Order has no items to reorder")
     items = [_ReorderItem(i.product_id, float(i.qty)) for i in src_items]
-    order = await order_service.create_order(db, user, items, None, None)
+    # Same destination as the source order, so GST place of supply carries over.
+    order = await order_service.create_order(db, user, items, None, None, state=src.ship_state)
     return await _detail(db, order)
 
 
@@ -227,6 +228,12 @@ async def cancel_order(
     if order.status not in ("created", "pending"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Order is {order.status} and can no longer be cancelled"
+        )
+    if await order_service.has_live_shipment(db, order.id):
+        # A COD order can ship while unpaid; once a parcel is with the courier the order
+        # can't be cancelled from the app (the courier would deliver it anyway).
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Order has already been shipped and can't be cancelled"
         )
     order.status = "cancelled"
     # Release any coupon reservation so an unpaid cancelled order doesn't burn the code.

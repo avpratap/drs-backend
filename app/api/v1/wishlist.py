@@ -42,7 +42,8 @@ async def list_wishlist(user: User = Depends(get_current_user), db: AsyncSession
 async def add_to_wishlist(
     data: WishlistIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    if await db.get(Product, data.product_id) is None:
+    product = await db.get(Product, data.product_id)
+    if product is None or product.status != "active":  # retired products aren't listable
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     account = await _get_or_create_account(db, user)
     existing = await db.scalar(

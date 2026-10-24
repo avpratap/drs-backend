@@ -21,6 +21,7 @@ from app.models.user import User
 from app.services import admin_tools as audit_svc
 from app.services import billing as billing_svc
 from app.services import coupons
+from app.services import orders as order_service
 
 router = APIRouter(
     prefix="/admin", tags=["admin-sales"], dependencies=[Depends(require_role("admin"))]
@@ -242,8 +243,20 @@ async def cancel_order(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     if order.status == "cancelled":
         raise HTTPException(status.HTTP_409_CONFLICT, "Order already cancelled")
-    if order.payment_status in ("refunded", "partially_refunded"):
-        raise HTTPException(status.HTTP_409_CONFLICT, "Refunded order cannot be cancelled")
+    if order.payment_status == "partially_refunded":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Order is partially refunded; refund the remainder first"
+        )
+    if order.status not in ("created", "pending", "confirmed"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Order is {order.status} and can no longer be cancelled"
+        )
+    if await order_service.has_live_shipment(db, order.id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Order has a live shipment; cancel the shipment first",
+        )
+    # A fully REFUNDED order may now be cancelled (the refund was the required first step).
     if order.payment_status == "paid":
         # Never cancel a paid order silently (money would be kept). Refund it first via
         # POST /payments/{id}/refund — that reverses the charge and issues a credit note.
