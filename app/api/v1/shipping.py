@@ -137,6 +137,7 @@ async def list_shipments(
     q = select(Shipment).order_by(Shipment.id.desc())
     if user.role != "admin":  # customers see only their own account's shipments
         q = q.where(Shipment.account_id.in_(await _my_account_ids(db, user)))
+        q = q.where(Shipment.status != "draft")  # not a parcel yet (create in flight/failed)
     if order_id is not None:
         q = q.where(Shipment.order_id == order_id)
     ships = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
@@ -150,7 +151,8 @@ async def get_shipment(
     ship = await db.get(Shipment, shipment_id)
     # 404 (not 403) on cross-account access so IDs aren't enumerable.
     if ship is None or (
-        user.role != "admin" and ship.account_id not in await _my_account_ids(db, user)
+        user.role != "admin"
+        and (ship.status == "draft" or ship.account_id not in await _my_account_ids(db, user))
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Shipment not found")
     return await _shipment_out(db, ship)

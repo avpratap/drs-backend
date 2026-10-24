@@ -272,7 +272,9 @@ async def track_order(
     order = await _owned_order(db, order_id, user)
     shipments = (
         await db.execute(
-            select(Shipment).where(Shipment.order_id == order.id).order_by(Shipment.id.desc())
+            select(Shipment)
+            .where(Shipment.order_id == order.id, Shipment.status != "draft")  # not shipped yet
+            .order_by(Shipment.id.desc())
         )
     ).scalars().all()
     out_shipments: list[ShipmentTrackOut] = []

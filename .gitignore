@@ -16,3 +16,6 @@ venv/
 # Logs
 *.log
 .storage/
+
+# Local Redis dump
+dump.rdb

@@ -130,21 +130,68 @@ async def _cancel_orphan(gateway_shipment_id: str | None) -> None:
         log.error("orphan courier shipment %s could not be cancelled", gateway_shipment_id)
 
 
+async def _reclaim(
+    db: AsyncSession, order_id: int, ship_id: int, lease: dt.datetime, cod: bool,
+    orphan: str | None = None,
+) -> tuple[Order, Shipment]:
+    """Re-lock after a courier step and check we may still proceed (lock held on return).
+
+    `orphan` is a courier shipment id we just created but have NOT persisted: on any
+    bail-out it's ours to cancel (nobody else knows about it).
+    """
+    order, ship = await _lock(db, order_id, ship_id)
+    if ship.status != "draft" or ship.create_lease_until != lease:
+        # Superseded: the draft was cancelled (cancel_shipment already cancelled any
+        # PERSISTED courier id), or our lease expired and another create took it over.
+        await db.commit()
+        await _cancel_orphan(orphan)
+        if ship.status == "cancelled":
+            raise HTTPException(http.HTTP_409_CONFLICT, "Shipment was cancelled during creation")
+        if ship.status == "draft":
+            raise HTTPException(
+                http.HTTP_409_CONFLICT, "Shipment creation already in progress; retry shortly"
+            )
+        raise HTTPException(http.HTTP_409_CONFLICT, "A shipment already exists for this order")
+    reason = _unshippable_reason(order, cod)
+    if reason:
+        # The order was cancelled/refunded during the courier call — don't ship it.
+        gsid = orphan or ship.gateway_shipment_id
+        ship.status = "cancelled"
+        ship.create_lease_until = None
+        db.add(ShipmentTrackingEvent(shipment_id=ship.id, status="cancelled", note=reason[:255]))
+        await db.commit()
+        await _cancel_orphan(gsid)
+        raise HTTPException(http.HTTP_409_CONFLICT, reason)
+    return order, ship
+
+
+async def _abort(db: AsyncSession, order_id: int, ship_id: int, lease: dt.datetime) -> None:
+    """A courier step failed: release OUR claim (only if still ours) so a retry resumes."""
+    _, ship = await _lock(db, order_id, ship_id)
+    if ship.status == "draft" and ship.create_lease_until == lease:
+        ship.create_lease_until = None
+    await db.commit()
+
+
 async def create_shipment(
     db: AsyncSession, order_id: int, dest: dict, weight_kg: float, cod: bool
 ) -> Shipment:
-    """Create a shipment WITHOUT holding a DB row lock across the courier HTTP call (S1).
+    """Create a shipment WITHOUT holding a DB row lock across any courier HTTP call (S1).
 
     Mirrors cancel_shipment's phases. (A) Under a short order lock: validate (incl. the
-    #79 paid/COD gate), persist a 'draft' with its final SHP number and a short in-flight
-    lease, and commit. (B) Call the courier with no lock/transaction held. (C) Re-lock and
-    finalize to 'created' — or clean up if the draft was cancelled / the order became
-    unshippable meanwhile (then the courier order we just made is cancelled).
+    #79 paid/COD gate), persist a 'draft' with its final SHP number and an in-flight
+    lease, and commit. (B) Courier calls with no lock/transaction held, each followed by
+    (C) a re-lock that persists its result: create the courier order -> persist its ids;
+    assign the AWB -> finalize to 'created'. A re-lock that finds the draft cancelled, the
+    claim lost or the order no longer shippable bails out (cancelling any courier order
+    only we know about).
 
     Resumable + idempotent: the draft is the order's one live shipment, so a retry after a
-    courier failure or a crash picks the SAME draft (same SHP number = the courier order
-    key) back up instead of creating a second one; a draft whose lease is still live is
-    'in progress' (409), so two concurrent creates can't both hit the courier.
+    courier failure or a crash resumes the SAME draft (same SHP number = the courier order
+    key) — and, once the courier ids are persisted, skips straight to AWB assignment
+    instead of creating a second courier order. While a draft's lease is live another
+    create gets 409 'in progress', so concurrent creates can't both hit the courier; a
+    request only ever clears/uses the lease it set itself.
     """
     # Phase A — validate + persist the draft under a short lock, then commit.
     order = (
@@ -183,62 +230,61 @@ async def create_shipment(
         db.add(ship)
         await db.flush()
         ship.shipment_no = f"SHP{ship.id:06d}"
-    # (Re)snapshot this request's parcel details onto the draft.
-    ship.weight_kg = weight_kg
-    ship.cod_amount = float(order.total) if cod else 0
-    ship.to_name = dest.get("name")
-    ship.to_phone = dest.get("phone")
-    ship.to_address = dest.get("address")
-    ship.to_city = dest.get("city")
-    ship.to_state = dest.get("state")
-    ship.to_pincode = dest["pincode"]
-    ship.create_lease_until = now + _CREATE_LEASE
-    payload = {
-        "shipment_id": ship.id,
-        "order": await _courier_order(db, order, ship.shipment_no, dest, weight_kg, cod),
-    }
+    courier_order = None
+    if ship.gateway_shipment_id is not None:
+        # The courier order already exists with its original payment method: gate on THAT
+        # (a retry flipping cod=True must not slip an unpaid prepaid parcel past #79).
+        cod = float(ship.cod_amount) > 0
+        reason = _unshippable_reason(order, cod)
+        if reason:
+            raise HTTPException(http.HTTP_409_CONFLICT, reason)
+    else:
+        # No courier order yet: (re)snapshot this request's parcel details. Once the
+        # courier order exists its details are fixed, so a resume keeps the original.
+        ship.weight_kg = weight_kg
+        ship.cod_amount = float(order.total) if cod else 0
+        ship.to_name = dest.get("name")
+        ship.to_phone = dest.get("phone")
+        ship.to_address = dest.get("address")
+        ship.to_city = dest.get("city")
+        ship.to_state = dest.get("state")
+        ship.to_pincode = dest["pincode"]
+        courier_order = await _courier_order(db, order, ship.shipment_no, dest, weight_kg, cod)
+    lease = ship.create_lease_until = now + _CREATE_LEASE  # our claim token
     ship_id = ship.id
     await db.commit()  # release the locks before the network call
 
-    # Phase B — courier call with NO DB lock/transaction held open.
-    try:
-        result = await client.create_shipment(payload)
-    except Exception as exc:
-        log.warning("courier create failed for shipment %s: %s", ship_id, exc)
-        result = None
+    if courier_order is not None:
+        # Phase B1 — create the courier order with NO DB lock/transaction held open.
+        try:
+            ids = await client.create_order(ship_id, courier_order)
+        except Exception as exc:
+            log.warning("courier order create failed for shipment %s: %s", ship_id, exc)
+            await _abort(db, order_id, ship_id, lease)
+            raise HTTPException(http.HTTP_502_BAD_GATEWAY, "Courier create failed; try again") from None
+        # Phase C1 — persist the courier ids at once, so a later failure resumes at B2.
+        _, ship = await _reclaim(db, order_id, ship_id, lease, cod, orphan=ids["gateway_shipment_id"])
+        ship.gateway_order_id = ids.get("gateway_order_id")
+        ship.gateway_shipment_id = ids["gateway_shipment_id"]
+        gsid = ship.gateway_shipment_id
+        await db.commit()
+    else:
+        gsid = ship.gateway_shipment_id
 
-    # Phase C — re-lock and finalize (or clean up).
-    order, ship = await _lock(db, order_id, ship_id)
-    if result is None:
-        if ship.status == "draft":
-            ship.create_lease_until = None  # release the claim: an immediate retry resumes
-        await db.commit()
-        raise HTTPException(http.HTTP_502_BAD_GATEWAY, "Courier create failed; try again")
-    gsid = result.get("gateway_shipment_id")
-    if ship.status != "draft":
-        # Superseded while we were at the courier: the draft was cancelled, or a resumer
-        # (after our lease expired) already finalized it. Drop OUR courier order.
-        await db.commit()
-        if gsid != ship.gateway_shipment_id:
-            await _cancel_orphan(gsid)
-        if ship.status == "cancelled":
-            raise HTTPException(http.HTTP_409_CONFLICT, "Shipment was cancelled during creation")
-        return ship
-    reason = _unshippable_reason(order, cod)
-    if reason:
-        # The order was cancelled/refunded during the courier call — don't ship it.
-        ship.status = "cancelled"
-        ship.create_lease_until = None
-        db.add(ShipmentTrackingEvent(shipment_id=ship.id, status="cancelled", note=reason[:255]))
-        await db.commit()
-        await _cancel_orphan(gsid)
-        raise HTTPException(http.HTTP_409_CONFLICT, reason)
-    ship.gateway_order_id = result.get("gateway_order_id")
-    ship.gateway_shipment_id = gsid
-    ship.awb = result.get("awb")
-    ship.courier = result.get("courier")
-    ship.tracking_url = result.get("tracking_url")
-    ship.label_url = result.get("label_url")
+    # Phase B2 — assign the AWB, again with no lock held.
+    try:
+        awb = await client.assign_awb(ship_id, gsid)
+    except Exception as exc:
+        log.warning("courier AWB assignment failed for shipment %s: %s", ship_id, exc)
+        await _abort(db, order_id, ship_id, lease)
+        raise HTTPException(http.HTTP_502_BAD_GATEWAY, "Courier create failed; try again") from None
+
+    # Phase C2 — re-lock and finalize.
+    _, ship = await _reclaim(db, order_id, ship_id, lease, cod)
+    ship.awb = awb.get("awb")
+    ship.courier = awb.get("courier")
+    ship.tracking_url = awb.get("tracking_url")
+    ship.label_url = awb.get("label_url")
     ship.status = "created"
     ship.create_lease_until = None
     db.add(ShipmentTrackingEvent(shipment_id=ship.id, status="created", note="Shipment created + AWB assigned"))
@@ -318,6 +364,13 @@ async def cancel_shipment(db: AsyncSession, shipment_id: int) -> Shipment:
 
     # Phase C — re-lock and finalize, respecting any terminal state a webhook set meanwhile.
     ship = await _relock(db, select(Shipment).where(Shipment.id == shipment_id))
+    if (ship.gateway_shipment_id or "") != gsid:
+        # An in-flight create persisted a courier order during our call, so what we
+        # cancelled (nothing / an older id) isn't what now exists: change nothing.
+        await db.commit()
+        raise HTTPException(
+            http.HTTP_409_CONFLICT, "Shipment changed during cancellation; try again"
+        )
     if ship.status in _TERMINAL:
         # A tracking webhook reached a terminal state (e.g. delivered) during the courier
         # call — that real outcome wins; don't clobber it.
