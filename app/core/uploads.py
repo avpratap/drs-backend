@@ -48,52 +48,8 @@ async def read_validated_image(file: UploadFile) -> tuple[bytes, str, str]:
 
 # ---------- metadata stripping ----------
 # Phone photos carry EXIF (GPS coordinates of the customer's doorstep, device serials).
-# Strip metadata containers without re-encoding: drop JPEG APPn (except JFIF/Adobe)/COM
-# segments, PNG text/eXIf/time chunks, and WEBP EXIF/XMP chunks.
-_JPEG_KEEP_APP = {0xE0, 0xEE}  # JFIF, Adobe (colour transform)
-_PNG_DROP = {b"eXIf", b"tEXt", b"iTXt", b"zTXt", b"tIME"}
-
-
-def _strip_jpeg(data: bytes) -> bytes:
-    out = bytearray(data[:2])  # SOI
-    i = 2
-    while i + 4 <= len(data):
-        if data[i] != 0xFF:
-            return data  # not a marker where one must be: leave the file untouched
-        marker = data[i + 1]
-        if marker == 0xDA:  # SOS: entropy-coded data follows to EOI — copy the rest
-            out += data[i:]
-            return bytes(out)
-        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
-            out += data[i:i + 2]
-            i += 2
-            continue
-        seg_len = int.from_bytes(data[i + 2:i + 4], "big")
-        end = i + 2 + seg_len
-        if seg_len < 2 or end > len(data):
-            return data
-        drop = (0xE1 <= marker <= 0xEF and marker not in _JPEG_KEEP_APP) or marker == 0xFE
-        if not drop:
-            out += data[i:end]
-        i = end
-    return data
-
-
-def _strip_png(data: bytes) -> bytes:
-    out = bytearray(data[:8])
-    i = 8
-    while i + 12 <= len(data):
-        length = int.from_bytes(data[i:i + 4], "big")
-        ctype = data[i + 4:i + 8]
-        end = i + 12 + length
-        if end > len(data):
-            return data
-        if ctype not in _PNG_DROP:
-            out += data[i:end]
-        i = end
-        if ctype == b"IEND":
-            break
-    return bytes(out)
+# Images are re-encoded (see _reencode); an animated WEBP is cleaned at container level
+# (EXIF/XMP chunks dropped) so its frames survive.
 
 
 def _strip_webp(data: bytes) -> bytes:
@@ -114,14 +70,41 @@ def _strip_webp(data: bytes) -> bytes:
     return b"RIFF" + (len(out) + 4).to_bytes(4, "little") + b"WEBP" + bytes(out)
 
 
-def strip_metadata(data: bytes, ext: str) -> bytes:
-    try:
+def _reencode(data: bytes, ext: str) -> bytes:
+    """Decode and re-encode with Pillow: the pixels are rotated to the EXIF Orientation
+    (so stripping it doesn't leave portrait photos sideways), the ICC colour profile is
+    kept, and EVERY other metadata block (EXIF/GPS, XMP, comments) is dropped."""
+    import io as _io
+
+    from PIL import Image, ImageOps
+
+    Image.MAX_IMAGE_PIXELS = 40_000_000  # decompression-bomb guard (~40 MP)
+    with Image.open(_io.BytesIO(data)) as img:
+        if getattr(img, "is_animated", False):
+            raise ValueError("animated")
+        icc = img.info.get("icc_profile")
+        img = ImageOps.exif_transpose(img)
+        out = _io.BytesIO()
+        kwargs = {"icc_profile": icc} if icc else {}
         if ext == "jpg":
-            return _strip_jpeg(data)
-        if ext == "png":
-            return _strip_png(data)
-        if ext == "webp":
-            return _strip_webp(data)
-    except Exception:  # malformed container: keep the validated original bytes
-        return data
-    return data
+            if img.mode not in ("RGB", "L", "CMYK"):
+                img = img.convert("RGB")
+            img.save(out, "JPEG", quality=90, optimize=True, **kwargs)
+        elif ext == "png":
+            img.save(out, "PNG", optimize=True, **kwargs)
+        else:
+            img.save(out, "WEBP", quality=90, **kwargs)
+        return out.getvalue()
+
+
+def strip_metadata(data: bytes, ext: str) -> bytes:
+    """Remove location/device metadata before storage. Fails CLOSED: an image that
+    can't be safely cleaned is rejected (422) rather than stored with GPS intact."""
+    try:
+        return _reencode(data, ext)
+    except Exception as exc:
+        if ext == "webp" and str(exc) == "animated":
+            return _strip_webp(data)  # container-level strip keeps every frame
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Image could not be processed"
+        ) from None

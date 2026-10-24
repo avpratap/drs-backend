@@ -73,11 +73,7 @@ async def test_email_unique_only_when_verified_and_throttled(client):
     # A second request inside the cooldown is refused (no inbox flooding).
     assert (await client.post("/api/v1/account/email/verify-request", headers=b)).status_code == 429
     assert (await client.post("/api/v1/account/email/verify", json={"token": tok}, headers=b)).status_code == 200
-    # The address was just mailed: A's request is throttled per RECIPIENT, not per user.
-    assert (await client.post("/api/v1/account/email/verify-request", headers=a)).status_code == 429
-    from app.core.redis import redis_client
-
-    await redis_client.flushdb()
+    # The throttle is per (sender, recipient): B's sends don't lock A out, and vice versa.
     # Now verified by B: A can't verify the same address.
     tok_a = (await client.post("/api/v1/account/email/verify-request", headers=a)).json()["dev_token"]
     assert (await client.post("/api/v1/account/email/verify", json={"token": tok_a},
@@ -167,28 +163,44 @@ async def test_erasure_blocked_by_pending_withdrawal(client):
     await client.post("/api/v1/payments/verify", json={"gateway_order_id": pay["gateway_order_id"],
                                                        "gateway_payment_id": "p", "signature": "dev"}, headers=h)
     wd = (await client.post("/api/v1/billing/withdrawals", json={"amount": 50}, headers=h)).json()
-    assert (await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000001110"),
-                              headers=h)).status_code == 409
+    body = await erase_confirm(client, "9000001110")
+    assert (await client.post("/api/v1/account/erase", json=body, headers=h)).status_code == 409
     await client.post(f"/api/v1/admin/withdrawals/{wd['id']}/reject", headers=ah)
-    assert (await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000001110"),
-                              headers=h)).status_code == 200
+    # The refusal didn't burn the OTP: the same code works once the block is cleared.
+    assert (await client.post("/api/v1/account/erase", json=body, headers=h)).status_code == 200
 
 
 # ---------- R2-O7: uploads are private references with metadata stripped ----------
 async def test_upload_is_private_ref_with_exif_stripped(client):
+    import io
     import os
+
+    from PIL import Image
 
     from app.core.config import settings
 
     h = auth(await login(client, "9000001111"))
-    exif = b"\xff\xe1\x00\x11Exif\x00\x00GPSDATA!!"
-    jpeg = b"\xff\xd8" + b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + exif + b"\xff\xda\x00\x02DATA\xff\xd9"
+    # A "portrait" phone photo: landscape pixels + Orientation=6, GPS and an ICC profile.
+    img = Image.new("RGB", (40, 20), "red")
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 CW
+    exif[0x8825] = {2: (26.0, 55.0, 0.0), 4: (75.0, 49.0, 0.0)}  # GPS IFD
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", exif=exif, icc_profile=b"\x00" * 128)
+    jpeg = buf.getvalue()
     r = await client.post("/api/v1/uploads", files={"file": ("p.jpg", jpeg, "image/jpeg")}, headers=h)
     assert r.status_code == 200, r.text
     ref = r.json()["url"]
     assert ref.startswith("media:private/uploads/") and "exp=" in r.json()["preview_url"]
     stored = open(os.path.join(settings.STORAGE_DIR, ref[len("media:"):]), "rb").read()
-    assert b"GPSDATA" not in stored and stored.startswith(b"\xff\xd8\xff\xe0")
+    with Image.open(io.BytesIO(stored)) as out:
+        assert not out.getexif()  # no GPS / device EXIF left
+        assert out.size == (20, 40)  # orientation applied to the pixels
+        assert out.info.get("icc_profile") == b"\x00" * 128  # colour profile kept
+    # An image the cleaner can't decode is refused rather than stored with metadata.
+    bad = await client.post("/api/v1/uploads", files={"file": ("x.jpg", b"\xff\xd8\xff\xe1garbage", "image/jpeg")},
+                            headers=h)
+    assert bad.status_code == 422
     # Another user can't attach it.
     other = auth(await login(client, "9000001112"))
     t = (await client.post("/api/v1/support/tickets", json={"subject": "s", "body": "b"}, headers=other)).json()

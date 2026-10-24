@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.gst_states import validate_state
 from app.schemas.common import reject_nulls
 
 PHONE_RE = r"^\+?[0-9]{10,15}$"
@@ -85,6 +86,8 @@ class AddressIn(BaseModel):
     lng: float | None = Field(default=None, ge=-180, le=180)
     is_default: bool = False
 
+    _v_state = field_validator("state")(lambda v: validate_state(v))
+
 
 class AddressUpdate(BaseModel):
     label: str | None = Field(default=None, max_length=40)
@@ -102,6 +105,8 @@ class AddressUpdate(BaseModel):
     is_default: bool | None = None
 
     _v_nulls = reject_nulls("line1", "city", "state", "pincode", "country", "is_default")
+
+    _v_state = field_validator("state")(lambda v: validate_state(v))
 
 
 class AddressOut(BaseModel):

@@ -198,12 +198,15 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
         if short > 0:
             await invoicing.generate_credit_note_for_lines(db, inv, None, reason=reason, amount=short)
     if order is not None and order.payment_status in ("paid", "partially_refunded"):
-        # Nothing left to refund across both paths -> the order is fully refunded and its
-        # invoice fully reversed; otherwise a refund to source earlier stays partial.
-        if await refund_acct.order_refund_headroom(db, order) <= 0:
+        # Everything the customer paid is (definitely) handed back -> refunded + full
+        # reversal; otherwise the order is now partially refunded (so a later invoice
+        # catches the credit up).
+        if await refund_acct.refunded_settled(db, order.id) >= round(float(order.total), 2):
             order.payment_status = "refunded"
             if inv is not None:
                 await invoicing.build_full_credit_note(db, inv, reason=f"Return {rr.rma_no}")
+        else:
+            order.payment_status = "partially_refunded"
     return rr
 
 

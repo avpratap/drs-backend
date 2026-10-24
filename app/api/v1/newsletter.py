@@ -6,12 +6,13 @@ import logging
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clientip import client_ip
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.sendlimit import allow_send
@@ -61,7 +62,7 @@ class StatusOut(BaseModel):
 
 
 @router.post("/newsletter/subscribe", response_model=StatusOut, operation_id="newsletter_subscribe")
-async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
+async def subscribe(data: SubscribeIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Double opt-in: a subscribe creates/keeps a PENDING record with a confirm token
     and emails a confirmation link. Consent (consent_at) is recorded only when the real
     email owner confirms — so one can't subscribe or forge consent for someone else.
@@ -70,7 +71,7 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
     # Throttle per address BEFORE touching the row (rotating the token without mailing
     # it would void the link already sent): an anonymous caller can't flood an inbox.
     # The response is the same whatever the address's state, so it reveals nothing.
-    if not await allow_send("newsletter", email):
+    if not await allow_send("newsletter", email, sender=f"ip:{client_ip(request) or ''}"):
         return StatusOut(email=email, status="pending")
     # Lock the existing row (if any) so a concurrent POST /newsletter/confirm serializes:
     # otherwise this request could hold a stale 'pending' snapshot and overwrite a status

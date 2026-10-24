@@ -84,8 +84,9 @@ class BodySizeLimitMiddleware:
             if not started:
                 await self._reply(send, 413, "Request body too large", "payload_too_large")
         except BaseExceptionGroup as eg:  # raised through anyio task groups
-            if eg.subgroup(_BodyTooLarge) is None:
-                raise
+            rest = eg.split(_BodyTooLarge)[1]
+            if eg.subgroup(_BodyTooLarge) is None or rest is not None:
+                raise  # another error rode along: don't hide it behind a 413
             if not started:
                 await self._reply(send, 413, "Request body too large", "payload_too_large")
 

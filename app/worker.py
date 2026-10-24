@@ -16,6 +16,7 @@ from arq.connections import RedisSettings
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.services.cutoff import run_cutoff
+from app.services.loyalty import sweep_unrewarded_referrals
 from app.services.maintenance import prune
 from app.services.ml import churn as churn_svc
 from app.services.notifications import process_outbox
@@ -70,7 +71,10 @@ async def drain_outbox(ctx: dict) -> dict:
 async def housekeeping(ctx: dict) -> dict:
     """Prune short-retention rows (idempotency keys, webhook events, old notifications)."""
     async with SessionLocal() as db:
-        return await prune(db)
+        counts = await prune(db)
+        # Referral rewards a redeem/payment race left unpaid.
+        counts["referrals_rewarded"] = await sweep_unrewarded_referrals(db)
+        return counts
 
 
 async def score_churn(ctx: dict) -> dict:

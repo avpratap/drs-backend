@@ -259,24 +259,21 @@ async def generate_order_invoice(
         inv = await invoicing.generate_for_order(db, order)
     except invoicing.NothingToInvoice as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
-    if order.payment_status != "paid":
-        # Under the order lock (the refund paths take it too) so concurrent requests can't
-        # both add the catch-up credit note.
-        order = await refund_acct.lock_order(db, order.id)
-        if await invoicing.credited_value(db, inv) == 0:
-            reason = f"Refund for order {order.order_no}"
-            if order.payment_status == "refunded":
-                await invoicing.build_full_credit_note(db, inv, reason=reason)
-            else:
-                refunded = round(
-                    await refund_acct.refunded_to_source(db, order.id)
-                    + await refund_acct.refunded_via_rma(db, order.id), 2,
-                )
-                if refunded > 0:
-                    await invoicing.generate_credit_note_for_lines(
-                        db, inv, None, reason=reason, amount=refunded
-                    )
-        await db.commit()
+    # Catch the credit note up with refunds that settled before (or while) the invoice
+    # was issued. Under the order lock the refund paths also take; the shortfall is
+    # settled-and-applied refunds minus what the credit note already reverses, so it's
+    # idempotent and never double-counts a refund whose own effect adds its CN lines.
+    order = await refund_acct.lock_order(db, order.id)
+    owed = round(
+        await refund_acct.credited_refunds(db, order.id) - await invoicing.credited_value(db, inv), 2
+    )
+    if owed > 0:
+        reason = f"Refund for order {order.order_no}"
+        if await refund_acct.refunded_settled(db, order.id) >= round(float(order.total), 2):
+            await invoicing.build_full_credit_note(db, inv, reason=reason)
+        else:
+            await invoicing.generate_credit_note_for_lines(db, inv, None, reason=reason, amount=owed)
+    await db.commit()
     # Build the full view (with lines) — returning the ORM row gave `lines: []`.
     lines = (
         await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == inv.id))

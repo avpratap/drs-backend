@@ -125,16 +125,24 @@ async def assert_standing_change_allowed(db, user_role: str) -> None:
 
     tomorrow = now.date() + dt.timedelta(days=1)
     cutoff_at = now.replace(hour=settings.CUTOFF_HOUR, minute=0, second=0, microsecond=0)
-    # Tonight's run (started after the cutoff) has finished and frozen tomorrow.
-    done = await db.scalar(
-        select(ScheduleRun.id).where(
-            ScheduleRun.for_delivery_date == tomorrow,
-            ScheduleRun.status == "frozen",
-            ScheduleRun.started_at >= cutoff_at,
-            ScheduleRun.finished_at.is_not(None),
-        ).limit(1)
+    # Tonight's run (started after the cutoff) has finished and frozen tomorrow, and no
+    # later run (e.g. the scheduled one after a manual admin run) is in progress: the
+    # LATEST run for tomorrow decides.
+    latest = (
+        await db.execute(
+            select(ScheduleRun.status, ScheduleRun.started_at, ScheduleRun.finished_at)
+            .where(ScheduleRun.for_delivery_date == tomorrow)
+            .order_by(ScheduleRun.started_at.desc(), ScheduleRun.id.desc())
+            .limit(1)
+        )
+    ).first()
+    done = (
+        latest is not None
+        and latest.status == "frozen"
+        and latest.finished_at is not None
+        and latest.started_at >= cutoff_at
     )
-    if done is None:
+    if not done:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Changes are frozen after the {settings.CUTOFF_HOUR}:00 cutoff until tomorrow's "

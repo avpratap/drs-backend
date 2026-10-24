@@ -527,6 +527,11 @@ async def update_coupon(coupon_id: int, data: CouponPatch, db: AsyncSession = De
         setattr(coupon, field, value)
     if coupon.valid_to and coupon.valid_from and coupon.valid_to < coupon.valid_from:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    if coupon.usage_limit is not None and coupon.usage_limit < coupon.used_count:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"usage_limit can't be below the {coupon.used_count} uses already made",
+        )
     await db.commit()
     await db.refresh(coupon)
     return coupon

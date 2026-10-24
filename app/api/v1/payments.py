@@ -349,9 +349,11 @@ async def _apply_refund_effect(db: AsyncSession, payment: Payment, refund: Refun
             )
             # Fully refunded once nothing is left across BOTH paths (RMA store credit +
             # refunds to source), e.g. ₹500 RMA + ₹1000 to source on a ₹1500 order.
+            # Fully refunded once the SETTLED refunds (both paths) cover the order — a
+            # pending one may still fail, so it never triggers the full reversal.
             fully = (
                 round(processed, 2) >= round(float(payment.amount), 2)
-                or await refund_acct.order_refund_headroom(db, order) <= 0
+                or await refund_acct.refunded_settled(db, order.id) >= round(float(order.total), 2)
             )
             order.payment_status = "refunded" if fully else "partially_refunded"
             inv = await db.scalar(
@@ -439,8 +441,12 @@ async def refund_payment(
             remaining = min(remaining, await refund_acct.order_refund_headroom(db, order))
     elif payment.payment_type == "wallet_topup":
         # A top-up that was already spent/withdrawn can't be refunded to the card too.
+        # Only cash still in the wallet can go back to the card (not gift/store credit).
         wallet = await billing_service.get_or_create_wallet(db, payment.account_id, lock=True)
-        remaining = min(remaining, max(round(float(wallet.balance), 2), 0.0))
+        remaining = min(
+            remaining,
+            await billing_service.withdrawable_cash(db, payment.account_id, float(wallet.balance)),
+        )
     amount = round(float(data.amount), 2) if data.amount is not None else remaining
     if amount <= 0 or amount > remaining:
         raise HTTPException(

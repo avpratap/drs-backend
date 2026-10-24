@@ -119,3 +119,42 @@ def verify_dev_signature(key: str, exp: str | None, sig: str | None) -> bool:
     if exp_i < int(time.time()) or not sig:
         return False
     return hmac.compare_digest(_dev_sig(key, exp_i), sig)
+
+
+def delete_private_keys(keys: list[str], prefixes: list[str] = ()) -> None:
+    """Erase private objects (DPDP erasure): explicit keys plus everything under each
+    prefix. Best-effort; blocking I/O — run it off the event loop."""
+    keys = [k for k in keys if k.startswith(PRIVATE_PREFIX)]
+    prefixes = [PRIVATE_PREFIX + p.lstrip("/") for p in prefixes]
+    if enabled():
+        client = _r2_client()
+        bucket = _private_bucket()
+        for prefix in prefixes:
+            token = None
+            while True:
+                kw = {"Bucket": bucket, "Prefix": prefix}
+                if token:
+                    kw["ContinuationToken"] = token
+                page = client.list_objects_v2(**kw)
+                keys += [o["Key"] for o in page.get("Contents", [])]
+                if not page.get("IsTruncated"):
+                    break
+                token = page.get("NextContinuationToken")
+        for i in range(0, len(keys), 1000):
+            batch = keys[i:i + 1000]
+            if batch:
+                client.delete_objects(
+                    Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True}
+                )
+        return
+    import shutil
+
+    root = os.path.abspath(settings.STORAGE_DIR)
+    for prefix in prefixes:
+        path = os.path.abspath(os.path.join(root, prefix))
+        if os.path.commonpath([root, path]) == root and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+    for key in keys:
+        path = os.path.abspath(os.path.join(root, key))
+        if os.path.commonpath([root, path]) == root and os.path.isfile(path):
+            os.remove(path)

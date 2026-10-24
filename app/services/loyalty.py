@@ -189,8 +189,11 @@ async def reward_referral_on_purchase(db: AsyncSession, referee_account_id: int)
     paid = await db.scalar(
         select(func.count()).select_from(Order).where(
             Order.account_id == referee_account_id,
-            Order.payment_status.in_(("paid", "partially_refunded", "refunded")),
+            # A real purchase: money changed hands (no ₹0 coupon order) and it wasn't
+            # refunded away again.
+            Order.payment_status.in_(("paid", "partially_refunded")),
             Order.status != "cancelled",
+            Order.total > 0,
         )
     )
     if not paid:
@@ -258,3 +261,21 @@ async def redeem_gift_card(db: AsyncSession, code: str, account_id: int, amount:
     # transaction — previously the card was debited and the customer received nothing.
     await billing.wallet_adjust(db, account_id, amount, "giftcard", "gift_card_txn", gct.id)
     return gc
+
+
+async def sweep_unrewarded_referrals(db: AsyncSession) -> int:
+    """Safety net for the redeem-vs-first-payment race (each transaction can miss the
+    other's uncommitted row): re-check every unrewarded redemption. Commits."""
+    referees = (
+        await db.execute(
+            select(ReferralRedemption.referee_account_id).where(
+                ReferralRedemption.rewarded_at.is_(None)
+            ).limit(5000)
+        )
+    ).scalars().all()
+    paid = 0
+    for aid in referees:
+        if await reward_referral_on_purchase(db, aid):
+            paid += 1
+        await db.commit()
+    return paid

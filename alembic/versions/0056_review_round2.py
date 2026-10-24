@@ -4,6 +4,8 @@
   claim must not lock the real owner out of their address).
 - user_profiles.notify_whatsapp defaults OFF and is OFF for every profile without a
   current whatsapp_optin consent (WhatsApp needs an opt-in).
+- payments.is_excess: a capture that did not settle its order (duplicate capture) —
+  refunded on its own, never reversing the order/invoice.
 - payments: at most one OPEN (creating/initiated) payment per order.
 - Lookup indexes for the (ref_type, ref_id) ledger/payment checks run on every
   delivery/checkout/refund, and for FKs on growing tables.
@@ -29,6 +31,11 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # (IF NOT EXISTS: an earlier build of this branch added it in 0055 — databases that
+    # already ran that build must not fail here, and ones that didn't must get it.)
+    op.execute(
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS is_excess boolean NOT NULL DEFAULT false"
+    )
     # --- users.email: verified-only, case-insensitive uniqueness ---
     op.drop_constraint("uq_users_email", "users", type_="unique")
     op.execute("UPDATE users SET email = lower(btrim(email)) WHERE email IS NOT NULL")
@@ -80,6 +87,12 @@ def upgrade() -> None:
         sa.Column("rewarded_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.execute("UPDATE referral_redemptions SET rewarded_at = created_at")
+    # "UT" used to resolve to Uttarakhand; the alias was removed (it's commonly typed for
+    # "Union Territory"). Keep stored rows' meaning by spelling them out.
+    for table, col in (("shops", "state"), ("addresses", "state"), ("orders", "ship_state")):
+        op.execute(
+            f"UPDATE {table} SET {col} = 'Uttarakhand' WHERE upper(btrim({col})) = 'UT'"
+        )
 
 
 _INDEXES = [
@@ -138,6 +151,13 @@ def _more_upgrade() -> None:
             END $$;
             """
         )
+    # Legacy coupons whose limit an admin lowered below their use count would otherwise
+    # become un-updatable (every later UPDATE is checked): raise the limit to the count.
+    op.execute(
+        "UPDATE coupons SET usage_limit = used_count "
+        "WHERE usage_limit IS NOT NULL AND used_count > usage_limit"
+    )
+    op.execute("UPDATE coupons SET used_count = 0 WHERE used_count < 0")
     for name, table, expr in _CHECKS:
         op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expr}) NOT VALID")
     op.alter_column(
@@ -164,4 +184,11 @@ def downgrade() -> None:
     op.alter_column("user_profiles", "notify_whatsapp", server_default=sa.true())
     op.drop_index("ix_users_email", table_name="users")
     op.drop_index("uq_users_email_verified", table_name="users")
+    # Unverified duplicates were allowed (and emails lowercased): keep the oldest owner of
+    # each address so the old strict constraint can be re-created.
+    op.execute(
+        "UPDATE users u SET email = NULL, email_verified_at = NULL FROM users k "
+        "WHERE u.email = k.email AND u.id > k.id"
+    )
     op.create_unique_constraint("uq_users_email", "users", ["email"])
+    op.drop_column("payments", "is_excess")

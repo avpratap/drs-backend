@@ -4,12 +4,15 @@ Erasure is PII tombstoning, not hard-delete: financial/tax records (invoices,
 payments, ledgers) must be retained for legal compliance, so we anonymize the
 person while leaving the money trail intact, and revoke all consents.
 """
+import asyncio
 import datetime as dt
+import logging
 from decimal import Decimal
 
 from sqlalchemy import delete, false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import media, storage
 from app.models.auth_session import AuthSession
 from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
 from app.models.cart import Cart, CartItem
@@ -34,6 +37,8 @@ from app.models.support import SupportTicket, TicketMessage
 from app.models.user import User
 from app.models.wishlist import WishlistItem
 from app.services import profile as profile_svc
+
+log = logging.getLogger("drs.dpdp")
 
 
 def _b36(n: int) -> str:
@@ -177,19 +182,34 @@ class ErasureBlocked(Exception):
     """Erasure must wait (an open money flow would be orphaned)."""
 
 
-async def erase_user(db: AsyncSession, user: User) -> dict:
-    """Anonymize PII and revoke consent; retain financial/tax records (invoices, ledgers).
-    Covers every PII-bearing table keyed to the user or their account(s)."""
-    account_ids_pre = await profile_svc.my_account_ids(db, user)
-    if account_ids_pre and await db.scalar(
+async def erasure_blocked(db: AsyncSession, user: User, *, lock: bool = False) -> str | None:
+    """Why the account can't be erased yet (None = it can). With `lock`, each wallet is
+    locked first — request_withdrawal takes the same lock — so a withdrawal requested
+    concurrently can't slip past the check and be orphaned on an erased subject."""
+    from app.services import billing as billing_svc
+
+    account_ids = sorted(await profile_svc.my_account_ids(db, user))
+    if lock:
+        for aid in account_ids:
+            await billing_svc.get_or_create_wallet(db, aid, lock=True)
+    if account_ids and await db.scalar(
         select(func.count()).select_from(WithdrawalRequest).where(
-            WithdrawalRequest.account_id.in_(account_ids_pre),
+            WithdrawalRequest.account_id.in_(account_ids),
             WithdrawalRequest.status == "requested",
         )
     ):
         # Erasing the identity would leave a payout pending to someone we can no longer
         # identify (or let it be approved to an erased subject): settle it first.
-        raise ErasureBlocked("A wallet withdrawal is pending; it must be paid or rejected first")
+        return "A wallet withdrawal is pending; it must be paid or rejected first"
+    return None
+
+
+async def erase_user(db: AsyncSession, user: User) -> dict:
+    """Anonymize PII and revoke consent; retain financial/tax records (invoices, ledgers).
+    Covers every PII-bearing table keyed to the user or their account(s)."""
+    reason = await erasure_blocked(db, user, lock=True)
+    if reason:
+        raise ErasureBlocked(reason)
     orig_email = user.email  # capture before nulling (newsletter is keyed by email)
     orig_verified = user.email_verified_at is not None
     # base-36 keeps the unique tombstone within phone's VARCHAR(16) for any id size.
@@ -202,8 +222,11 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
     user.status = "erased"
     user.token_version += 1  # invalidate all existing tokens
 
+    media_refs: list[str] = []  # private uploads to delete once the erasure commits
     prof = await db.get(UserProfile, user.id)
     if prof is not None:
+        if prof.avatar_url:
+            media_refs.append(prof.avatar_url)
         prof.display_name = None
         prof.avatar_url = None
         prof.date_of_birth = None
@@ -257,6 +280,18 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
             )
         ).scalars().all()
         if do_ids:
+            media_refs += [
+                ref
+                for row in (
+                    await db.execute(
+                        select(ProofOfDelivery.photo_url, ProofOfDelivery.signature_url).where(
+                            ProofOfDelivery.delivery_order_id.in_(do_ids)
+                        )
+                    )
+                ).all()
+                for ref in row
+                if ref
+            ]
             await db.execute(
                 update(ProofOfDelivery)
                 .where(ProofOfDelivery.delivery_order_id.in_(do_ids))
@@ -359,6 +394,13 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
         db.add(Consent(user_id=user.id, purpose=purpose, action="withdrawn", source="erasure"))
 
     await db.commit()
+    # The stored files themselves (photos/attachments), not just the references: after
+    # the commit, best-effort (a storage hiccup must not undo the erasure).
+    keys = [r[len(media.REF_PREFIX):] for r in media_refs if media.is_ref(r)]
+    try:
+        await asyncio.to_thread(storage.delete_private_keys, keys, [f"uploads/{user.id}/"])
+    except Exception:
+        log.warning("erasure: could not delete stored uploads for user %s", user.id)
     return {"detail": "account erased", "user_id": user.id, "retained": "financial/tax records"}
 
 

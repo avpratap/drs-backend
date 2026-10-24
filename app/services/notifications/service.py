@@ -68,7 +68,9 @@ def _addr(channel: str, user: User) -> str | None:
     if channel in ("whatsapp", "sms"):
         return user.phone
     if channel == "email":
-        return user.email
+        # Only a VERIFIED inbox: anyone can type someone else's address into a profile,
+        # and we must not mail (or market to) a person who never confirmed it.
+        return user.email if user.email_verified_at is not None else None
     return None  # push -> device token (not modeled yet)
 
 

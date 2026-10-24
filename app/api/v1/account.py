@@ -165,7 +165,7 @@ async def request_email_verification(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Set an email first")
     if user.email_verified_at is not None:
         return {"detail": "email already verified"}
-    if not await allow_send("email_verify", user.email):
+    if not await allow_send("email_verify", user.email, sender=f"user:{user.id}"):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS, "A code was sent recently; try again later"
         )
@@ -235,6 +235,10 @@ async def erase_my_account(
 ):
     """Right to erasure — anonymizes PII; tax/financial records are retained by law.
     Irreversible, so it requires step-up confirmation with a fresh OTP."""
+    # Refuse BEFORE consuming the OTP, so a blocked user doesn't burn the code.
+    blocked = await dpdp.erasure_blocked(db, user)
+    if blocked:
+        raise HTTPException(status.HTTP_409_CONFLICT, blocked)
     if not await otp_service.verify_otp(user.phone, data.otp):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid or expired OTP")
     try:
@@ -439,6 +443,9 @@ async def save_payment_method_from_payment(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "This payment's instrument can't be saved"
         )
+    # Serialize with other saves on this account (same lock create_payment_method takes)
+    # so two concurrent saves of one instrument can't both insert.
+    await svc._lock_account(db, svc._PM_LOCK_NS, payment.account_id)
     existing = await db.scalar(
         select(PaymentMethod).where(
             PaymentMethod.account_id == payment.account_id,

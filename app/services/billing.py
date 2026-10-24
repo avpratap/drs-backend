@@ -46,8 +46,12 @@ async def get_or_create_wallet(db: AsyncSession, account_id: int, *, lock: bool 
 
 # Ledger entries that move CASH in or out of the wallet. Gift-card redemptions, RMA store
 # credit and admin goodwill are wallet credit too, but were never paid in as money, so
-# they can be spent on deliveries but never paid out as cash.
-_CASH_TXN_TYPES = ("topup", "refund_reversal", "refund_release", "withdrawal")
+# they can be spent on deliveries but never paid out as cash. Spending is assumed to use
+# cash FIRST (debit_order counts against it; a door cash_collection that pays a delivery
+# offsets its own debit), so credit can't be laundered into cash by spending the cash.
+_CASH_TXN_TYPES = (
+    "topup", "refund_reversal", "refund_release", "withdrawal", "debit_order", "cash_collection",
+)
 
 
 async def withdrawable_cash(db: AsyncSession, account_id: int, balance: float) -> float:

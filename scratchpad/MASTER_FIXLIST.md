@@ -234,16 +234,41 @@ Commits: `2ff6f2a` (money), `2578754` (orders/notify/auth/DPDP), `93056d7` (cuto
 | I10 | Med | code-only rules without DB backstops | conditional partial uniques (one charge/delivery, redemption/order, referral/referee) + NOT VALID CHECKs | r2i::test_integrity_backstops_exist |
 | I11 | Low | unbounded purges / GPS table; home sections aborted each other; shipment N+1; webhook non-string fields; stale sitemap; CSV dropped newest; webhook Host port; HTTP inside txn | batched purges + retention + ping throttle; savepoints; batched events; coercion; invalidation; newest-first + header; Host:port; commit first | r2i::test_csv_export_…, ::test_shipping_webhook_…, ::test_sitemap_… |
 
-### Deliberately NOT changed (needs a product/ops decision — not code defects)
-- Re-authentication before self-erasure: tokens live 15 min; a step-up OTP flow is a product feature.
-- Mandatory POD for drivers: policy choice (POD URLs are now validated and private).
-- Payment-method gateway tokens supplied by the client: needs the gateway's tokenisation API; responses never expose them.
-- Referral reward before the referee's first purchase: business rule.
-- Idempotent get-or-create on some GETs (accounts/wallet/cart): harmless, kept for client compatibility.
-- 0045 historic data migration: already applied everywhere; left untouched.
+### Product decisions — implemented with the agreed defaults (`a2c5820`)
+| ID | Decision | Implementation | Test |
+|---|---|---|---|
+| P-1 | Step-up before self-erasure | `POST /account/erase` requires a fresh OTP (`{"otp": ...}`); a block (pending withdrawal) is reported before the OTP is consumed | r2o::test_self_erasure_requires_fresh_otp |
+| P-2 | Mandatory POD for drivers | delivering anything needs a photo or signature (admins exempt) | r2s::test_driver_delivery_requires_pod |
+| P-3 | Card tokens server-side only | client-sent tokens → 422; `POST /payment-methods/from-payment` saves the instrument of the caller's own successful payment, token/card fetched from the gateway | r2o::test_payment_method_token_only_from_verified_payment |
+| P-4 | Referral after first purchase | reward on the referee's first PAID, non-zero, not-refunded order (card capture or COD delivery); housekeeping sweep for the redeem/payment race; existing redemptions backfilled | test_loyalty::test_referral_flow, r3::test_referral_not_rewarded_for_free_order |
+| — | Idempotent get-or-create on some GETs; 0045 historic migration | kept (harmless / already applied everywhere) | — |
+
+## Round 3 — focused review of the round-2 + product changes (3 reviewers)
+Test file `r3` = tests/test_review_round3.py.
+
+| ID | Sev | Finding | Resolution | Test |
+|---|---|---|---|---|
+| R3-1 | High | `payments.is_excess` was added inside 0055, which some databases had already applied → column missing → every Payment query 500s | moved to 0056 with `ADD COLUMN IF NOT EXISTS` | migration round trip from 0055 with data |
+| R3-2 | High | the invoice catch-up skipped RMA-only refunds (status stayed paid); a concurrent refund made it skip earlier refunds | RMA sets partially_refunded; catch-up = settled-and-applied refunds − already credited, under the order lock | r3::test_rma_before_invoice_is_credited |
+| R3-3 | Med | credit notes / "fully refunded" counted pending/initiated refunds that may still fail | based on processed refunds only (cap still uses the non-failed sum) | r3::test_pending_refund_not_in_credit_note |
+| R3-4 | Med | withdrawable cash ignored spending → gift credit withdrawable after spending the cash; top-up refund to card likewise | cash-first: debit_order/cash_collection in the cash sum; top-up refund capped by it | r3::test_spent_cash_then_gift_credit_not_withdrawable |
+| R3-5 | Med | EXIF stripper dropped orientation (portrait photos sideways) + ICC colour; left GPS on parse failure | Pillow re-encode: orientation applied to pixels, ICC kept, all other metadata dropped; undecodable images 422 (fail closed); Pillow declared | r2o::test_upload_is_private_ref_with_exif_stripped |
+| R3-6 | Med | emails sent to unverified (now shareable) addresses | email channel only for a verified inbox | r3::test_unverified_email_gets_no_notification |
+| R3-7 | Med | address state not validated (drives place of supply) | validate_state on AddressIn/Update | r3::test_address_state_validated |
+| R3-8 | Med | 0056 downgrade failed on case-variant emails | keep the oldest owner before re-creating the strict constraint | migration round trip with A@x/a@x |
+| R3-9 | Med | freeze lifted while a later run for tomorrow was generating | the LATEST run must be frozen + finished | r3::test_freeze_holds_while_a_run_is_generating |
+| R3-10 | Low-Med | per-address throttle let an attacker lock the owner out | per (sender, recipient) cooldown/cap + per-recipient ceiling | r2o::test_email_unique_only_when_verified_and_throttled |
+| R3-11 | Low | "UT" rows stopped resolving after the alias removal | 0056 backfills shops/addresses/orders "UT" → Uttarakhand | migration round trip |
+| R3-12 | Low | erasure withdrawal check raced request_withdrawal; OTP burnt on a block | wallets locked before the check; block checked before the OTP | r2o::test_erasure_blocked_by_pending_withdrawal |
+| R3-13 | Low | erasure left uploaded files in storage | files deleted after commit (uploads prefix + POD refs) | r3::test_erasure_deletes_uploaded_files |
+| R3-14 | Low | thread view hid the newest messages past 1000 | newest N, shown oldest-first | r3::test_thread_cap_keeps_newest |
+| R3-15 | Low | NOT VALID coupon CHECK blocked updates of legacy over-limit coupons; PATCH could lower limit below uses | migration clamps legacy rows; PATCH validates | r3::test_coupon_limit_not_below_used |
+| R3-16 | Low | referral paid for ₹0 / refunded orders; redeem-vs-payment race lost rewards | total > 0, not refunded; housekeeping sweep | r3::test_referral_not_rewarded_for_free_order |
+| R3-17 | Low | 413 swallowed other errors in an exception group; duplicate saved instrument race | re-raise mixed groups; account lock before the duplicate check | suite |
 
 ## Verification
-- `uv run pytest -p no:randomly -q`: **448 passed** (400 → 448 with round-2 regression tests). `uv run ruff check .`: clean.
-- Shuffled runs (sequential, never concurrent): seeds 11, 22, 33 all pass; round 1 also passed seeds 1–5, 7, 99.
+- `uv run pytest -p no:randomly -q`: **461 passed** (296 before this work). `uv run ruff check .`: clean.
+- Shuffled runs (sequential, never concurrent): seeds 44, 55 (round 3), 11, 22, 33 (round 2), 1–5, 7, 99 (round 1) all pass.
+- Migration round trip from 0055 with edge data (case-variant emails, a "UT" shop): upgrade → downgrade to 0054 → upgrade, clean.
 - Migrations: fresh upgrade to 0056, downgrade to 0054, upgrade again — clean.
 - Docker (local-verify image; CI builds the real Dockerfile): migrated a fresh DB to 0056, `/readyz` ok, a forwarded-https trailing-slash redirect now points at https. Round 1 also verified: XFF spoof ignored, chunked 413, non-root, prod guards.

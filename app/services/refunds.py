@@ -53,6 +53,46 @@ async def refunded_via_rma(db: AsyncSession, order_id: int) -> float:
     )
 
 
+async def refunded_settled(db: AsyncSession, order_id: int) -> float:
+    """Money DEFINITELY handed back on the order (processed refunds to source on its own
+    payments + RMA store credit). Credit notes and "fully refunded" are based on this —
+    a pending/initiated refund may still fail. (The cap uses the non-failed sum.)"""
+    to_source = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(Refund.amount), 0))
+            .join(Payment, Payment.id == Refund.payment_id)
+            .where(
+                Payment.ref_type == "order",
+                Payment.ref_id == order_id,
+                Payment.is_excess.is_(False),
+                Refund.status == "processed",
+            )
+        )
+        or 0
+    )
+    return round(to_source + await refunded_via_rma(db, order_id), 2)
+
+
+async def credited_refunds(db: AsyncSession, order_id: int) -> float:
+    """Settled refunds whose credit-note effect has been APPLIED (a processed refund
+    still waiting for its ledger effect will add its own credit-note lines)."""
+    to_source = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(Refund.amount), 0))
+            .join(Payment, Payment.id == Refund.payment_id)
+            .where(
+                Payment.ref_type == "order",
+                Payment.ref_id == order_id,
+                Payment.is_excess.is_(False),
+                Refund.status == "processed",
+                Refund.ledger_applied_at.is_not(None),
+            )
+        )
+        or 0
+    )
+    return round(to_source + await refunded_via_rma(db, order_id), 2)
+
+
 async def order_refund_headroom(db: AsyncSession, order: Order) -> float:
     """How much more can be refunded on this order across BOTH paths."""
     used = await refunded_to_source(db, order.id) + await refunded_via_rma(db, order.id)

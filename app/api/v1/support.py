@@ -86,11 +86,11 @@ async def _messages(db: AsyncSession, ticket_id: int) -> list[MessageOut]:
         await db.execute(
             select(TicketMessage)
             .where(TicketMessage.ticket_id == ticket_id)
-            .order_by(TicketMessage.id)
+            .order_by(TicketMessage.id.desc())  # the NEWEST _THREAD_CAP, shown oldest-first
             .limit(_THREAD_CAP)
         )
     ).scalars().all()
-    return [MessageOut.model_validate(m) for m in rows]
+    return [MessageOut.model_validate(m) for m in reversed(rows)]
 
 
 _LIST_MSG_CAP = 50  # list views carry the latest messages only (full thread on GET by id)
