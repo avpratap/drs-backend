@@ -4,7 +4,7 @@ import datetime as dt
 import secrets
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.models.loyalty import (
     ReferralCode,
     ReferralRedemption,
 )
+from app.services import billing
 
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no ambiguous 0/O/1/I
 _MAX_POINTS = 1_000_000_000  # keep within int4; reject absurd balances cleanly
@@ -119,12 +120,27 @@ async def get_or_create_referral_code(db: AsyncSession, account_id: int) -> Refe
     return rc
 
 
+_REFERRAL_LOCK_NS = 556001
+
+
 async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) -> ReferralCode:
     rc = await db.scalar(select(ReferralCode).where(ReferralCode.code == code))
     if rc is None or rc.status != "active":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Referral code not found")
     if rc.account_id == referee_account_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot redeem your own referral code")
+    # A referee is referred ONCE, by one code: redeeming many different codes (sock-puppet
+    # farming of referral points) is refused. Serialized per referee.
+    await db.execute(
+        select(func.pg_advisory_xact_lock(_REFERRAL_LOCK_NS, referee_account_id & 0x7FFFFFFF))
+    )
+    prior = await db.scalar(
+        select(ReferralRedemption.id).where(
+            ReferralRedemption.referee_account_id == referee_account_id
+        ).limit(1)
+    )
+    if prior is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Referral already redeemed")
     dup = await db.scalar(
         select(ReferralRedemption.id).where(
             ReferralRedemption.code_id == rc.id,
@@ -189,10 +205,13 @@ async def redeem_gift_card(db: AsyncSession, code: str, account_id: int, amount:
     gc.balance = new_balance
     if new_balance == 0:
         gc.status = "redeemed"
-    db.add(
-        GiftCardTransaction(
-            gift_card_id=gc.id, delta=-amount, reason="redeem",
-            ref_type="account", ref_id=account_id, balance_after=new_balance,
-        )
+    gct = GiftCardTransaction(
+        gift_card_id=gc.id, delta=-amount, reason="redeem",
+        ref_type="account", ref_id=account_id, balance_after=new_balance,
     )
+    db.add(gct)
+    await db.flush()
+    # The redeemed value goes to the customer's wallet (store credit) in the SAME
+    # transaction — previously the card was debited and the customer received nothing.
+    await billing.wallet_adjust(db, account_id, amount, "giftcard", "gift_card_txn", gct.id)
     return gc

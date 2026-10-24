@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.gst_states import canonical, same_state
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.fulfillment import Return
 from app.models.invoice import Invoice, InvoiceLine
@@ -20,6 +21,10 @@ from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.profile import Address, UserProfile
 from app.models.shop import CustomerAccount, Shop
+
+
+class NothingToInvoice(ValueError):
+    """The document would have no lines (nothing supplied)."""
 
 
 def _today() -> dt.date:
@@ -115,8 +120,34 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
     if existing is not None:
         return existing
 
-    place = await _place_of_supply(db, order)
-    interstate = place.strip().lower() != settings.SELLER_STATE.strip().lower()
+    rows = (
+        await db.execute(
+            select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
+        )
+    ).scalars().all()
+    # Net out door returns per product so the invoice bills the NET delivered quantity
+    # (== what delivery billing charged), not the gross delivered.
+    returned_rows = (
+        await db.execute(
+            select(Return.product_id, func.sum(Return.qty_returned))
+            .where(Return.delivery_order_id == order.id)
+            .group_by(Return.product_id)
+        )
+    ).all()
+    returned = {pid: float(q or 0) for pid, q in returned_rows}
+    chargeable = []
+    for it in rows:
+        qty = round(float(it.qty_delivered or 0) - returned.get(it.product_id, 0.0), 3)
+        if qty > 0:
+            chargeable.append((it, qty))
+    if not chargeable:
+        # Fully returned / nothing delivered: no supply → no tax invoice, and no serial
+        # burned on a zero-value document (GST serials must stay gap-free).
+        raise NothingToInvoice("nothing was supplied on this delivery order")
+
+    place = canonical(await _place_of_supply(db, order)) or settings.SELLER_STATE
+    # Compare on the GST state code, so "RJ" / "rajasthan." / "08" are all intra-state.
+    interstate = not same_state(place, settings.SELLER_STATE)
     today = _today()
     fy = fy_for_date(today)
     seq = await _next_seq(db, fy)
@@ -136,27 +167,8 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
     db.add(inv)
     await db.flush()
 
-    rows = (
-        await db.execute(
-            select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
-        )
-    ).scalars().all()
-    # Net out door returns per product so the invoice bills the NET delivered quantity
-    # (== what delivery billing charged), not the gross delivered.
-    returned_rows = (
-        await db.execute(
-            select(Return.product_id, func.sum(Return.qty_returned))
-            .where(Return.delivery_order_id == order.id)
-            .group_by(Return.product_id)
-        )
-    ).all()
-    returned = {pid: float(q or 0) for pid, q in returned_rows}
-
     tax_val = cgst = sgst = igst = total = 0.0
-    for it in rows:
-        qty = round(float(it.qty_delivered or 0) - returned.get(it.product_id, 0.0), 3)
-        if qty <= 0:
-            continue
+    for it, qty in chargeable:
         product = await db.get(Product, it.product_id)
         rate = float(product.gst_rate) if product else 0.0
         # unit_price is GST-inclusive (MRP); charged is what delivery billing collected.
@@ -226,8 +238,8 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
     if existing is not None:
         return existing
 
-    place = await _order_place_of_supply(db, order)
-    interstate = place.strip().lower() != settings.SELLER_STATE.strip().lower()
+    place = canonical(await _order_place_of_supply(db, order)) or settings.SELLER_STATE
+    interstate = not same_state(place, settings.SELLER_STATE)
     today = _today()
     fy = fy_for_date(today)
     seq = await _next_seq(db, fy)
@@ -294,172 +306,208 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
     return inv
 
 
+def _new_credit_note(invoice: Invoice, *, partial: bool) -> Invoice:
+    today = _today()  # ONE read: fy and invoice_date can't straddle midnight on Mar 31
+    fy = fy_for_date(today)
+    return Invoice(
+        invoice_no="",  # numbered by the caller (needs the serial under its lock)
+        fy=fy,
+        seq_no=0,
+        account_id=invoice.account_id,
+        delivery_order_id=invoice.delivery_order_id,
+        order_id=invoice.order_id,
+        invoice_date=today,
+        seller_gstin=invoice.seller_gstin,
+        buyer_gstin=invoice.buyer_gstin,
+        place_of_supply=invoice.place_of_supply,
+        is_interstate=invoice.is_interstate,
+        is_credit_note=True,
+        is_partial=partial,
+        original_invoice_id=invoice.id,
+        status="issued",
+    )
+
+
+async def _number_credit_note(db: AsyncSession, note: Invoice) -> None:
+    note.seq_no = await _next_seq(db, note.fy, is_credit_note=True)
+    note.invoice_no = f"{settings.INVOICE_PREFIX}/CN/{note.fy}/{note.seq_no:06d}"
+
+
+async def _existing_credit_note(db: AsyncSession, invoice: Invoice) -> Invoice | None:
+    # Caller holds the per-invoice _CN_LOCK_NS lock; populate_existing so a CN updated
+    # by an earlier transaction in this same session isn't read stale.
+    return (
+        await db.execute(
+            select(Invoice)
+            .where(Invoice.original_invoice_id == invoice.id, Invoice.is_credit_note.is_(True))
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+def _retotal(note: Invoice, lines: list[InvoiceLine]) -> None:
+    note.taxable_value = round(sum(float(ln.taxable_value) for ln in lines), 2)
+    note.cgst = round(sum(float(ln.cgst) for ln in lines), 2)
+    note.sgst = round(sum(float(ln.sgst) for ln in lines), 2)
+    note.igst = round(sum(float(ln.igst) for ln in lines), 2)
+    note.total = round(sum(float(ln.line_total) for ln in lines), 2)
+    note.pdf_url = None  # any cached PDF no longer matches — re-render on next request
+
+
 async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str | None) -> Invoice:
+    """FULL reversal of an invoice. One credit note per invoice (uq_credit_note_original):
+    idempotent if a full CN exists; an existing PARTIAL CN is upgraded in place to the
+    full reversal (so the invoice is reversed exactly once). Commits."""
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
     await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, _lk(invoice.id))))
-    # ONE credit note per invoice (uq_credit_note_original partial unique index). Find any
-    # existing CN for this invoice:
-    #   * already a FULL reversal (is_partial=False) -> idempotent, return it.
-    #   * a PARTIAL (RMA) CN -> UPGRADE it in place to the full reversal. The unique index
-    #     forbids inserting a second CN, so a full refund-to-source can't add one on top;
-    #     upgrading reverses the invoice exactly once (no GST over- or under-reversal).
-    existing = await db.scalar(
-        select(Invoice).where(
-            Invoice.original_invoice_id == invoice.id,
-            Invoice.is_credit_note.is_(True),
-        )
-    )
+    existing = await _existing_credit_note(db, invoice)
     if existing is not None and not existing.is_partial:
         return existing
 
     orig_lines = (
         await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
     ).scalars().all()
-
-    def _full_negation_lines(target_id: int) -> list[InvoiceLine]:
-        return [
-            InvoiceLine(
-                invoice_id=target_id,
-                product_id=ln.product_id,
-                hsn_code=ln.hsn_code,
-                description=(reason or "Credit note") + f" — {ln.description or ''}",
-                qty=-float(ln.qty),
-                unit_price=float(ln.unit_price),
-                taxable_value=round(-float(ln.taxable_value), 2),
-                gst_rate=float(ln.gst_rate),
-                cgst=round(-float(ln.cgst), 2),
-                sgst=round(-float(ln.sgst), 2),
-                igst=round(-float(ln.igst), 2),
-                line_total=round(-float(ln.line_total), 2),
-            )
-            for ln in orig_lines
-        ]
-
     if existing is not None:
-        # Upgrade the partial CN to the FULL reversal: swap its lines + header totals for
-        # the exact negation of the invoice and clear is_partial.
         await db.execute(delete(InvoiceLine).where(InvoiceLine.invoice_id == existing.id))
-        existing.is_partial = False
-        existing.taxable_value = round(-float(invoice.taxable_value), 2)
-        existing.cgst = round(-float(invoice.cgst), 2)
-        existing.sgst = round(-float(invoice.sgst), 2)
-        existing.igst = round(-float(invoice.igst), 2)
-        existing.total = round(-float(invoice.total), 2)
-        for line in _full_negation_lines(existing.id):
-            db.add(line)
-        await db.commit()
-        await db.refresh(existing)
-        return existing
-
-    fy = fy_for_date(_today())
-    seq = await _next_seq(db, fy, is_credit_note=True)
-    note = Invoice(
-        invoice_no=f"{settings.INVOICE_PREFIX}/CN/{fy}/{seq:06d}",
-        fy=fy,
-        seq_no=seq,
-        account_id=invoice.account_id,
-        delivery_order_id=invoice.delivery_order_id,
-        order_id=invoice.order_id,
-        invoice_date=_today(),
-        seller_gstin=invoice.seller_gstin,
-        buyer_gstin=invoice.buyer_gstin,
-        place_of_supply=invoice.place_of_supply,
-        is_interstate=invoice.is_interstate,
-        is_credit_note=True,
-        original_invoice_id=invoice.id,
-        taxable_value=round(-float(invoice.taxable_value), 2),
-        cgst=round(-float(invoice.cgst), 2),
-        sgst=round(-float(invoice.sgst), 2),
-        igst=round(-float(invoice.igst), 2),
-        total=round(-float(invoice.total), 2),
-        status="issued",
-    )
-    db.add(note)
-    await db.flush()
-    for line in _full_negation_lines(note.id):
-        db.add(line)
+        note = existing
+        note.is_partial = False
+    else:
+        note = _new_credit_note(invoice, partial=False)
+        await _number_credit_note(db, note)
+        db.add(note)
+        await db.flush()
+    new_lines = [
+        InvoiceLine(
+            invoice_id=note.id,
+            product_id=ln.product_id,
+            hsn_code=ln.hsn_code,
+            description=((reason or "Credit note") + f" — {ln.description or ''}")[:255],
+            qty=-float(ln.qty),
+            unit_price=float(ln.unit_price),
+            taxable_value=round(-float(ln.taxable_value), 2),
+            gst_rate=float(ln.gst_rate),
+            cgst=round(-float(ln.cgst), 2),
+            sgst=round(-float(ln.sgst), 2),
+            igst=round(-float(ln.igst), 2),
+            line_total=round(-float(ln.line_total), 2),
+        )
+        for ln in orig_lines
+    ]
+    db.add_all(new_lines)
+    _retotal(note, new_lines)
     await db.commit()
     await db.refresh(note)
     return note
 
 
 async def generate_credit_note_for_lines(
-    db: AsyncSession, invoice: Invoice, returned_qty: dict[int, float], reason: str | None,
+    db: AsyncSession, invoice: Invoice, returned_qty: dict[int, float] | None, reason: str | None,
     amount: float | None = None,
-) -> Invoice:
-    """Partial GST credit note for an RMA return. Reverses the RETURNED quantities,
-    allocating each product's returned qty ACROSS that product's invoice lines (so a
-    product spanning >1 line isn't over-reversed), and — when `amount` is given and is
-    less than the returned-lines value — scales the whole reversal to the amount actually
-    refunded (goodwill partials don't over-reverse output GST). Marked is_partial so it
-    won't be mistaken for the full-reversal credit note. Flush-only: the caller owns the
-    commit (and the single-shot RMA status guard is what prevents duplicates)."""
+) -> Invoice | None:
+    """PARTIAL GST credit note, cumulative across calls (flush-only; caller commits).
+
+    * RMA mode (`returned_qty`): reverses the returned quantities, capped per product at
+      what the invoice still has un-reversed (qty AND value), scaled down to `amount`
+      when less was refunded (goodwill partials don't over-reverse output GST).
+    * Value mode (`returned_qty=None`, `amount` given): a partial refund to source with
+      no goods returned — reverses `amount` of value (qty 0) spread across products in
+      proportion to their un-reversed value.
+
+    One credit note per invoice: the first call creates the partial CN, later calls ADD
+    lines to it and re-total it (a second CN would violate uq_credit_note_original and
+    500). Once a FULL CN exists nothing is left to reverse → returns it unchanged.
+    Returns None when there is nothing to reverse (no empty document burns a serial)."""
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
-    fy = fy_for_date(_today())
-    seq = await _next_seq(db, fy, is_credit_note=True)
-    note = Invoice(
-        invoice_no=f"{settings.INVOICE_PREFIX}/CN/{fy}/{seq:06d}",
-        fy=fy, seq_no=seq, account_id=invoice.account_id,
-        delivery_order_id=invoice.delivery_order_id, order_id=invoice.order_id,
-        invoice_date=_today(),
-        seller_gstin=invoice.seller_gstin, buyer_gstin=invoice.buyer_gstin,
-        place_of_supply=invoice.place_of_supply, is_interstate=invoice.is_interstate,
-        is_credit_note=True, is_partial=True, original_invoice_id=invoice.id, status="issued",
-    )
-    db.add(note)
-    await db.flush()
+    await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, _lk(invoice.id))))
+    existing = await _existing_credit_note(db, invoice)
+    if existing is not None and not existing.is_partial:
+        return existing
 
-    lines = (
-        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id))
+    inv_lines = (
+        await db.execute(
+            select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id).order_by(InvoiceLine.id)
+        )
     ).scalars().all()
-    # Allocate each product's returned qty across its lines (a product may appear on >1).
-    remaining = {pid: float(q) for pid, q in returned_qty.items()}
-    portions: list[tuple[InvoiceLine, float, float]] = []  # (line, alloc_qty, frac)
-    gross_value = 0.0
-    for ln in lines:
-        line_qty = float(ln.qty)
-        rem = remaining.get(ln.product_id, 0.0)
-        if rem <= 0 or line_qty <= 0:
-            continue
-        alloc = min(rem, line_qty)
-        remaining[ln.product_id] = rem - alloc
-        frac = alloc / line_qty
-        gross_value += float(ln.line_total) * frac
-        portions.append((ln, alloc, frac))
-    # Scale to the actually-refunded amount if it is less than the returned-lines value.
-    scale = 1.0
-    if amount is not None and gross_value > 0:
-        scale = min(float(amount), gross_value) / gross_value
+    prior_lines = (
+        (
+            await db.execute(
+                select(InvoiceLine).where(InvoiceLine.invoice_id == existing.id)
+            )
+        ).scalars().all()
+        if existing is not None else []
+    )
+    # Per-product: invoiced qty/value, already-reversed qty/value, and a template line.
+    inv_qty: dict[int | None, float] = {}
+    inv_val: dict[int | None, float] = {}
+    tmpl: dict[int | None, InvoiceLine] = {}
+    for ln in inv_lines:
+        inv_qty[ln.product_id] = inv_qty.get(ln.product_id, 0.0) + float(ln.qty)
+        inv_val[ln.product_id] = inv_val.get(ln.product_id, 0.0) + float(ln.line_total)
+        tmpl.setdefault(ln.product_id, ln)
+    rev_qty: dict[int | None, float] = {}
+    rev_val: dict[int | None, float] = {}
+    for ln in prior_lines:
+        rev_qty[ln.product_id] = rev_qty.get(ln.product_id, 0.0) - float(ln.qty)
+        rev_val[ln.product_id] = rev_val.get(ln.product_id, 0.0) - float(ln.line_total)
 
-    tax_val = cgst = sgst = igst = total = 0.0
-    for ln, alloc, frac in portions:
-        f = frac * scale
-        taxable = round(-float(ln.taxable_value) * f, 2)
-        c = round(-float(ln.cgst) * f, 2)
-        s = round(-float(ln.sgst) * f, 2)
-        i = round(-float(ln.igst) * f, 2)
-        lt = round(-float(ln.line_total) * f, 2)
-        db.add(
+    def left_val(pid) -> float:
+        return max(round(inv_val[pid] - rev_val.get(pid, 0.0), 2), 0.0)
+
+    # (product, qty to reverse, gross value to reverse) before scaling to `amount`.
+    portions: list[tuple[int | None, float, float]] = []
+    if returned_qty is not None:
+        for pid, q in returned_qty.items():
+            if pid not in inv_qty or inv_qty[pid] <= 0 or float(q) <= 0:
+                continue
+            qty = min(float(q), max(inv_qty[pid] - rev_qty.get(pid, 0.0), 0.0))
+            if qty <= 0:
+                continue
+            gross = min(inv_val[pid] * qty / inv_qty[pid], left_val(pid))
+            portions.append((pid, qty, gross))
+    elif amount is not None:
+        portions = [(pid, 0.0, left_val(pid)) for pid in inv_val if left_val(pid) > 0]
+    gross_total = sum(g for _, _, g in portions)
+    if gross_total <= 0:
+        return existing
+    target = round(gross_total if amount is None else min(float(amount), gross_total), 2)
+    if target <= 0:
+        return existing
+
+    if existing is None:
+        note = _new_credit_note(invoice, partial=True)
+        await _number_credit_note(db, note)
+        db.add(note)
+        await db.flush()
+    else:
+        note = existing
+    # Allocate `target` across portions by gross value; the LAST portion takes the
+    # remainder so the lines sum to target to the paisa. Each line total is split with
+    # the same inclusive formula as the invoice, so taxable + tax == line total exactly.
+    new_lines: list[InvoiceLine] = []
+    running = 0.0
+    for idx, (pid, qty, gross) in enumerate(portions):
+        if idx < len(portions) - 1:
+            lt = round(target * gross / gross_total, 2)
+        else:
+            lt = round(target - running, 2)
+        running = round(running + lt, 2)
+        if lt <= 0 and qty <= 0:
+            continue
+        t = tmpl[pid]
+        taxable, c, s_, i = _inclusive_split(lt, float(t.gst_rate), invoice.is_interstate)
+        new_lines.append(
             InvoiceLine(
-                invoice_id=note.id, product_id=ln.product_id, hsn_code=ln.hsn_code,
-                description=(reason or "Credit note") + f" — {ln.description or ''}",
-                qty=-round(alloc, 3), unit_price=float(ln.unit_price),
-                taxable_value=taxable, gst_rate=float(ln.gst_rate),
-                cgst=c, sgst=s, igst=i, line_total=lt,
+                invoice_id=note.id, product_id=pid, hsn_code=t.hsn_code,
+                description=((reason or "Credit note") + f" — {t.description or ''}")[:255],
+                qty=-round(qty, 3), unit_price=float(t.unit_price),
+                taxable_value=-taxable, gst_rate=float(t.gst_rate),
+                cgst=-c, sgst=-s_, igst=-i, line_total=-lt,
             )
         )
-        tax_val += taxable
-        cgst += c
-        sgst += s
-        igst += i
-        total += lt
-    note.taxable_value = round(tax_val, 2)
-    note.cgst = round(cgst, 2)
-    note.sgst = round(sgst, 2)
-    note.igst = round(igst, 2)
-    note.total = round(total, 2)
+    db.add_all(new_lines)
+    _retotal(note, list(prior_lines) + new_lines)
     await db.flush()
     await db.refresh(note)
     return note

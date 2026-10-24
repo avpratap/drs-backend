@@ -391,6 +391,15 @@ async def test_full_credit_note_nets_out_prior_partial(client):
     # full reversal — no second CN, and no GST double-reversal.
     r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
     assert r.status_code == 200
+    # M6: the ₹500 already refunded via the RMA is counted — only ₹1000 goes to source
+    # (previously ₹1500 → ₹2000 paid out on a ₹1500 order).
+    assert r.json()["amount"] == 1000.0
+    assert (await client.get(f"/api/v1/orders/{oid}", headers=auth(cust))).json()[
+        "payment_status"
+    ] == "refunded"
+    # Nothing left to refund on either path.
+    again = await client.post(f"/api/v1/payments/{pay_id}/refund", json={"amount": 1}, headers=auth(admin))
+    assert again.status_code == 422
 
     invoices = (await client.get("/api/v1/invoices", headers=auth(admin))).json()
     cns = [i for i in invoices if i["is_credit_note"] and i["original_invoice_id"] == inv["id"]]

@@ -4,6 +4,7 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -93,11 +94,20 @@ async def _my_account(db: AsyncSession, user: User) -> CustomerAccount:
     """Resolve the caller's account, auto-creating a retail one (mirrors orders)."""
     acct = await db.scalar(select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id))
     if acct is None:
-        acct = CustomerAccount(
-            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
-        )
-        db.add(acct)
-        await db.flush()
+        # Race-safe create (a concurrent first call may win uq_customer_accounts_owner).
+        try:
+            async with db.begin_nested():
+                acct = CustomerAccount(
+                    owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+                )
+                db.add(acct)
+                await db.flush()
+        except IntegrityError:
+            acct = (
+                await db.execute(
+                    select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+                )
+            ).scalar_one()
     return acct
 
 
@@ -158,7 +168,13 @@ async def gift_card_balance(
 ):
     """Check a gift card's remaining balance/status by its code (before redeeming)."""
     gc = await db.scalar(select(GiftCard).where(GiftCard.code == code))
-    if gc is None:
+    # A card issued to a specific account is visible only to that account (404 — same
+    # non-enumeration rule as redeem).
+    if gc is None or (
+        gc.issued_to_account_id is not None
+        and user.role != "admin"
+        and gc.issued_to_account_id != (await _my_account(db, user)).id
+    ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
     return gc
 

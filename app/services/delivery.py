@@ -146,9 +146,18 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     # so a return can never reduce the charge for a *different* delivered product.
     # bill_delivery is idempotent per delivery_order, so a corrected re-submit never
     # double-charges.
+    # Round PER LINE exactly like the GST invoice does (charged = round(price * net qty, 2)
+    # per line) — rounding the sum once drifted a paisa from the invoice total.
     net = round(
         sum(
-            max(float(it.unit_price) * (float(it.qty_delivered) - returned_qty.get(pid, 0.0)), 0.0)
+            round(
+                max(
+                    float(it.unit_price)
+                    * round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3),
+                    0.0,
+                ),
+                2,
+            )
             for pid, it in items.items()
         ),
         2,

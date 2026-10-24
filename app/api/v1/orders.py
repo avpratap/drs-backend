@@ -8,11 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
+from app.models.invoice import InvoiceLine
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
+from app.schemas.invoice import InvoiceLineOut, InvoiceOut
 from app.schemas.order import OrderCreate, OrderItemOut, OrderOut
 from app.services import coupons, invoicing
 from app.services import orders as order_service
@@ -167,22 +169,6 @@ async def reorder(
 
 
 # ---------- Invoice + live tracking ----------
-class InvoiceOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    invoice_no: str
-    invoice_date: dt.date
-    # A GST tax invoice must show the place of supply and the tax split so the buyer can
-    # see CGST+SGST (intra-state) vs IGST (inter-state).
-    place_of_supply: str | None = None
-    is_interstate: bool = False
-    taxable_value: float = 0.0
-    cgst: float = 0.0
-    sgst: float = 0.0
-    igst: float = 0.0
-    total: float
-
-
 class TrackingEventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     status: str
@@ -260,7 +246,13 @@ async def generate_order_invoice(
             status.HTTP_409_CONFLICT, "Invoice is available only after the order is paid"
         )
     inv = await invoicing.generate_for_order(db, order)
-    return inv
+    # Build the full view (with lines) — returning the ORM row gave `lines: []`.
+    lines = (
+        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == inv.id))
+    ).scalars().all()
+    out = InvoiceOut.model_validate(inv)
+    out.lines = [InvoiceLineOut.model_validate(ln) for ln in lines]
+    return out
 
 
 @router.get("/{order_id}/tracking", response_model=OrderTrackingOut, operation_id="track_order")

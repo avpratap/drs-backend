@@ -13,6 +13,7 @@ from app.models.invoice import Invoice
 from app.models.order import Order, OrderItem
 from app.models.rma import ReturnRequest, ReturnRequestItem
 from app.services import billing, invoicing
+from app.services import refunds as refund_acct
 
 
 async def create_request(db: AsyncSession, user, order: Order, items, reason) -> ReturnRequest:
@@ -139,6 +140,17 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"Refund {amount} exceeds returned value {cap}",
         )
+    # One cap across BOTH refund paths (RMA store credit + refund to source), taken under
+    # the order lock: a full refund-to-source followed by an RMA refund (or vice versa)
+    # must never pay out more than the customer paid.
+    order = await refund_acct.lock_order(db, rr.order_id)
+    if order is not None:
+        headroom = await refund_acct.order_refund_headroom(db, order)
+        if round(float(amount), 2) > headroom:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Refund {amount} exceeds what is still refundable on the order ({headroom})",
+            )
     await billing.wallet_adjust(db, rr.account_id, round(float(amount), 2), "refund", "rma", rr.id)
     rr.refund_amount = round(float(amount), 2)
     rr.status = "refunded"
@@ -150,14 +162,15 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
         )
     )
     if inv is not None:
-        returned = {
-            li.product_id: float(li.qty)
-            for li in (
-                await db.execute(
-                    select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
-                )
-            ).scalars().all()
-        }
+        # SUM per product: two RMA lines for the same product must both be reversed (a
+        # dict comprehension kept only the last one, under-reversing GST).
+        returned: dict[int, float] = {}
+        for li in (
+            await db.execute(
+                select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
+            )
+        ).scalars().all():
+            returned[li.product_id] = returned.get(li.product_id, 0.0) + float(li.qty)
         # Prorate the credit note to the amount actually refunded (goodwill partials
         # must not over-reverse output GST).
         await invoicing.generate_credit_note_for_lines(

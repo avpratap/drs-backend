@@ -79,13 +79,29 @@ async def test_no_double_open_order_payment(client):
         headers=auth(cust),
     )
     assert first.status_code == 200
-    # A second open payment for the same order is blocked (no double gateway charge).
+    # M3: a second create RESUMES the open checkout (same payment + gateway order) — it
+    # never opens a second gateway order (no double charge) and never wedges the order.
     second = await client.post(
         "/api/v1/payments/create",
         json={"purpose": "order_payment", "order_id": order["id"]},
         headers=auth(cust),
     )
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.json()["payment_id"] == first.json()["payment_id"]
+    assert second.json()["gateway_order_id"] == first.json()["gateway_order_id"]
+    # Once paid, creating another payment is refused.
+    await client.post(
+        "/api/v1/payments/verify",
+        json={"gateway_order_id": first.json()["gateway_order_id"], "gateway_payment_id": "p",
+              "signature": "dev"},
+        headers=auth(cust),
+    )
+    third = await client.post(
+        "/api/v1/payments/create",
+        json={"purpose": "order_payment", "order_id": order["id"]},
+        headers=auth(cust),
+    )
+    assert third.status_code == 409
 
 
 async def test_interstate_d2c_order_invoice_uses_igst(client):

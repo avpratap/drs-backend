@@ -27,8 +27,12 @@ class Refund(Base):
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(
         String(12), default="initiated", nullable=False
-    )  # initiated|processed|failed
+    )  # initiated|pending|processed|failed
     gateway_refund_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Set when the refund's wallet/order/credit-note effect has been applied (exactly once).
+    ledger_applied_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -54,6 +54,9 @@ async def wallet_adjust(
     *,
     allow_negative: bool = False,
 ) -> Wallet:
+    # Quantize ONCE so the stored txn amount and the balance move are the same paisa
+    # value (Numeric(12,2) would otherwise round 0.125 -> 0.13 while balance moved 0.12).
+    amount = round(float(amount), 2)
     wallet = await get_or_create_wallet(db, account_id, lock=True)  # row-locked
     new_balance = round(float(wallet.balance) + amount, 2)
     if amount < 0 and new_balance < 0 and not allow_negative:

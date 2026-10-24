@@ -96,7 +96,9 @@ async def request_withdrawal(
 ):
     """Customer requests a wallet payout (must have the balance; admin approves)."""
     account = await _my_account(db, user)
-    wallet = await billing_service.get_or_create_wallet(db, account.id)
+    # Lock the wallet so two concurrent requests can't both pass the available-balance
+    # check (they serialize; the second sees the first's 'requested' reservation).
+    wallet = await billing_service.get_or_create_wallet(db, account.id, lock=True)
     # Reserve against already-pending requests so a customer can't open several requests
     # that together exceed the balance (available = balance - sum of 'requested').
     pending = float(

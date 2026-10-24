@@ -17,6 +17,14 @@ class Settings(BaseSettings):
             raise ValueError("ENV must be one of: dev, test, prod")
         return v
 
+    @field_validator("INVOICE_PREFIX")
+    @classmethod
+    def _validate_invoice_prefix(cls, v: str) -> str:
+        # invoice_no is String(32): "{prefix}/CN/{fy:7}/{seq:06d}" leaves 11 chars for it.
+        if not v or len(v) > 10 or "/" in v:
+            raise ValueError("INVOICE_PREFIX must be 1-10 characters with no '/'")
+        return v
+
     DATABASE_URL: str = "postgresql+asyncpg://drs:drs@localhost:5432/drs"
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -78,6 +86,9 @@ class Settings(BaseSettings):
     R2_SECRET_KEY: str = ""
     R2_BUCKET: str = ""
     R2_PUBLIC_BASE: str = ""  # public CDN base URL for stored objects
+    # Bucket for private documents (invoice PDFs) — must have NO public/CDN binding;
+    # objects are only reachable via short-lived presigned URLs.
+    R2_PRIVATE_BUCKET: str = ""
     STORAGE_DIR: str = ".storage"  # dev-stub local directory
 
     # WhatsApp (Gupshup BSP). Empty key -> dev stub (messages logged, not sent).

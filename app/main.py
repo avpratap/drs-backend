@@ -6,10 +6,13 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from sqlalchemy.exc import DataError, IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
+from app.core.bodylimit import BodySizeLimitMiddleware
 from app.core.config import settings
 from app.core.db import engine
 from app.core.idempotency import IdempotencyMiddleware
@@ -69,25 +72,9 @@ app.add_middleware(RequestContextMiddleware)  # times & tags every request
 
 # Hard cap on request body size (defense against a single huge-body DoS). Generous
 # enough for the 5 MB image uploads + multipart framing; blocks multi-hundred-MB bodies.
+# Enforced on the bytes actually received (chunked bodies carry no Content-Length).
 _MAX_BODY_BYTES = 8 * 1024 * 1024
-
-
-@app.middleware("http")
-async def limit_body_size(request: Request, call_next):
-    cl = request.headers.get("content-length")
-    if cl is not None:
-        try:
-            if int(cl) > _MAX_BODY_BYTES:
-                return JSONResponse(
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                    content={"detail": "Request body too large", "error_code": "payload_too_large"},
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": "Invalid Content-Length", "error_code": "bad_request"},
-            )
-    return await call_next(request)
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=_MAX_BODY_BYTES)
 
 
 @app.middleware("http")
@@ -160,6 +147,35 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+@app.exception_handler(IntegrityError)
+async def integrity_exception_handler(request: Request, exc: IntegrityError):
+    # Safety net: a constraint violation (duplicate / dangling FK / CHECK) is a client
+    # conflict, not a server crash. Specific paths still validate up front; this stops
+    # any missed one from surfacing as an opaque 500. The DB message is not echoed.
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "Request conflicts with existing data", "error_code": "conflict"},
+    )
+
+
+@app.exception_handler(DataError)
+async def data_exception_handler(request: Request, exc: DataError):
+    # Value out of range for its column (too long / numeric overflow): invalid input.
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": "A value is out of range or too long", "error_code": "unprocessable_entity"},
+    )
+
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_handler(request: Request, exc: ValidationError):
+    # A schema built inside a handler (not request parsing) failed validation.
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": _sanitize(exc.errors()), "error_code": "unprocessable_entity"},
+    )
+
+
 from app.api.v1.content import public_root_router  # noqa: E402
 
 app.include_router(health_router)  # /healthz, /readyz
@@ -181,10 +197,16 @@ if not _storage_enabled():
     from fastapi import HTTPException
     from fastapi.responses import FileResponse
 
+    from app.core.storage import PRIVATE_PREFIX, verify_dev_signature
+
     @app.get("/files/{key:path}", include_in_schema=False)
-    async def serve_file(key: str):
+    async def serve_file(key: str, exp: str | None = None, sig: str | None = None):
         safe = os.path.normpath(key).replace("\\", "/")
         if safe.startswith("..") or os.path.isabs(safe):
+            raise HTTPException(status_code=404)
+        # Private objects (invoices) need the short-lived signature minted after an
+        # authorization check; 404 (not 403) so their existence isn't probeable.
+        if safe.startswith(PRIVATE_PREFIX) and not verify_dev_signature(safe, exp, sig):
             raise HTTPException(status_code=404)
         path = os.path.join(settings.STORAGE_DIR, safe)
         if not os.path.isfile(path):

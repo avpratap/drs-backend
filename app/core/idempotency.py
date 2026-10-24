@@ -18,6 +18,9 @@ from app.core.security import decode_token
 from app.models.idempotency import IdempotencyKey
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_MAX_KEY_LEN = 100  # stored as "<sub>:<key>" in a String(128) column
+# Never persist these responses (they carry access/refresh tokens) for 48h replay.
+_SKIP_PREFIXES = ("/api/v1/auth/",)
 _HOP_HEADERS = {"content-length", "content-type"}
 
 
@@ -37,6 +40,17 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         raw_key = request.headers.get("Idempotency-Key")
         if request.method not in _WRITE_METHODS or not raw_key:
             return await call_next(request)
+        if request.url.path.startswith(_SKIP_PREFIXES):
+            return await call_next(request)
+        if len(raw_key) > _MAX_KEY_LEN:
+            # A longer key overflowed the column → DataError 500.
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": f"Idempotency-Key must be at most {_MAX_KEY_LEN} characters",
+                    "error_code": "bad_request",
+                },
+            )
         # Scope the key to the caller so two users can't collide / replay each other.
         key = f"{_subject(request)}:{raw_key}"
 
@@ -47,9 +61,9 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
 
         request._receive = _receive
 
-        path = request.url.path
+        path = request.url.path[:255]  # column width; the hash below covers the full path
         req_hash = hashlib.sha256(
-            b"%s:%s:%s" % (request.method.encode(), path.encode(), body)
+            b"%s:%s:%s" % (request.method.encode(), request.url.path.encode(), body)
         ).hexdigest()
 
         # Try to claim the key (unique constraint arbitrates concurrent claims).
