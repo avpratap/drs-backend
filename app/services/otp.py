@@ -56,6 +56,15 @@ async def request_otp(phone: str, ip: str | None = None) -> str | None:
     return otp if settings.ENV != "prod" else None
 
 
+# Compare-and-delete in one atomic step (Redis runs a script without interleaving).
+_CONSUME_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
 async def verify_otp(phone: str, otp: str) -> bool:
     stored = await redis_client.get(f"otp:{phone}")
     if not stored:
@@ -66,7 +75,13 @@ async def verify_otp(phone: str, otp: str) -> bool:
         await redis_client.delete(f"otp:{phone}", f"otp:attempts:{phone}")
         return False
 
-    if secrets.compare_digest(stored, _hash_otp(phone, otp)):
-        await redis_client.delete(f"otp:{phone}", f"otp:attempts:{phone}", f"otp:cooldown:{phone}")
-        return True
-    return False
+    expected = _hash_otp(phone, otp)
+    if not secrets.compare_digest(stored, expected):
+        return False
+    # Consume atomically: only the request that actually deletes the stored hash wins, so
+    # two concurrent verifies with the right code can't BOTH log in (replay race).
+    consumed = await redis_client.eval(_CONSUME_LUA, 1, f"otp:{phone}", expected)
+    if not consumed:
+        return False
+    await redis_client.delete(f"otp:attempts:{phone}", f"otp:cooldown:{phone}")
+    return True

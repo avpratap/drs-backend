@@ -2,6 +2,8 @@
 
 - locations.driver_user_id: a vehicle location bound to its driver; deliveries deduct
   stock from the van instead of always the default warehouse.
+- users.email_verified_at: account emails must be verified before they can act on
+  email-keyed data (erasure deleting a newsletter row).
 - refunds.ledger_applied_at: the refund's wallet/order/credit-note effect is applied
   exactly once (re-applied idempotently by admin reconciliation after a failure).
 - cart_items UNIQUE(cart_id, product_id): concurrent adds can't create duplicate lines.
@@ -30,6 +32,9 @@ def upgrade() -> None:
     op.drop_constraint("ck_payments_amount_pos", "payments", type_="check")
     op.create_check_constraint(
         "ck_payments_amount_pos", "payments", "amount > 0 OR (gateway = 'none' AND amount = 0)"
+    )
+    op.add_column(
+        "users", sa.Column("email_verified_at", sa.DateTime(timezone=True), nullable=True)
     )
     op.add_column(
         "locations",
@@ -101,5 +106,6 @@ def downgrade() -> None:
     op.drop_constraint("uq_subscription_items_sub_product", "subscription_items", type_="unique")
     op.drop_constraint("uq_cart_items_cart_product", "cart_items", type_="unique")
     op.drop_column("refunds", "ledger_applied_at")
+    op.drop_column("users", "email_verified_at")
     op.drop_index("ix_locations_driver_user_id", table_name="locations")
     op.drop_column("locations", "driver_user_id")

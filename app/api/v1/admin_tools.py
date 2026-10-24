@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clientip import client_ip
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
@@ -116,7 +117,7 @@ async def export_csv(
     data = await svc.export_csv(db, kind)
     await svc.record_audit(
         db, user.id, "export", kind, None,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
     )
     await db.commit()
     return Response(

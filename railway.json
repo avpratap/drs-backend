@@ -6,7 +6,7 @@
   },
   "deploy": {
     "//migrations": "MVP runs ONE instance, so migrating in startCommand is safe. Before scaling to >1 instance, set this as a Railway Pre-Deploy Command instead (see docs/DEPLOY.md) so concurrent boots can't race the migration — the way fly.toml uses release_command.",
-    "startCommand": "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'",
+    "startCommand": "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers",
     "numReplicas": 1,
     "healthcheckPath": "/readyz",
     "healthcheckTimeout": 30,

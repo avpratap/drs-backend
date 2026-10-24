@@ -10,7 +10,7 @@ from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +64,19 @@ class ArticleIn(BaseModel):
     _v_cover = field_validator("cover_image_url")(lambda v: _safe_web_url(v))
 
 
+def _reject_nulls(*fields: str):
+    """PATCH: a field may be omitted, but an explicit null on a NOT NULL column used to
+    reach the DB and 500 (IntegrityError). Reject it as a 422 instead."""
+
+    def check(self):
+        bad = [f for f in fields if f in self.model_fields_set and getattr(self, f) is None]
+        if bad:
+            raise ValueError(f"{', '.join(bad)} cannot be null")
+        return self
+
+    return model_validator(mode="after")(check)
+
+
 class ArticleUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     body_html: str | None = Field(default=None, max_length=_BODY_MAX)
@@ -76,6 +89,7 @@ class ArticleUpdate(BaseModel):
     cover_image_url: str | None = Field(default=None, max_length=512)
 
     _v_cover = field_validator("cover_image_url")(lambda v: _safe_web_url(v))
+    _v_nulls = _reject_nulls("title", "body_html")
 
 
 class ArticleOut(BaseModel):
@@ -108,6 +122,8 @@ class PageUpdate(BaseModel):
     body_html: str | None = Field(default=None, max_length=_BODY_MAX)
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
+
+    _v_nulls = _reject_nulls("title", "body_html")
 
 
 class PageOut(BaseModel):
@@ -144,6 +160,7 @@ class BannerUpdate(BaseModel):
     valid_to: dt.date | None = None
 
     _v_urls = field_validator("image_url", "cta_link")(lambda v: _safe_web_url(v))
+    _v_nulls = _reject_nulls("title", "image_url", "position", "active")
 
 
 class BannerOut(BaseModel):

@@ -32,4 +32,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
 
 # --proxy-headers so X-Forwarded-For is honoured behind Railway/Fly.
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Behind the platform proxy (1 hop): the client IP is derived from X-Forwarded-For by
+# app.core.clientip, counting hops from the right (never the spoofable leftmost entry).
+ENV TRUSTED_PROXY_HOPS=1
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

@@ -76,6 +76,31 @@ async def _messages(db: AsyncSession, ticket_id: int) -> list[MessageOut]:
     return [MessageOut.model_validate(m) for m in rows]
 
 
+_LIST_MSG_CAP = 50  # list views carry the latest messages only (full thread on GET by id)
+
+
+async def _with_messages_many(db: AsyncSession, tickets: list[SupportTicket]) -> list[TicketOut]:
+    """List views with ONE batched message query (was a query per ticket — N+1), capped
+    per ticket so a long thread can't bloat a 200-row admin page."""
+    if not tickets:
+        return []
+    by_ticket: dict[int, list[MessageOut]] = {}
+    for m in (
+        await db.execute(
+            select(TicketMessage)
+            .where(TicketMessage.ticket_id.in_([t.id for t in tickets]))
+            .order_by(TicketMessage.ticket_id, TicketMessage.id)
+        )
+    ).scalars():
+        by_ticket.setdefault(m.ticket_id, []).append(MessageOut.model_validate(m))
+    outs = []
+    for t in tickets:
+        o = TicketOut.model_validate(t)
+        o.messages = by_ticket.get(t.id, [])[-_LIST_MSG_CAP:]
+        outs.append(o)
+    return outs
+
+
 async def _with_messages(db: AsyncSession, ticket: SupportTicket) -> TicketOut:
     out = TicketOut.model_validate(ticket)
     out.messages = await _messages(db, ticket.id)
@@ -116,7 +141,7 @@ async def list_my_tickets(
             .offset(page.offset)
         )
     ).scalars().all()
-    return [await _with_messages(db, t) for t in rows]
+    return await _with_messages_many(db, list(rows))
 
 
 @router.get("/support/tickets/{ticket_id}", response_model=TicketOut, operation_id="get_ticket")
@@ -162,7 +187,7 @@ async def admin_list_tickets(
     if category:
         q = q.where(SupportTicket.category == category)
     rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _with_messages(db, t) for t in rows]
+    return await _with_messages_many(db, list(rows))
 
 
 @router.post(

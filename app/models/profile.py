@@ -141,7 +141,7 @@ class Consent(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     purpose: Mapped[str] = mapped_column(
         String(40), nullable=False
-    )  # whatsapp_optin|marketing_sms|marketing_email|data_processing
+    )  # whatsapp_optin|marketing_sms|marketing_email|marketing_push|data_processing
     action: Mapped[str] = mapped_column(String(10), nullable=False)  # granted|withdrawn
     source: Mapped[str] = mapped_column(String(16), default="app", nullable=False)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)

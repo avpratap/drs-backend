@@ -132,10 +132,20 @@ async def resend_notification(notif_id: int, db: AsyncSession = Depends(get_db))
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Skipped notifications can't be resent (gating applied)"
         )
+    if (
+        notif.status == "sending"
+        and notif.last_attempt_at is not None
+        and dt.datetime.now(dt.UTC) - notif.last_attempt_at < dt.timedelta(minutes=5)
+    ):
+        # Its provider call may still be in flight — resending now can double-send.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Notification is being sent; retry in a few minutes"
+        )
     notif.status = "queued"
     notif.attempts = 0  # reset so a notification that hit max-attempts is actually retried
     notif.next_attempt_at = None
-    notif.scheduled_for = None
+    if notif.category != "marketing":
+        notif.scheduled_for = None  # marketing keeps its quiet-hours deferral
     notif.error = None
     await db.commit()
     return ResendOut(id=notif.id, status=notif.status)

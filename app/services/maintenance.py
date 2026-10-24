@@ -1,8 +1,9 @@
 """Retention / housekeeping: prune rows that only need short-term retention so
 idempotency_keys, webhook_events and notifications don't grow unbounded."""
 import datetime as dt
+import logging
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.idempotency import IdempotencyKey
@@ -19,6 +20,8 @@ IDEMPOTENCY_INPROGRESS_TTL_MIN = 15
 WEBHOOK_TTL_DAYS = 30
 NOTIFICATION_DONE_TTL_DAYS = 30
 NOTIFICATION_FAILED_TTL_DAYS = 90
+
+log = logging.getLogger("drs.maintenance")
 
 
 async def prune(db: AsyncSession) -> dict:
@@ -57,6 +60,19 @@ async def prune(db: AsyncSession) -> dict:
         )
     )
     counts["notifications_done"] = r.rowcount or 0
+
+    # Surface rows stuck in 'sending' (crash between the provider call and the result
+    # commit). They are deliberately NOT auto-retried (at-most-once for paid sends), so
+    # make them visible for an operator to check + resend.
+    stuck = await db.scalar(
+        select(func.count()).select_from(Notification).where(
+            Notification.status == "sending",
+            Notification.last_attempt_at < now - dt.timedelta(minutes=15),
+        )
+    )
+    counts["notifications_stuck_sending"] = int(stuck or 0)
+    if stuck:
+        log.error("%s notification(s) stuck in 'sending' >15min — check provider + resend", stuck)
 
     # Keep failed (DLQ) rows longer for inspection, but not forever.
     r = await db.execute(

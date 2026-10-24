@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -37,19 +38,40 @@ async def register_device_token(
     An FCM token is per app-install, not per user: when a different user signs in on
     the same device, re-registering legitimately moves the token to them (which detaches
     the previous owner). We audit that reassignment rather than doing it silently."""
-    row = await db.scalar(select(DeviceToken).where(DeviceToken.token == data.token))
-    if row is None:
-        row = DeviceToken(user_id=user.id, token=data.token, platform=data.platform, active=True)
-        db.add(row)
-    else:
-        if row.user_id != user.id:
-            log.info("device token reassigned from user %s to user %s", row.user_id, user.id)
-        row.user_id = user.id
-        row.platform = data.platform
-        row.active = True
+    prev_owner = await db.scalar(select(DeviceToken.user_id).where(DeviceToken.token == data.token))
+    if prev_owner is not None and prev_owner != user.id:
+        log.info("device token reassigned from user %s to user %s", prev_owner, user.id)
+    # Atomic upsert on UNIQUE(token): two concurrent first registrations of the same
+    # token (app retry) used to both INSERT and 500 on the unique violation.
+    stmt = (
+        pg_insert(DeviceToken)
+        .values(user_id=user.id, token=data.token, platform=data.platform, active=True)
+        .on_conflict_do_update(
+            index_elements=[DeviceToken.token],
+            set_={"user_id": user.id, "platform": data.platform, "active": True},
+        )
+        .returning(DeviceToken.token, DeviceToken.platform, DeviceToken.active)
+    )
+    token, platform, active = (await db.execute(stmt)).one()
     await db.commit()
-    await db.refresh(row)
-    return DeviceTokenOut(token=row.token, platform=row.platform, active=row.active)
+    return DeviceTokenOut(token=token, platform=platform, active=active)
+
+
+class DeviceTokenUnregisterIn(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
+@router.post(
+    "/unregister", status_code=status.HTTP_204_NO_CONTENT,
+    operation_id="unregister_device_token_body",
+)
+async def unregister_device_token_body(
+    data: DeviceTokenUnregisterIn, user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deactivate a device token, sent in the BODY (preferred: the DELETE /{token} form
+    puts the push token in the URL, i.e. in access logs and traces)."""
+    await _deactivate(db, user, data.token)
 
 
 @router.delete(
@@ -58,7 +80,12 @@ async def register_device_token(
 async def unregister_device_token(
     token: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    """Deactivate a device token (logout / uninstall). Only the owner's token is touched."""
+    """Deactivate a device token (logout / uninstall). Only the owner's token is touched.
+    Deprecated: use POST /unregister (keeps the token out of URLs/logs)."""
+    await _deactivate(db, user, token)
+
+
+async def _deactivate(db: AsyncSession, user: User, token: str) -> None:
     row = await db.scalar(
         select(DeviceToken).where(DeviceToken.token == token, DeviceToken.user_id == user.id)
     )

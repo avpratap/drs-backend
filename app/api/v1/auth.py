@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clientip import client_ip
 from app.core.db import get_db
 from app.core.phone import is_indian_mobile, normalize_phone
 from app.deps.auth import get_current_user
@@ -24,7 +25,7 @@ def _client_meta(request: Request) -> dict:
     return {
         "device_name": request.headers.get("user-agent", "")[:255] or None,
         "user_agent": request.headers.get("user-agent", "")[:512] or None,
-        "ip": request.client.host if request.client else None,
+        "ip": client_ip(request),
     }
 
 
@@ -33,7 +34,7 @@ async def request_otp(data: OTPRequest, request: Request):
     phone = normalize_phone(data.phone)
     if not is_indian_mobile(phone):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid Indian mobile number")
-    ip = request.client.host if request.client else None
+    ip = client_ip(request)
     try:
         dev_otp = await otp_service.request_otp(phone, ip=ip)
     except ValueError as exc:
@@ -49,6 +50,9 @@ async def verify_otp(data: OTPVerify, request: Request, db: AsyncSession = Depen
     if not await otp_service.verify_otp(phone, data.otp):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired OTP")
     user = await auth_service.get_or_create_user(db, phone)
+    if user.status != "active":
+        # Don't mint (unusable) tokens + a session row for a suspended/erased account.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is not active")
     access, refresh, _ = await auth_service.issue_tokens(db, user, **_client_meta(request))
     await db.commit()
     return TokenPair(access_token=access, refresh_token=refresh)

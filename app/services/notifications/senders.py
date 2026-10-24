@@ -21,8 +21,18 @@ def whatsapp_enabled() -> bool:
     return bool(settings.GUPSHUP_API_KEY and settings.GUPSHUP_SOURCE)
 
 
-def _stub(channel: str, to_addr: str, body: str) -> tuple[bool, str, None]:
-    log.info("[notify:%s:STUB] to=%s body=%s", channel, to_addr, body)
+def _mask(addr: str | None) -> str:
+    return f"***{addr[-4:]}" if addr and len(addr) > 4 else "***"
+
+
+def _stub(channel: str, to_addr: str, body: str) -> tuple[bool, str | None, str | None]:
+    # Never log the recipient or the message body (PII: phone/email, order details).
+    if settings.ENV == "prod":
+        # An unconfigured channel in prod must FAIL (visible, retried/alerted) — not
+        # pretend the customer was notified.
+        log.error("[notify:%s] channel not configured in prod; to=%s", channel, _mask(to_addr))
+        return False, None, f"{channel} channel not configured"
+    log.info("[notify:%s:STUB] to=%s len=%d", channel, _mask(to_addr), len(body or ""))
     return True, f"stub_{channel}_{secrets.token_hex(6)}", None
 
 

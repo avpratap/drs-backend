@@ -1,8 +1,13 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clientip import client_ip
+from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
@@ -22,15 +27,16 @@ from app.schemas.profile import (
     ProfileOut,
     ProfileUpdate,
 )
-from app.services import dpdp
+from app.services import dpdp, email_verify
 from app.services import profile as svc
+from app.services.notifications import senders
 
 router = APIRouter(tags=["account"])
 
 
 def _client(request: Request) -> dict:
     return {
-        "ip": request.client.host if request.client else None,
+        "ip": client_ip(request),
         "ua": request.headers.get("user-agent", "")[:512] or None,
     }
 
@@ -57,6 +63,7 @@ def _profile_out(user: User, prof) -> ProfileOut:
         user_id=user.id,
         phone=user.phone,
         email=user.email,
+        email_verified=user.email_verified_at is not None,
         full_name=user.full_name,
         display_name=prof.display_name,
         avatar_url=prof.avatar_url,
@@ -97,7 +104,10 @@ async def update_profile(
 
     # Fields that live on the User row.
     if "email" in patch:
-        user.email = patch.pop("email")
+        new_email = patch.pop("email")
+        if (new_email or None) != user.email:
+            user.email = new_email or None
+            user.email_verified_at = None  # a changed address must be re-verified
     if "full_name" in patch:
         user.full_name = patch.pop("full_name")
     for field, value in patch.items():
@@ -110,6 +120,51 @@ async def update_profile(
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already in use") from None
     await db.refresh(user)
     await db.refresh(prof)
+    return _profile_out(user, prof)
+
+
+# ---------- Email ownership verification ----------
+class EmailVerifyRequestOut(BaseModel):
+    detail: str
+    dev_token: str | None = None  # non-prod only (no real mail sent), like dev_otp
+
+
+class EmailVerifyIn(BaseModel):
+    token: str = Field(min_length=10, max_length=512)
+
+
+@router.post("/account/email/verify-request", response_model=EmailVerifyRequestOut,
+             operation_id="request_email_verification")
+async def request_email_verification(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    if not user.email:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Set an email first")
+    if user.email_verified_at is not None:
+        return {"detail": "email already verified"}
+    token = email_verify.make_token(user.id, user.email)
+    sent, _msg_id, _err = await senders.send_email(
+        user.email, f"Confirm your DRS email with this code: {token}",
+        {"subject": "Confirm your email"},
+    )
+    if not sent and settings.ENV == "prod":
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email could not be sent")
+    return {
+        "detail": "verification sent",
+        "dev_token": token if settings.ENV != "prod" else None,
+    }
+
+
+@router.post("/account/email/verify", response_model=ProfileOut, operation_id="verify_email")
+async def verify_email(
+    data: EmailVerifyIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    if not email_verify.check_token(data.token, user.id, user.email):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired verification code")
+    user.email_verified_at = dt.datetime.now(dt.UTC)
+    prof = await svc.get_or_create_profile(db, user)
+    await db.commit()
+    await db.refresh(user)
     return _profile_out(user, prof)
 
 

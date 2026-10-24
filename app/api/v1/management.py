@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_delete
 from app.core.db import get_db
+from app.core.phone import is_indian_mobile, normalize_phone
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
@@ -343,10 +344,15 @@ async def admin_create_user(data: StaffUserIn, db: AsyncSession = Depends(get_db
             f"role must be one of: {', '.join(sorted(_STAFF_CREATABLE_ROLES))} "
             "(retail customers self-register via OTP)",
         )
-    if await db.scalar(select(User).where(User.phone == data.phone)):
+    # Canonicalize exactly like OTP login does, or "919811122233" is stored as typed and
+    # the person's OTP login (normalized to 9811122233) silently creates a new customer.
+    phone = normalize_phone(data.phone)
+    if not is_indian_mobile(phone):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid Indian mobile number")
+    if await db.scalar(select(User).where(User.phone == phone)):
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with this phone already exists")
     user = User(
-        phone=data.phone,
+        phone=phone,
         role=data.role,
         full_name=data.full_name,
         status="active",
@@ -394,6 +400,9 @@ async def update_user(
         changed["role"] = {"from": user.role, "to": patch["role"]}
         user.role = patch["role"]
         user.token_version += 1  # force re-auth so the new role takes effect
+    if user.status == "erased" and patch:
+        # Erasure is final (DPDP): an erased identity can't be reactivated or re-roled.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Erased accounts can't be modified")
     if "status" in patch:
         changed["status"] = {"from": user.status, "to": patch["status"]}
         user.status = patch["status"]

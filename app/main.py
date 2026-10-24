@@ -28,25 +28,8 @@ from app.core.redis import redis_client
 configure_logging()
 init_sentry()
 
-# Production safety guards: fail fast instead of booting an insecure instance.
-if settings.ENV == "prod":
-    if "dev-only" in settings.JWT_SECRET or len(settings.JWT_SECRET) < 32:
-        raise RuntimeError("JWT_SECRET must be a strong secret (>=32 chars) in prod")
-    if "*" in settings.cors_origins_list:
-        raise RuntimeError("CORS_ORIGINS must be an explicit allow-list in prod")
-    # Payment secrets: without these the gateway stub accepts the "dev" signature
-    # and unsigned webhooks — forgeable payments. Refuse to boot.
-    if not (settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET):
-        raise RuntimeError("RAZORPAY_KEY_ID/SECRET required in prod")
-    if not settings.RAZORPAY_WEBHOOK_SECRET:
-        raise RuntimeError("RAZORPAY_WEBHOOK_SECRET required in prod")
-    # GST tax invoices are not legally valid without the seller's GSTIN.
-    if not settings.SELLER_GSTIN:
-        raise RuntimeError("SELLER_GSTIN required in prod (GST tax invoices)")
-    # Without the Shiprocket webhook token the tracking webhook is unauthenticated
-    # (anyone could drive a shipment to delivered + fire notifications). Refuse to boot.
-    if not settings.SHIPROCKET_WEBHOOK_TOKEN:
-        raise RuntimeError("SHIPROCKET_WEBHOOK_TOKEN required in prod")
+# Production safety guards (secrets, payment/GST/courier credentials, CORS, storage)
+# are enforced by Settings._prod_boot_guard at import time — shared with the worker.
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):

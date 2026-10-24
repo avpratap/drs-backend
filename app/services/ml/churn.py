@@ -10,10 +10,13 @@ import asyncio
 import datetime as dt
 import math
 import os
+import secrets
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.redis import redis_client
 from app.models.churn import ChurnScore
 from app.models.order import Order
 from app.models.payment import Payment
@@ -140,26 +143,53 @@ async def score_account(db: AsyncSession, account_id: int) -> dict:
     return {"account_id": account_id, "score": score, "risk": risk_bucket(score), "features": features}
 
 
+_LOCK_KEY = "churn:score_all:lock"
+
+
 async def score_all(db: AsyncSession) -> dict:
-    account_ids = (await db.execute(select(CustomerAccount.id))).scalars().all()
+    """Score every account. One run at a time (admin trigger vs nightly job): a Redis
+    lock (fail-open), plus an idempotent UPSERT so even overlapping runs can't hit the
+    UNIQUE(account_id) race (FOR UPDATE can't lock a row that doesn't exist yet) and lose
+    a whole chunk; accounts are processed in id order so row locks are taken in one order."""
     counts = {"low": 0, "medium": 0, "high": 0, "scored": 0}
-    # Commit in chunks so a large run never holds row locks on every ChurnScore in one
-    # giant transaction (matches the cutoff's chunking).
-    for i, aid in enumerate(account_ids, start=1):
-        result = await score_account(db, aid)
-        existing = await db.scalar(select(ChurnScore).where(ChurnScore.account_id == aid).with_for_update())
-        if existing is None:
-            db.add(ChurnScore(
-                account_id=aid, score=result["score"], risk=result["risk"], features=result["features"],
-            ))
-        else:
-            existing.score = result["score"]
-            existing.risk = result["risk"]
-            existing.features = result["features"]
-            existing.computed_at = func.now()
-        counts[result["risk"]] += 1
-        counts["scored"] += 1
-        if i % 200 == 0:
-            await db.commit()
-    await db.commit()
-    return counts
+    token = secrets.token_hex(8)
+    try:
+        got = await redis_client.set(_LOCK_KEY, token, nx=True, ex=3600)
+    except Exception:
+        got = None  # Redis down: proceed (the upsert keeps it correct)
+    if got is False:
+        return counts  # another run is in progress
+    try:
+        account_ids = (
+            await db.execute(select(CustomerAccount.id).order_by(CustomerAccount.id))
+        ).scalars().all()
+        # Commit in chunks so a large run never holds row locks on every ChurnScore in one
+        # giant transaction (matches the cutoff's chunking).
+        for i, aid in enumerate(account_ids, start=1):
+            result = await score_account(db, aid)
+            stmt = pg_insert(ChurnScore).values(
+                account_id=aid, score=result["score"], risk=result["risk"],
+                features=result["features"],
+            )
+            await db.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[ChurnScore.account_id],
+                    set_={
+                        "score": stmt.excluded.score, "risk": stmt.excluded.risk,
+                        "features": stmt.excluded.features, "computed_at": func.now(),
+                    },
+                )
+            )
+            counts[result["risk"]] += 1
+            counts["scored"] += 1
+            if i % 200 == 0:
+                await db.commit()
+        await db.commit()
+        return counts
+    finally:
+        if got:
+            try:
+                if await redis_client.get(_LOCK_KEY) == token:
+                    await redis_client.delete(_LOCK_KEY)
+            except Exception:
+                pass

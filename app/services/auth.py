@@ -87,11 +87,18 @@ async def rotate_refresh(
         raise AuthError("invalid_refresh_token")
 
     if session.revoked:
-        # Reuse of an already-rotated token => theft. Kill the whole family.
+        # Reuse of an already-rotated token => theft. Kill the whole family AND every
+        # outstanding access token (token_version bump) — otherwise the thief's current
+        # access token kept working for up to ACCESS_TOKEN_MINUTES.
         await db.execute(
             update(AuthSession)
             .where(AuthSession.family_id == session.family_id)
             .values(revoked=True)
+        )
+        await db.execute(
+            update(User).where(User.id == session.user_id).values(
+                token_version=User.token_version + 1
+            )
         )
         raise AuthError("refresh_token_reuse_detected")
 

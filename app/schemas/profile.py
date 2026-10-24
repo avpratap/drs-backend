@@ -18,7 +18,10 @@ class ProfileUpdate(BaseModel):
     alternate_phone: str | None = Field(default=None, pattern=PHONE_RE)
     gstin: str | None = Field(default=None, pattern=GSTIN_RE)
     legal_name: str | None = Field(default=None, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
+    # Format-validated (no email-validator dependency): one @, a dotted domain, no spaces.
+    email: str | None = Field(
+        default=None, max_length=255, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    )
     full_name: str | None = Field(default=None, max_length=255)
     notify_whatsapp: bool | None = None
     notify_sms: bool | None = None
@@ -42,6 +45,7 @@ class ProfileOut(BaseModel):
     user_id: int
     phone: str
     email: str | None = None
+    email_verified: bool = False
     full_name: str | None = None
     display_name: str | None = None
     avatar_url: str | None = None
@@ -163,7 +167,8 @@ class MandateOut(BaseModel):
 # ---------- Consent ----------
 class ConsentIn(BaseModel):
     purpose: Literal[
-        "whatsapp_optin", "marketing_sms", "marketing_email", "data_processing"
+        "whatsapp_optin", "marketing_sms", "marketing_email", "marketing_push",
+        "data_processing",
     ]
     action: Literal["granted", "withdrawn"]
 

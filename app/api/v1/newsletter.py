@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,7 +76,7 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
     )
     if row is not None and row.status == "subscribed":
         return StatusOut(email=email, status="subscribed")  # already confirmed
-    token = secrets.token_urlsafe(24)
+    token = _new_confirm_token()
     if row is None:
         # Two concurrent first-subscribes for the same email would collide on
         # UNIQUE(email). Insert in a savepoint; on collision re-select UNDER LOCK and fall
@@ -112,11 +113,27 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
             email, f"Confirm your DRS newsletter subscription: {link}", None
         )
     except Exception:
-        log.warning("newsletter confirmation email failed for %s", email)
+        # Never log the address itself (PII); the row id is enough to investigate.
+        log.warning("newsletter confirmation email failed (subscriber %s)", row.id)
     return StatusOut(
         email=email, status="pending",
         confirm_token=token if settings.ENV != "prod" else None,
     )
+
+
+CONFIRM_TTL_SECONDS = 7 * 24 * 3600  # an unclicked confirmation link dies after a week
+
+
+def _new_confirm_token() -> str:
+    # "<random>.<expiry epoch>": the expiry travels with the token (fits String(64)).
+    return f"{secrets.token_urlsafe(24)}.{int(time.time()) + CONFIRM_TTL_SECONDS}"
+
+
+def _token_expired(token: str) -> bool:
+    _, _, exp = token.rpartition(".")
+    # Legacy tokens (issued before expiry was added) carry no suffix; they're replaced
+    # on the next subscribe and pruned with the row, so they're accepted.
+    return exp.isdigit() and int(exp) < int(time.time())
 
 
 class ConfirmIn(BaseModel):
@@ -132,7 +149,7 @@ async def confirm_status(token: str, db: AsyncSession = Depends(get_db)):
     row = await db.scalar(
         select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == token)
     )
-    if row is None:
+    if row is None or _token_expired(token):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")
     return StatusOut(email=row.email, status=row.status)
 
@@ -144,7 +161,7 @@ async def confirm(data: ConfirmIn, db: AsyncSession = Depends(get_db)):
     row = await db.scalar(
         select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == data.token)
     )
-    if row is None:
+    if row is None or _token_expired(data.token):
         # Idempotent: a token already consumed by a prior confirm is gone; if the caller
         # was already subscribed, surface that instead of a hard 404 on a double-submit.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")

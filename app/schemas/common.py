@@ -4,7 +4,7 @@ These exist so the OpenAPI spec is fully typed (drives Dart/Orval client codegen
 Each matches the exact keys the corresponding route already returns — no behaviour
 change, only an explicit contract.
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class DetailOut(BaseModel):
@@ -30,7 +30,9 @@ class OutboxFlushOut(BaseModel):
 
 class DataExportOut(BaseModel):
     """DPDP data export. Values are intentionally loose (dict/list) — this is a
-    portability dump, not a stable typed resource."""
+    portability dump, not a stable typed resource. Every PII-bearing table keyed to the
+    subject (user id or their accounts) is included, all columns except secrets."""
+    model_config = ConfigDict(extra="allow")
     user: dict
     profile: dict | None = None
     addresses: list[dict]
