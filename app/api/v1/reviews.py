@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import cache_delete
 from app.core.db import get_db
 from app.deps.auth import require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.rating import REVIEW_STATUSES, Rating
 from app.services import reviews as review_svc
 
@@ -58,7 +58,7 @@ async def list_ratings(
         q = q.where(Rating.status == status_filter)
     if product_id is not None:
         q = q.where(Rating.product_id == product_id)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.post("/ratings/{rating_id}/moderate", response_model=RatingAdminOut, operation_id="moderate_rating")

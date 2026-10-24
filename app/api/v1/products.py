@@ -467,6 +467,20 @@ async def get_product_full(product_id: int, db: AsyncSession = Depends(get_db)):
     return out
 
 
+@router.get(
+    "/variants/{variant_id}",
+    response_model=VariantOut,
+    operation_id="get_variant",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def get_variant(variant_id: int, db: AsyncSession = Depends(get_db)):
+    """One variant by id, whatever its status (admin edit screens)."""
+    variant = await db.get(ProductVariant, variant_id)
+    if variant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Variant not found")
+    return variant
+
+
 @router.patch(
     "/variants/{variant_id}",
     response_model=VariantOut,

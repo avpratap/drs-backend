@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination, set_total
 from app.models.billing import Wallet
 from app.models.order import Order
 from app.models.payment import Payment
@@ -108,7 +108,7 @@ async def list_payments(
         q = q.where(func.date(func.timezone(settings.TIMEZONE, Payment.created_at)) >= date_from)
     if date_to:
         q = q.where(func.date(func.timezone(settings.TIMEZONE, Payment.created_at)) <= date_to)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.get("/payments/{payment_id}", response_model=PaymentOut, operation_id="admin_get_payment")
@@ -135,7 +135,7 @@ async def list_refunds(
         q = q.where(Refund.payment_id == payment_id)
     if account_id is not None:
         q = q.where(Refund.account_id == account_id)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.get("/refunds/{refund_id}", response_model=RefundOut, operation_id="admin_get_refund")
@@ -162,8 +162,9 @@ async def list_accounts(
         query = query.where(
             User.phone.ilike(like, escape="\\") | User.full_name.ilike(like, escape="\\")
         )
-    query = query.order_by(CustomerAccount.id.desc()).limit(page.limit).offset(page.offset)
-    rows = (await db.execute(query)).all()
+    query = query.order_by(CustomerAccount.id.desc())
+    await set_total(db, query, page)
+    rows = (await db.execute(query.limit(page.limit).offset(page.offset))).all()
     out = []
     for acct, user in rows:
         r = AccountRow.model_validate(acct)
@@ -227,7 +228,7 @@ async def list_orders(
         q = q.where(func.date(func.timezone(settings.TIMEZONE, Order.created_at)) >= date_from)
     if date_to:
         q = q.where(func.date(func.timezone(settings.TIMEZONE, Order.created_at)) <= date_to)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.post("/orders/{order_id}/cancel", response_model=OrderAdminOut, operation_id="admin_cancel_order")

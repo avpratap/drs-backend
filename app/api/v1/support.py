@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import media
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.support import SupportTicket, TicketMessage
 from app.models.user import User
 from app.services import support
@@ -217,7 +217,7 @@ async def admin_list_tickets(
         q = q.where(SupportTicket.status == status_filter)
     if category:
         q = q.where(SupportTicket.category == category)
-    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    rows = await paged(db, q, page)
     return await _with_messages_many(db, list(rows))
 
 
