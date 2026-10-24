@@ -221,6 +221,20 @@ async def admin_list_tickets(
     return await _with_messages_many(db, list(rows))
 
 
+@router.get(
+    "/admin/support/tickets/{ticket_id}",
+    response_model=TicketOut,
+    operation_id="admin_get_ticket",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_get_ticket(ticket_id: int, db: AsyncSession = Depends(get_db)):
+    """Any ticket with its thread (the customer endpoint only serves the owner's)."""
+    ticket = await db.get(SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    return await _with_messages(db, ticket)
+
+
 @router.post(
     "/admin/support/tickets/{ticket_id}/messages",
     response_model=TicketOut,

@@ -137,3 +137,58 @@ async def test_ledgers_404_for_unknown_account(client):
     assert (await client.get("/api/v1/admin/accounts/99999999/credit/ledger", headers=h)).status_code == 404
     ch = auth(await login(client, "9876543210"))
     assert (await client.get("/api/v1/admin/accounts/1/credit/ledger", headers=ch)).status_code == 403
+
+
+# ---------- single-record admin reads (support ticket, CMS) ----------
+async def test_admin_get_ticket_any_owner(client):
+    ch = auth(await login(client, "9876543210"))
+    t = await client.post(
+        "/api/v1/support/tickets",
+        json={"subject": "Milk was sour", "category": "product", "body": "The 500ml pouch was sour."},
+        headers=ch,
+    )
+    assert t.status_code == 200, t.text
+    tid = t.json()["id"]
+
+    h = auth(await login(client, "9999900001"))
+    got = await client.get(f"/api/v1/admin/support/tickets/{tid}", headers=h)
+    assert got.status_code == 200
+    body = got.json()
+    assert body["subject"] == "Milk was sour"
+    assert [m["body"] for m in body["messages"]] == ["The 500ml pouch was sour."]
+    assert (await client.get("/api/v1/admin/support/tickets/99999999", headers=h)).status_code == 404
+    assert (await client.get(f"/api/v1/admin/support/tickets/{tid}", headers=ch)).status_code == 403
+
+
+async def test_admin_get_cms_records_including_drafts(client):
+    h = auth(await login(client, "9999900001"))
+    tag = uuid.uuid4().hex[:8]
+    art = await client.post(
+        "/api/v1/admin/content/articles",
+        json={"slug": f"draft-{tag}", "title": "Draft", "body_html": "<p>x</p>"},
+        headers=h,
+    )
+    aid = art.json()["id"]
+    got = await client.get(f"/api/v1/admin/content/articles/{aid}", headers=h)
+    assert got.status_code == 200 and got.json()["status"] == "draft"
+
+    pg = await client.post(
+        "/api/v1/admin/content/pages",
+        json={"slug": f"pg-{tag}", "title": "About", "body_html": "<p>about</p>"},
+        headers=h,
+    )
+    pid = pg.json()["id"]
+    assert (await client.get(f"/api/v1/admin/content/pages/{pid}", headers=h)).json()["slug"] == f"pg-{tag}"
+
+    bn = await client.post(
+        "/api/v1/admin/content/banners",
+        json={"title": "Monsoon offer", "image_url": "https://cdn.example/b.jpg"},
+        headers=h,
+    )
+    bid = bn.json()["id"]
+    assert (await client.get(f"/api/v1/admin/content/banners/{bid}", headers=h)).json()["title"] == "Monsoon offer"
+
+    for path in ("articles", "pages", "banners"):
+        assert (await client.get(f"/api/v1/admin/content/{path}/99999999", headers=h)).status_code == 404
+    ch = auth(await login(client, "9876543210"))
+    assert (await client.get(f"/api/v1/admin/content/articles/{aid}", headers=ch)).status_code == 403

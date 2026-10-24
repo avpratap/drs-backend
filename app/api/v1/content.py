@@ -211,6 +211,12 @@ async def _invalidate_sitemap() -> None:
     await cache_delete(content_svc.SITEMAP_CACHE_KEY)
 
 
+@router.get("/articles/{article_id}", response_model=ArticleOut, operation_id="admin_get_article")
+async def admin_get_article(article_id: int, db: AsyncSession = Depends(get_db)):
+    """One article in any status (drafts included) for the admin editor."""
+    return await _get_article(db, article_id)
+
+
 @router.patch("/articles/{article_id}", response_model=ArticleOut, operation_id="update_article")
 async def update_article(article_id: int, data: ArticleUpdate, db: AsyncSession = Depends(get_db)):
     art = await _get_article(db, article_id)
@@ -277,6 +283,11 @@ async def _get_page(db: AsyncSession, page_id: int) -> StaticPage:
     return obj
 
 
+@router.get("/pages/{page_id}", response_model=PageOut, operation_id="admin_get_page")
+async def admin_get_page(page_id: int, db: AsyncSession = Depends(get_db)):
+    return await _get_page(db, page_id)
+
+
 @router.patch("/pages/{page_id}", response_model=PageOut, operation_id="update_page")
 async def update_page(page_id: int, data: PageUpdate, db: AsyncSession = Depends(get_db)):
     obj = await _get_page(db, page_id)
@@ -329,6 +340,14 @@ async def create_banner(data: BannerIn, db: AsyncSession = Depends(get_db)):
 @router.get("/banners", response_model=list[BannerOut], operation_id="admin_list_banners")
 async def admin_list_banners(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
     return await paged(db, select(Banner).order_by(Banner.position, Banner.id), page)
+
+
+@router.get("/banners/{banner_id}", response_model=BannerOut, operation_id="admin_get_banner")
+async def admin_get_banner(banner_id: int, db: AsyncSession = Depends(get_db)):
+    banner = await db.get(Banner, banner_id)
+    if banner is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Banner not found")
+    return banner
 
 
 @router.patch("/banners/{banner_id}", response_model=BannerOut, operation_id="update_banner")
