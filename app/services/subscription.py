@@ -16,6 +16,9 @@ def today_ist() -> dt.date:
     return dt.datetime.now(IST).date()
 
 
+MAX_FUTURE_OVERRIDES = 400  # per item: bounds the rows a script could create
+
+
 def assert_editable(for_date: dt.date) -> None:
     """You may edit tomorrow (before cutoff) or any later date. Never today/past, never
     tomorrow once the cutoff hour has passed."""

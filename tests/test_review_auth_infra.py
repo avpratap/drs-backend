@@ -157,8 +157,8 @@ async def test_marketing_consent_rechecked_at_delivery(client):
     from app.services import notifications as notify
 
     h = auth(await login(client, "9000000956"))
-    await client.patch("/api/v1/profile", json={"marketing_opt_in": True, "notify_whatsapp": True}, headers=h)
     await client.post("/api/v1/consents", json={"purpose": "whatsapp_optin", "action": "granted"}, headers=h)
+    await client.post("/api/v1/consents", json={"purpose": "marketing_whatsapp", "action": "granted"}, headers=h)
     user = await _user("9000000956")
     async with SessionLocal() as db:
         rows = await notify.emit_event(db, "review.request", user, {"order_id": 1}, dedupe_key="rr956")
@@ -168,7 +168,7 @@ async def test_marketing_consent_rechecked_at_delivery(client):
         wid = wa[0].id
     # Withdraw ONLY the consent (append to the ledger; the channel toggle stays on), so the
     # send-time consent re-check is what must stop it.
-    await _q("INSERT INTO consents (user_id, purpose, action, source) VALUES (:u, 'whatsapp_optin', 'withdrawn', 'app')",
+    await _q("INSERT INTO consents (user_id, purpose, action, source) VALUES (:u, 'marketing_whatsapp', 'withdrawn', 'app')",
              u=user.id)
     async with SessionLocal() as db:
         from app.models.notification import Notification
@@ -183,7 +183,9 @@ async def test_marketing_push_requires_its_own_consent(client):
     from app.services import notifications as notify
 
     h = auth(await login(client, "9000000957"))
-    await client.patch("/api/v1/profile", json={"marketing_opt_in": True, "notify_push": True}, headers=h)
+    # Marketing on (via an SMS marketing consent) and push on — but no marketing_push consent.
+    await client.post("/api/v1/consents", json={"purpose": "marketing_sms", "action": "granted"}, headers=h)
+    await client.patch("/api/v1/profile", json={"notify_push": True}, headers=h)
     user = await _user("9000000957")
     async with SessionLocal() as db:
         rows = await notify.emit_event(db, "review.request", user, {"order_id": 1}, dedupe_key="rr957")

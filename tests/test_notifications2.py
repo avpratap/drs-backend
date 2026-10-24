@@ -4,6 +4,8 @@ from conftest import auth, login
 
 
 async def _customer_id(client, h) -> int:
+    # WhatsApp is opt-in: turning it on records the whatsapp_optin consent.
+    await client.patch("/api/v1/profile", json={"notify_whatsapp": True}, headers=h)
     return (await client.get("/api/v1/auth/me", headers=h)).json()["id"]
 
 
@@ -91,6 +93,10 @@ async def test_retry_backoff_defers_next_attempt(client, monkeypatch):
         import sqlalchemy as sa
 
         uid = (await db.execute(sa.text("SELECT id FROM users LIMIT 1"))).scalar()
+        from app.models.user import User
+        from app.services import profile as profile_svc
+
+        (await profile_svc.get_or_create_profile(db, await db.get(User, uid))).notify_whatsapp = True
         notif = Notification(
             user_id=uid, event_type="payment.success", channel="whatsapp",
             category="transactional", to_addr="9876543210", body="hi", status="queued",

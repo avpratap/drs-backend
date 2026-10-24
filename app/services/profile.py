@@ -10,14 +10,17 @@ Invariants enforced here (the DB partial-unique index is the backstop):
 import datetime as dt
 from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException, status
 from geoalchemy2 import WKTElement
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.profile import (
     Address,
     Consent,
+    PaymentMandate,
     PaymentMethod,
     UserProfile,
 )
@@ -32,6 +35,12 @@ def today_ist() -> dt.date:
     return dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
 
 
+def account_type_for(user: User, *, business: bool = False) -> str:
+    """ONE rule for a new account's type, whichever endpoint creates it first: a
+    subscriber's account is B2B (as is one created by registering a shop)."""
+    return "b2b" if business or user.role == "subscriber" else "retail"
+
+
 async def get_or_create_account(db: AsyncSession, user: User) -> CustomerAccount:
     """The caller's primary billing account (lowest id). Created lazily."""
     res = await db.execute(
@@ -43,7 +52,7 @@ async def get_or_create_account(db: AsyncSession, user: User) -> CustomerAccount
     if account is None:
         account = CustomerAccount(
             owner_user_id=user.id,
-            account_type="b2b" if user.role == "subscriber" else "retail",
+            account_type=account_type_for(user),
             billing_mode="prepaid_wallet",
         )
         db.add(account)
@@ -58,12 +67,21 @@ async def my_account_ids(db: AsyncSession, user: User) -> set[int]:
     return set(res.scalars().all())
 
 
-async def get_or_create_profile(db: AsyncSession, user: User) -> UserProfile:
-    prof = await db.get(UserProfile, user.id)
+async def get_or_create_profile(
+    db: AsyncSession, user: User, *, fresh: bool = False
+) -> UserProfile:
+    """`fresh` re-reads the row (a long-lived session, e.g. the notification drain, must
+    see a consent/channel change committed since it last loaded the profile)."""
+    prof = await db.get(UserProfile, user.id, populate_existing=fresh)
     if prof is None:
-        prof = UserProfile(user_id=user.id)
-        db.add(prof)
-        await db.flush()
+        # Race-safe create: a concurrent first touch may insert the same user_id.
+        try:
+            async with db.begin_nested():
+                prof = UserProfile(user_id=user.id)
+                db.add(prof)
+                await db.flush()
+        except IntegrityError:
+            prof = await db.get(UserProfile, user.id, populate_existing=True)
     return prof
 
 
@@ -118,8 +136,18 @@ async def create_address(db: AsyncSession, account_id: int, data) -> Address:
     return addr
 
 
+async def _still_active(db: AsyncSession, row, what: str) -> None:
+    """Re-read a row AFTER taking the account lock: the caller's ownership/status check ran
+    before it, and a concurrent delete may have archived the row meanwhile (e.g. making
+    an archived address the default, leaving the account with no active default)."""
+    await db.refresh(row)
+    if row.status != "active":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{what} not found")
+
+
 async def update_address(db: AsyncSession, addr: Address, data) -> Address:
     await _lock_account(db, _ADDR_LOCK_NS, addr.account_id)
+    await _still_active(db, addr, "Address")
     patch = data.model_dump(exclude_unset=True)
     lat, lng = patch.pop("lat", None), patch.pop("lng", None)
     want_default = patch.pop("is_default", None)
@@ -132,14 +160,20 @@ async def update_address(db: AsyncSession, addr: Address, data) -> Address:
     if want_default is True:
         await _clear_default_addresses(db, addr.account_id)
         addr.is_default = True
-    elif want_default is False:
-        addr.is_default = False
+    elif want_default is False and addr.is_default:
+        # Unsetting the default would leave the account with none (invoices then fall
+        # back to the seller state for place of supply): make another address default.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Make another address the default instead of unsetting this one",
+        )
     await db.flush()
     return addr
 
 
 async def delete_address(db: AsyncSession, addr: Address) -> None:
     await _lock_account(db, _ADDR_LOCK_NS, addr.account_id)
+    await _still_active(db, addr, "Address")
     was_default = addr.is_default
     addr.status = "archived"
     addr.is_default = False
@@ -195,6 +229,7 @@ async def create_payment_method(db: AsyncSession, account_id: int, data) -> Paym
 
 async def set_default_method(db: AsyncSession, pm: PaymentMethod) -> None:
     await _lock_account(db, _PM_LOCK_NS, pm.account_id)
+    await _still_active(db, pm, "Payment method")
     await _clear_default_methods(db, pm.account_id)
     pm.is_default = True
     await db.flush()
@@ -202,9 +237,16 @@ async def set_default_method(db: AsyncSession, pm: PaymentMethod) -> None:
 
 async def delete_payment_method(db: AsyncSession, pm: PaymentMethod) -> None:
     await _lock_account(db, _PM_LOCK_NS, pm.account_id)
+    await _still_active(db, pm, "Payment method")
     was_default = pm.is_default
     pm.status = "removed"
     pm.is_default = False
+    # A removed instrument must not keep live autopay mandates debiting it.
+    await db.execute(
+        update(PaymentMandate)
+        .where(PaymentMandate.payment_method_id == pm.id, PaymentMandate.status != "cancelled")
+        .values(status="cancelled")
+    )
     await db.flush()
     if was_default:
         nxt = await db.scalar(

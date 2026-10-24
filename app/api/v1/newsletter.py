@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db
+from app.core.sendlimit import allow_send
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
 from app.models.newsletter import NewsletterSubscriber
@@ -66,6 +67,11 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
     email owner confirms — so one can't subscribe or forge consent for someone else.
     Already-subscribed emails stay subscribed (idempotent)."""
     email = str(data.email).lower()
+    # Throttle per address BEFORE touching the row (rotating the token without mailing
+    # it would void the link already sent): an anonymous caller can't flood an inbox.
+    # The response is the same whatever the address's state, so it reveals nothing.
+    if not await allow_send("newsletter", email):
+        return StatusOut(email=email, status="pending")
     # Lock the existing row (if any) so a concurrent POST /newsletter/confirm serializes:
     # otherwise this request could hold a stale 'pending' snapshot and overwrite a status
     # the confirm just set to 'subscribed' (downgrading a just-confirmed user).
@@ -75,7 +81,7 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
         .with_for_update()
     )
     if row is not None and row.status == "subscribed":
-        return StatusOut(email=email, status="subscribed")  # already confirmed
+        return StatusOut(email=email, status="pending")  # already confirmed: same answer
     token = _new_confirm_token()
     if row is None:
         # Two concurrent first-subscribes for the same email would collide on
@@ -96,7 +102,7 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
                 .with_for_update()
             )
             if row is not None and row.status == "subscribed":
-                return StatusOut(email=email, status="subscribed")  # lost race to a confirm
+                return StatusOut(email=email, status="pending")  # lost race to a confirm
     # Never downgrade a 'subscribed' row (defense-in-depth alongside the lock above).
     if row.status != "subscribed" and (row.status != "pending" or row.confirm_token != token):
         # Re-subscribe (was pending/unsubscribed, or lost the insert race) — issue a

@@ -52,15 +52,16 @@ async def add_to_wishlist(
         )
     )
     if existing is None:  # idempotent add
-        db.add(WishlistItem(account_id=account.id, product_id=data.product_id))
         try:
-            await db.commit()
+            # Savepoint, not a full rollback (that expired `account`, and reading
+            # account.id below then 500'd): a concurrent add of the same product
+            # (uq_wishlist_account_product) means it's already present — success.
+            async with db.begin_nested():
+                db.add(WishlistItem(account_id=account.id, product_id=data.product_id))
+                await db.flush()
         except IntegrityError:
-            # Concurrent add of the same product (uq_wishlist_account_product) — already
-            # present, so treat as success.
-            await db.rollback()
-    else:
-        await db.commit()
+            pass
+    await db.commit()
     rows = (
         await db.execute(
             select(WishlistItem)

@@ -15,6 +15,7 @@ from app.models.loyalty import GiftCard, LoyaltyAccount
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.services import loyalty
+from app.services import profile as profile_svc
 
 router = APIRouter(tags=["loyalty"])
 
@@ -99,7 +100,7 @@ async def _my_account(db: AsyncSession, user: User) -> CustomerAccount:
         try:
             async with db.begin_nested():
                 acct = CustomerAccount(
-                    owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+                    owner_user_id=user.id, account_type=profile_svc.account_type_for(user), billing_mode="prepaid_wallet"
                 )
                 db.add(acct)
                 await db.flush()

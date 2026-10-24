@@ -7,9 +7,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import media
 from app.core.db import get_db
-from app.core.storage import put_object
-from app.core.uploads import precheck_upload_size, read_validated_image
+from app.core.ratelimit_quota import upload_quota_ok
+from app.core.storage import put_private_object
+from app.core.uploads import precheck_upload_size, read_validated_image, strip_metadata
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
@@ -25,7 +27,8 @@ router = APIRouter(prefix="/delivery", tags=["delivery"])
 
 
 class UploadOut(BaseModel):
-    url: str
+    url: str  # the reference to pass as pod.photo_url/signature_url (media:<key>)
+    preview_url: str
 
 
 @router.post("/uploads", operation_id="upload_pod_asset", response_model=UploadOut)
@@ -37,10 +40,16 @@ async def upload_pod_asset(
     if user.role not in ("delivery", "admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only delivery staff can upload POD assets")
     precheck_upload_size(request)
+    if not await upload_quota_ok(user.id, per_day=1000):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Upload limit reached; try tomorrow")
     data, ext, ctype = await read_validated_image(file)
-    key = f"pod/{user.id}/{secrets.token_hex(8)}.{ext}"
-    url = await asyncio.to_thread(put_object, key, data, ctype)
-    return {"url": url}
+    # Doorstep photos are personal data: private bucket, EXIF (GPS) stripped.
+    data = strip_metadata(data, ext)
+    key = await asyncio.to_thread(
+        put_private_object, f"pod/{user.id}/{secrets.token_hex(8)}.{ext}", data, ctype
+    )
+    ref = media.make_ref(key)
+    return {"url": ref, "preview_url": media.resolve(ref)}
 
 
 async def _attach_stop_details(db: AsyncSession, views: list[DeliveryOrderOut]) -> None:

@@ -20,7 +20,8 @@ class User(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     phone: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
     phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    # Unique only among VERIFIED owners (uq_users_email_verified, on lower(email)).
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Set once the user proves inbox ownership; cleared whenever the email changes.
     email_verified_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

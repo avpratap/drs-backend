@@ -75,9 +75,16 @@ def _row(obj, *, mask: tuple[str, ...] = ()) -> dict:
     return out
 
 
-async def _rows(db: AsyncSession, model, *where, order=None, **kw) -> list[dict]:
+async def _rows(db: AsyncSession, model, *where, order=None, limit=None, **kw) -> list[dict]:
     q = select(model).where(*where).order_by(order if order is not None else model.id)
+    if limit is not None:
+        q = q.limit(limit)
     return [_row(r, **kw) for r in (await db.execute(q)).scalars().all()]
+
+
+# GPS pings accumulate every few seconds while a driver is on shift: export the most
+# recent ones (bounded response) and say how many exist in total.
+_DRIVER_PINGS_EXPORT_CAP = 10_000
 
 
 async def export_user_data(db: AsyncSession, user: User) -> dict:
@@ -99,7 +106,9 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
     cart_ids = select(Cart.id).where(by_acc(Cart))
 
     newsletter = []
-    if user.email:
+    # Only a VERIFIED address proves the newsletter row is this user's (anyone can type
+    # someone else's email into their profile).
+    if user.email and user.email_verified_at is not None:
         newsletter = await _rows(
             db, NewsletterSubscriber, func.lower(NewsletterSubscriber.email) == user.email.lower()
         )
@@ -151,15 +160,36 @@ async def export_user_data(db: AsyncSession, user: User) -> dict:
         "ratings": await _rows(db, Rating, Rating.user_id == user.id),
         "notifications": await _rows(db, Notification, Notification.user_id == user.id),
         "auth_sessions": await _rows(db, AuthSession, AuthSession.user_id == user.id),
-        "driver_locations": await _rows(db, DriverLocation, DriverLocation.driver_id == user.id),
+        "driver_locations": await _rows(
+            db, DriverLocation, DriverLocation.driver_id == user.id,
+            order=DriverLocation.id.desc(), limit=_DRIVER_PINGS_EXPORT_CAP,
+        ),
+        "driver_locations_total": await db.scalar(
+            select(func.count()).select_from(DriverLocation)
+            .where(DriverLocation.driver_id == user.id)
+        ),
         "newsletter": newsletter,
         "shop_ids": [i for (i,) in (await db.execute(shop_ids)).all()],
     }
 
 
+class ErasureBlocked(Exception):
+    """Erasure must wait (an open money flow would be orphaned)."""
+
+
 async def erase_user(db: AsyncSession, user: User) -> dict:
     """Anonymize PII and revoke consent; retain financial/tax records (invoices, ledgers).
     Covers every PII-bearing table keyed to the user or their account(s)."""
+    account_ids_pre = await profile_svc.my_account_ids(db, user)
+    if account_ids_pre and await db.scalar(
+        select(func.count()).select_from(WithdrawalRequest).where(
+            WithdrawalRequest.account_id.in_(account_ids_pre),
+            WithdrawalRequest.status == "requested",
+        )
+    ):
+        # Erasing the identity would leave a payout pending to someone we can no longer
+        # identify (or let it be approved to an erased subject): settle it first.
+        raise ErasureBlocked("A wallet withdrawal is pending; it must be paid or rejected first")
     orig_email = user.email  # capture before nulling (newsletter is keyed by email)
     orig_verified = user.email_verified_at is not None
     # base-36 keeps the unique tombstone within phone's VARCHAR(16) for any id size.
@@ -251,6 +281,16 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
             )
             .values(status="cancelled")
         )
+        # Deliveries already generated/frozen for tomorrow would still be driven to the
+        # tombstoned address and billed to the erased account: cancel them.
+        await db.execute(
+            update(DeliveryOrder)
+            .where(
+                DeliveryOrder.account_id.in_(account_ids),
+                DeliveryOrder.status.in_(("generated", "frozen")),
+            )
+            .values(status="cancelled", failure_reason="account_erased")
+        )
         # Courier shipment destination snapshot (keep state/pincode for tax/courier stats).
         await db.execute(
             update(Shipment)
@@ -313,7 +353,8 @@ async def erase_user(db: AsyncSession, user: User) -> dict:
         )
 
     for purpose in (
-        "whatsapp_optin", "marketing_sms", "marketing_email", "marketing_push", "data_processing"
+        "whatsapp_optin", "marketing_sms", "marketing_email", "marketing_push",
+        "marketing_whatsapp", "data_processing",
     ):
         db.add(Consent(user_id=user.id, purpose=purpose, action="withdrawn", source="erasure"))
 

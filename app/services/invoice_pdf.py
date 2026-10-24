@@ -5,7 +5,7 @@ from io import BytesIO
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -138,6 +138,7 @@ async def get_or_create_pdf(db: AsyncSession, invoice: Invoice) -> str:
     first use). The caller must have authorized the viewer for this invoice. The stored
     key carries a random component, so even the private key isn't guessable."""
     key = invoice.pdf_url
+    read_total, read_key = invoice.total, invoice.pdf_url
     if not (key and key.startswith(PRIVATE_PREFIX)):
         # No PDF yet, invalidated (credit note re-totalled), or a legacy PUBLIC URL —
         # (re)render into private storage.
@@ -159,6 +160,18 @@ async def get_or_create_pdf(db: AsyncSession, invoice: Invoice) -> str:
             pdf,
             "application/pdf",
         )
-        invoice.pdf_url = key  # column holds the private KEY (never a public URL)
+        # Cache the key only if the document didn't change while we rendered (a credit
+        # note gaining lines re-totals it and clears pdf_url; a blind write here would
+        # pin the stale PDF forever). The column holds the private KEY, never a URL.
+        await db.execute(
+            update(Invoice)
+            .where(
+                Invoice.id == invoice.id,
+                Invoice.total == read_total,
+                Invoice.pdf_url.is_not_distinct_from(read_key),
+            )
+            .values(pdf_url=key)
+            .execution_options(synchronize_session=False)
+        )
         await db.commit()
     return await asyncio.to_thread(private_url, key)

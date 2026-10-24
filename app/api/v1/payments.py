@@ -28,6 +28,7 @@ from app.services import billing as billing_service
 from app.services import invoicing
 from app.services import notifications as notify
 from app.services import payments as pay_service
+from app.services import profile as profile_svc
 from app.services import refunds as refund_acct
 
 log = logging.getLogger("drs.payments")
@@ -113,7 +114,7 @@ async def _account(db: AsyncSession, user: User) -> CustomerAccount:
         try:
             async with db.begin_nested():
                 account = CustomerAccount(
-                    owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+                    owner_user_id=user.id, account_type=profile_svc.account_type_for(user), billing_mode="prepaid_wallet"
                 )
                 db.add(account)
                 await db.flush()

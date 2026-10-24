@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from fastapi import status as http
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -313,6 +313,17 @@ async def apply_tracking(
         was_delivered = ship.status == "delivered"
         ship.status = mapped
         if mapped == "delivered" and not was_delivered:
+            if float(ship.cod_amount or 0) > 0:
+                # Cash on delivery: the courier collected the money at the door, so the
+                # order is now paid (COD orders otherwise stayed 'pending' forever: no
+                # invoice, no verified review, and their coupon blocked re-use). Atomic
+                # guarded UPDATE; drafts never receive webhooks, so no lock-order clash.
+                await db.execute(
+                    update(Order)
+                    .where(Order.id == ship.order_id, Order.payment_status == "pending",
+                           Order.status != "cancelled")
+                    .values(payment_status="paid")
+                )
             await _notify_delivered(db, ship)
     return ship
 

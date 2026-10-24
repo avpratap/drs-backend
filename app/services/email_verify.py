@@ -26,7 +26,10 @@ def make_token(user_id: int, email: str, now: dt.datetime | None = None) -> str:
 
 def check_token(token: str, user_id: int, email: str | None) -> bool:
     try:
-        uid, em, exp, sig = base64.urlsafe_b64decode(token.encode()).decode().split("|")
+        # The email may itself contain "|": split the id off the left and exp|sig off
+        # the right, so whatever is in between is the email.
+        uid, rest = base64.urlsafe_b64decode(token.encode()).decode().split("|", 1)
+        em, exp, sig = rest.rsplit("|", 2)
     except Exception:
         return False
     msg = f"{uid}|{em}|{exp}"

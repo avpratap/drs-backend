@@ -2,7 +2,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from app.schemas.subscription import (
 )
 from app.services import notifications as notify
 from app.services import pricing
+from app.services import profile as profile_svc
 from app.services import subscription as sub_service
 
 # Subscription status -> lifecycle notification event.
@@ -105,7 +106,7 @@ async def _retail_home_shop(db: AsyncSession, user: User, data: SubscriptionCrea
         try:
             async with db.begin_nested():
                 acct = CustomerAccount(
-                    owner_user_id=user.id, account_type="retail",
+                    owner_user_id=user.id, account_type=profile_svc.account_type_for(user),
                     billing_mode="prepaid_wallet",
                 )
                 db.add(acct)
@@ -242,6 +243,9 @@ async def set_items(
         )
     sub = await _mutable_sub_or_404(user, db, sub_id)
     sub_service.assert_standing_change_allowed(user.role)
+    # Serialize concurrent edits of this standing order (two inserts of the same new
+    # product would otherwise collide on uq_subscription_items_sub_product -> 409/500).
+    await db.execute(select(Subscription.id).where(Subscription.id == sub.id).with_for_update())
     pids = [it.product_id for it in items]
     if len(pids) != len(set(pids)):
         # Two lines for one product doubled the quantity forever and broke overrides.
@@ -263,11 +267,17 @@ async def set_items(
             )
         shop = await db.get(Shop, sub.shop_id)
         tier_id = await pricing.resolve_tier_id(db, shop) if shop is not None else None
+        # Priced as the cutoff will price them: on the first delivery date (tomorrow), and
+        # only lines that actually deliver by default (a qty-0 line only delivers on
+        # override days, whose qty is priced then).
+        first_day = sub_service.today_ist() + dt.timedelta(days=1)
         unpriced = [
             it.product_id
             for it in items
-            if await pricing.resolve_unit_price(db, it.product_id, tier_id, float(it.default_qty))
-            is None
+            if float(it.default_qty) > 0
+            and await pricing.resolve_unit_price(
+                db, it.product_id, tier_id, float(it.default_qty), on=first_day
+            ) is None
         ]
         if unpriced:
             # The cutoff would silently drop these lines every night.
@@ -324,7 +334,7 @@ async def set_override(
             SubscriptionItem.subscription_id == sub.id,
             SubscriptionItem.product_id == data.product_id,
             SubscriptionItem.active.is_(True),
-        )
+        ).with_for_update()  # serialize upserts of this item's override (uq item+date)
     )
     item = res.scalar_one_or_none()
     if item is None:
@@ -341,6 +351,17 @@ async def set_override(
         ov.override_qty = data.override_qty
         ov.note = data.note
     else:
+        pending = await db.scalar(
+            select(func.count()).select_from(SubscriptionOverride).where(
+                SubscriptionOverride.subscription_item_id == item.id,
+                SubscriptionOverride.for_date > sub_service.today_ist(),
+            )
+        )
+        if (pending or 0) >= sub_service.MAX_FUTURE_OVERRIDES:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"At most {sub_service.MAX_FUTURE_OVERRIDES} future overrides per product",
+            )
         db.add(
             SubscriptionOverride(
                 subscription_item_id=item.id,

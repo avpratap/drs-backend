@@ -11,6 +11,7 @@ from app.models.product import Product
 from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
 from app.services import coupons as coupon_svc
+from app.services import profile as profile_svc
 from app.services.pricing import resolve_tier_id, resolve_unit_price
 
 
@@ -23,7 +24,7 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
         try:
             async with db.begin_nested():
                 account = CustomerAccount(
-                    owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
+                    owner_user_id=user.id, account_type=profile_svc.account_type_for(user), billing_mode="prepaid_wallet"
                 )
                 db.add(account)
                 await db.flush()
@@ -37,7 +38,21 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
 
 
 MAX_LINE_QTY = 100_000  # same ceiling as OrderItemIn.qty, applied after merging
-WHOLE_UNIT_UOMS = {"piece", "pack"}  # countable units can't be ordered fractionally
+# uom is free text: "Piece", "pcs", "packs", "pkt" are the same countable unit.
+_WHOLE_UNIT_ALIASES = {"piece", "pc", "pack", "pkt", "unit", "no", "nos", "box", "bottle", "jar"}
+
+
+def is_whole_unit(uom: str | None) -> bool:
+    u = (uom or "").strip().lower().rstrip(".")
+    return u in _WHOLE_UNIT_ALIASES or (u.endswith("s") and u[:-1] in _WHOLE_UNIT_ALIASES)
+
+
+def check_whole_units(product, qty: float) -> None:
+    if is_whole_unit(product.uom) and float(qty) != int(float(qty)):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Product {product.id} is sold per {product.uom}; quantity must be a whole number",
+        )
 
 
 async def _get_or_create_home_shop(
@@ -147,11 +162,7 @@ async def create_order(
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, f"Product {product_id} is not available"
             )
-        if product.uom in WHOLE_UNIT_UOMS and qty != int(qty):
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Product {product_id} is sold per {product.uom}; quantity must be a whole number",
-            )
+        check_whole_units(product, qty)
         unit_price = await resolve_unit_price(db, product_id, tier_id, qty)
         if unit_price is None:  # no price/tier configured — never charge ₹0 silently
             raise HTTPException(
@@ -189,11 +200,23 @@ async def create_order(
 
 async def has_live_shipment(db: AsyncSession, order_id: int) -> bool:
     """A non-cancelled courier shipment (draft included: a create may be in flight)."""
+    import datetime as dt
+
+    from sqlalchemy import or_
+
     from app.models.shipment import Shipment
 
     n = await db.scalar(
         select(func.count()).select_from(Shipment).where(
-            Shipment.order_id == order_id, Shipment.status.notin_(("cancelled", "failed", "rto"))
+            Shipment.order_id == order_id,
+            Shipment.status.notin_(("cancelled", "failed", "rto")),
+            # A draft whose create died before reaching the courier (no courier id, lease
+            # released or expired) is not live: it must not block cancelling forever.
+            or_(
+                Shipment.status != "draft",
+                Shipment.gateway_shipment_id.is_not(None),
+                Shipment.create_lease_until > dt.datetime.now(dt.UTC),
+            ),
         )
     )
     return bool(n)

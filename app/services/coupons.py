@@ -5,11 +5,12 @@ per-user usage limits, computes the (capped) discount, and reserves one use by
 incrementing used_count. The caller records a CouponRedemption once the order exists.
 """
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.order import Order
+from app.models.shipment import Shipment
 from app.services.subscription import today_ist
 
 
@@ -44,7 +45,13 @@ async def validate_and_reserve(
             CouponRedemption.coupon_id == coupon.id,
             CouponRedemption.account_id == account_id,
             Order.payment_status == "pending",
-            Order.status.notin_(("cancelled",)),
+            Order.status.in_(("created", "pending")),
+            # A COD order already handed to the courier is a real purchase, not a hoarded
+            # reservation (it can't be cancelled any more, and is paid on delivery).
+            ~exists().where(
+                Shipment.order_id == Order.id,
+                Shipment.status.notin_(("cancelled", "failed", "rto")),
+            ),
         )
     )
     if outstanding:

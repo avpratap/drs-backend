@@ -1,6 +1,8 @@
+
 """Admin management CRUD: delivery-staff assignment, price tiers/prices, tier
 assignment, account finance, shop mgmt, coupons, users, withdrawals. All admin-gated."""
 import datetime as dt
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -321,6 +323,47 @@ async def set_account_tier(account_id: int, data: TierAssignIn, db: AsyncSession
     return {"detail": "tier set", "account_id": account_id, "price_tier_id": data.price_tier_id}
 
 
+class AccountTypeIn(BaseModel):
+    account_type: Literal["retail", "b2b"] | None = None
+    billing_mode: Literal["prepaid_wallet", "postpaid_credit"] | None = None
+
+
+class AccountTypeOut(BaseModel):
+    account_id: int
+    account_type: str
+    billing_mode: str
+
+
+@router.patch(
+    "/accounts/{account_id}/type", operation_id="set_account_type", response_model=AccountTypeOut
+)
+async def set_account_type(account_id: int, data: AccountTypeIn, db: AsyncSession = Depends(get_db)):
+    """Correct an account's type / billing mode (accounts were typed by whichever endpoint
+    first created them, and nothing else could change it)."""
+    account = (
+        await db.execute(
+            select(CustomerAccount).where(CustomerAccount.id == account_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    if (
+        data.billing_mode == "prepaid_wallet"
+        and account.billing_mode == "postpaid_credit"
+        and await billing_svc.credit_outstanding(db, account_id) > 0
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Settle the outstanding credit before switching to prepaid"
+        )
+    if data.account_type is not None:
+        account.account_type = data.account_type
+    if data.billing_mode is not None:
+        account.billing_mode = data.billing_mode
+    await db.commit()
+    return {"account_id": account.id, "account_type": account.account_type,
+            "billing_mode": account.billing_mode}
+
+
 # ---------- User management ----------
 _VALID_ROLES = {"admin", "customer", "subscriber", "delivery"}
 # Roles an admin may PROVISION directly (phone-verified, no OTP). Retail "customer"
@@ -430,7 +473,10 @@ async def admin_erase_user(
     # Record the audit BEFORE erasure so the actor/target are captured even though
     # erase_user commits internally (the audit row is flushed into that same txn).
     await audit_svc.record_audit(db, actor.id, "user_erase", "user", user_id)
-    return await dpdp.erase_user(db, user)
+    try:
+        return await dpdp.erase_user(db, user)
+    except dpdp.ErasureBlocked as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
 
 # ---------- Coupons ----------
@@ -535,12 +581,14 @@ async def admin_wallet_adjust(
     if await db.get(CustomerAccount, account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     wallet = await billing_svc.wallet_adjust(
-        db, account_id, data.amount, f"admin_{data.reason}"[:20], "admin", None,
+        # Fixed ledger type (the free-text reason was cut to 20 chars into txn_type); the
+        # full reason and note live in the audit record written below.
+        db, account_id, data.amount, "adjustment", "admin", None,
         allow_negative=True,
     )
     await audit_svc.record_audit(
         db, actor.id, "wallet_adjust", "customer_account", account_id,
-        detail={"amount": float(data.amount), "reason": data.reason},
+        detail={"amount": float(data.amount), "reason": data.reason, "note": data.note},
     )
     await db.commit()
     return {"account_id": account_id, "wallet_balance": float(wallet.balance)}

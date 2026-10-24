@@ -25,6 +25,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -48,7 +49,9 @@ class UserProfile(Base, TimestampMixin):
     gstin: Mapped[str | None] = mapped_column(String(15), nullable=True)
     legal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Notification channel toggles (per-category legal consent is in Consent)
-    notify_whatsapp: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notify_whatsapp: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )  # on only with a whatsapp_optin (Meta policy)
     notify_sms: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notify_push: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notify_email: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -141,7 +144,7 @@ class Consent(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     purpose: Mapped[str] = mapped_column(
         String(40), nullable=False
-    )  # whatsapp_optin|marketing_sms|marketing_email|marketing_push|data_processing
+    )  # whatsapp_optin|marketing_sms|marketing_email|marketing_push|marketing_whatsapp|data_processing
     action: Mapped[str] = mapped_column(String(10), nullable=False)  # granted|withdrawn
     source: Mapped[str] = mapped_column(String(16), default="app", nullable=False)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)

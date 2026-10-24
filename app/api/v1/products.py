@@ -221,19 +221,27 @@ async def rate_product(
             user_id=user.id, product_id=product_id, stars=data.stars, comment=data.comment,
             verified_purchase=verified, status=initial_status,
         )
-        db.add(row)
         try:
-            await db.flush()
+            # Savepoint: a full rollback would expire `user` (same session) and the next
+            # attribute access would 500.
+            async with db.begin_nested():
+                db.add(row)
+                await db.flush()
         except IntegrityError:
             # Concurrent first rating by the same user (uq_rating_user_product) — fall back
-            # to updating the row the other request committed.
-            await db.rollback()
-            row = await db.scalar(
-                select(Rating).where(Rating.user_id == user.id, Rating.product_id == product_id)
-            )
+            # to updating the row the other request committed, with the same rules.
+            row = (
+                await db.execute(
+                    select(Rating)
+                    .where(Rating.user_id == user.id, Rating.product_id == product_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
             row.stars = data.stars
             row.comment = data.comment
             row.verified_purchase = verified
+            if row.status == "rejected" or (not verified and row.status == "approved"):
+                row.status = "pending"
             await db.flush()
     await review_svc.recompute_product_rating(db, product_id)
     await db.commit()
@@ -276,8 +284,11 @@ async def toggle_helpful(
     row = (
         await db.execute(select(Rating).where(Rating.id == rating_id).with_for_update())
     ).scalar_one_or_none()
-    if row is None or row.product_id != product_id:
+    # Only published reviews can be voted on (a pending/rejected one isn't visible).
+    if row is None or row.product_id != product_id or row.status != "approved":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Review not found")
+    if row.user_id == user.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You can't vote on your own review")
     vote = await db.scalar(
         select(ReviewHelpful).where(
             ReviewHelpful.rating_id == rating_id, ReviewHelpful.user_id == user.id

@@ -15,6 +15,15 @@ from app.deps.pagination import Page, pagination
 from app.models.notification import Notification
 from app.models.user import User
 
+# The in-app bell = push-channel rows that were (or could have been) sent: not skipped,
+# or skipped only for lack of a device (no_address) — the bell doesn't depend on FCM.
+# Rows skipped by the user's own choice (channel off) or by consent gating (marketing
+# without opt-in/consent) must NOT surface in-app either.
+_IN_BELL = or_(
+    Notification.skip_reason.is_(None),
+    Notification.skip_reason.in_(("no_address", "provider_unavailable")),
+)
+
 router = APIRouter(prefix="/notifications", tags=["inbox"])
 
 
@@ -41,13 +50,10 @@ async def list_my_notifications(
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    # The in-app bell = push-channel rows, EXCLUDING only those skipped because the user
-    # turned push OFF (channel_off). A no-device "skipped" (no_address) or an FCM-delivery
-    # "failed" row is still a valid in-app message — the bell doesn't depend on FCM.
     q = select(Notification).where(
         Notification.user_id == user.id,
         Notification.channel == "push",
-        or_(Notification.skip_reason.is_(None), Notification.skip_reason != "channel_off"),
+        _IN_BELL,
     )
     if unread_only:
         q = q.where(Notification.read_at.is_(None))
@@ -63,7 +69,7 @@ async def unread_count(user: User = Depends(get_current_user), db: AsyncSession 
         .where(
             Notification.user_id == user.id,
             Notification.channel == "push",
-            or_(Notification.skip_reason.is_(None), Notification.skip_reason != "channel_off"),
+            _IN_BELL,
             Notification.read_at.is_(None),
         )
     )
@@ -94,7 +100,7 @@ async def mark_all_read(user: User = Depends(get_current_user), db: AsyncSession
         .where(
             Notification.user_id == user.id,
             Notification.channel == "push",
-            or_(Notification.skip_reason.is_(None), Notification.skip_reason != "channel_off"),
+            _IN_BELL,
             Notification.read_at.is_(None),
         )
         .values(read_at=dt.datetime.now(dt.UTC))

@@ -36,6 +36,15 @@ def _stub(channel: str, to_addr: str, body: str) -> tuple[bool, str | None, str 
     return True, f"stub_{channel}_{secrets.token_hex(6)}", None
 
 
+def channel_unavailable(channel: str) -> str | None:
+    """A channel that can't deliver in this deployment (skip, don't retry 5x into the
+    DLQ). Transactional SMS needs a DLT-approved MSG91 flow that isn't wired yet, so in
+    prod it is skipped; other unconfigured channels still FAIL loudly in prod (_stub)."""
+    if channel == "sms" and settings.ENV == "prod":
+        return "provider_unavailable"
+    return None
+
+
 async def send_whatsapp(to_addr: str, body: str, payload: dict | None) -> tuple[bool, str | None, str | None]:
     if not whatsapp_enabled():
         return _stub("whatsapp", to_addr, body)

@@ -11,7 +11,7 @@ GSTIN_RE = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
 # ---------- Profile ----------
 class ProfileUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=120)
-    avatar_url: str | None = Field(default=None, max_length=512)
+    avatar_url: str | None = Field(default=None, max_length=512, pattern=r"^(https://|media:)\S+$")
     date_of_birth: dt.date | None = None
     gender: Literal["male", "female", "other", "undisclosed"] | None = None
     locale: str | None = Field(default=None, max_length=12)
@@ -27,7 +27,8 @@ class ProfileUpdate(BaseModel):
     notify_sms: bool | None = None
     notify_push: bool | None = None
     notify_email: bool | None = None
-    marketing_opt_in: bool | None = None
+    # marketing_opt_in is NOT settable here: it is derived from the consent ledger
+    # (POST /consents), so it can never be on without a recorded consent.
     quiet_hours_start: int | None = Field(default=None, ge=0, le=23)
     quiet_hours_end: int | None = Field(default=None, ge=0, le=23)
 
@@ -55,7 +56,7 @@ class ProfileOut(BaseModel):
     alternate_phone: str | None = None
     gstin: str | None = None
     legal_name: str | None = None
-    notify_whatsapp: bool = True
+    notify_whatsapp: bool = False
     notify_sms: bool = True
     notify_push: bool = True
     notify_email: bool = False
@@ -168,7 +169,7 @@ class MandateOut(BaseModel):
 class ConsentIn(BaseModel):
     purpose: Literal[
         "whatsapp_optin", "marketing_sms", "marketing_email", "marketing_push",
-        "data_processing",
+        "marketing_whatsapp", "data_processing",
     ]
     action: Literal["granted", "withdrawn"]
 

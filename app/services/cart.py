@@ -46,12 +46,23 @@ async def get_or_create_active_cart(db: AsyncSession, account_id: int) -> Cart:
     return cart
 
 
-async def _require_product(db: AsyncSession, product_id: int) -> None:
+async def _require_product(db: AsyncSession, product_id: int) -> Product:
     product = await db.get(Product, product_id)
     if product is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     if product.status != "active":  # can't add a retired/soft-deleted product
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Product is not available")
+    return product
+
+
+async def _lock_active_cart(db: AsyncSession, cart: Cart) -> None:
+    """Serialize with checkout (which locks the cart and converts it): an add/update that
+    raced it would land on the converted cart and be silently lost."""
+    row = (
+        await db.execute(select(Cart).where(Cart.id == cart.id).with_for_update())
+    ).scalar_one()
+    if row.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This cart was just checked out; retry")
 
 
 async def _items(db: AsyncSession, cart_id: int) -> list[CartItem]:
@@ -78,7 +89,8 @@ async def _locked_item(db: AsyncSession, cart_id: int, item_id: int) -> CartItem
 
 
 async def add_item(db: AsyncSession, cart: Cart, product_id: int, qty: float) -> None:
-    await _require_product(db, product_id)
+    product = await _require_product(db, product_id)
+    await _lock_active_cart(db, cart)
     existing = (
         await db.execute(
             select(CartItem)
@@ -89,9 +101,11 @@ async def add_item(db: AsyncSession, cart: Cart, product_id: int, qty: float) ->
     if existing is not None:  # merge same product into one line
         new_qty = round(float(existing.qty) + qty, 3)
         _check_qty(new_qty)
+        order_service.check_whole_units(product, new_qty)
         existing.qty = new_qty
         return
     _check_qty(round(qty, 3))
+    order_service.check_whole_units(product, round(qty, 3))
     # No row to lock yet: a concurrent first add could insert too. UNIQUE(cart_id,
     # product_id) arbitrates; the loser merges into the winner's row.
     try:
@@ -122,8 +136,10 @@ def _check_qty(qty: float) -> None:
 
 
 async def set_item_qty(db: AsyncSession, cart: Cart, item_id: int, qty: float) -> None:
+    await _lock_active_cart(db, cart)
     item = await _locked_item(db, cart.id, item_id)
     _check_qty(round(qty, 3))
+    order_service.check_whole_units(await db.get(Product, item.product_id), round(qty, 3))
     item.qty = round(qty, 3)
 
 

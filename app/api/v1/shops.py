@@ -9,6 +9,7 @@ from app.deps.scope import ALL, allowed_shop_ids
 from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
 from app.schemas.shop import ShopCreate, ShopOut
+from app.services import profile as profile_svc
 
 router = APIRouter(prefix="/shops", tags=["shops"])
 
@@ -41,7 +42,8 @@ async def create_shop(
     account = res.scalar_one_or_none()
     if account is None:
         account = CustomerAccount(
-            owner_user_id=user.id, account_type="b2b", billing_mode="prepaid_wallet"
+            owner_user_id=user.id, account_type=profile_svc.account_type_for(user, business=True),
+            billing_mode="prepaid_wallet"
         )
         db.add(account)
         await db.flush()

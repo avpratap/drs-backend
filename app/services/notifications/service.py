@@ -30,7 +30,7 @@ log = logging.getLogger("drs.notify")
 MAX_ATTEMPTS = 5
 
 _CONSENT_PURPOSE = {
-    "whatsapp": "whatsapp_optin",
+    "whatsapp": "marketing_whatsapp",
     "sms": "marketing_sms",
     "email": "marketing_email",
     "push": "marketing_push",
@@ -149,6 +149,8 @@ async def _emit_event_inner(
     for channel in channels:
         status, skip_reason, scheduled_for = "queued", None, None
         reason = _gate_reason(prof, consents, channel, category)
+        if reason is None:
+            reason = sender_mod.channel_unavailable(channel)
         if reason is not None:
             status, skip_reason = "skipped", reason
         elif category == tmpl.MARKETING and _in_quiet_hours(prof, now):
@@ -202,13 +204,15 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
         return notif.status == "sent"
     # Re-check gating AT SEND TIME: a row may have waited (quiet hours, retry backoff,
     # admin resend) while the user withdrew consent / turned the channel off / was erased.
-    user = await db.get(User, notif.user_id)
+    # populate_existing: the drain's session lives across many rows — a user erased or a
+    # profile changed after an earlier row loaded them must be seen fresh here.
+    user = await db.get(User, notif.user_id, populate_existing=True)
     if user is None or user.status == "erased":
         notif.status, notif.skip_reason = "skipped", "user_erased"
         await db.commit()
         return False
     if notif.category == tmpl.MARKETING or notif.channel in _TOGGLE_ATTR:
-        prof = await profile_svc.get_or_create_profile(db, user)
+        prof = await profile_svc.get_or_create_profile(db, user, fresh=True)
         consents = (
             await profile_svc.current_consents(db, user.id)
             if notif.category == tmpl.MARKETING else {}
@@ -226,6 +230,11 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
             notif.status, notif.skip_reason = "skipped", "no_address"
             await db.commit()
             return False
+    unavailable = sender_mod.channel_unavailable(notif.channel)
+    if unavailable:
+        notif.status, notif.skip_reason = "skipped", unavailable
+        await db.commit()
+        return False
     sender = sender_mod.SENDERS.get(notif.channel)
     if sender is None:
         notif.status, notif.error = "failed", "no sender"

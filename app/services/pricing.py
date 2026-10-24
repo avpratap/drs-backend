@@ -21,7 +21,8 @@ async def resolve_tier_id(db: AsyncSession, shop: Shop) -> int | None:
 
 
 async def resolve_unit_price(
-    db: AsyncSession, product_id: int, tier_id: int | None, qty: float
+    db: AsyncSession, product_id: int, tier_id: int | None, qty: float,
+    on: dt.date | None = None,
 ) -> float | None:
     """Applicable unit price for the product+tier+qty, or None when NO price is
     configured (no tier, or no ProductPrice row). None is distinct from a legitimately
@@ -29,7 +30,8 @@ async def resolve_unit_price(
     unpriced product instead of silently charging ₹0."""
     if tier_id is None:
         return None
-    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+    # `on`: price as of that date (a standing order is priced on its delivery date).
+    today = on or dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
     res = await db.execute(
         select(ProductPrice)
         .where(

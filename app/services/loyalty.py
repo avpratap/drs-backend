@@ -114,9 +114,16 @@ async def get_or_create_referral_code(db: AsyncSession, account_id: int) -> Refe
         code = _token(8)
         if await db.scalar(select(ReferralCode.id).where(ReferralCode.code == code)) is None:
             break
-    rc = ReferralCode(account_id=account_id, code=code)
-    db.add(rc)
-    await db.flush()
+    try:
+        # Race-safe: a concurrent first call inserts for the same (unique) account_id.
+        async with db.begin_nested():
+            rc = ReferralCode(account_id=account_id, code=code)
+            db.add(rc)
+            await db.flush()
+    except IntegrityError:
+        rc = await db.scalar(select(ReferralCode).where(ReferralCode.account_id == account_id))
+        if rc is None:  # the collision was on the random code itself — try once more
+            return await get_or_create_referral_code(db, account_id)
     return rc
 
 
