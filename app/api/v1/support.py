@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import media
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.support import SupportTicket, TicketMessage
 from app.models.user import User
 from app.services import support
@@ -217,8 +217,22 @@ async def admin_list_tickets(
         q = q.where(SupportTicket.status == status_filter)
     if category:
         q = q.where(SupportTicket.category == category)
-    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    rows = await paged(db, q, page)
     return await _with_messages_many(db, list(rows))
+
+
+@router.get(
+    "/admin/support/tickets/{ticket_id}",
+    response_model=TicketOut,
+    operation_id="admin_get_ticket",
+    dependencies=[Depends(require_role("admin"))],
+)
+async def admin_get_ticket(ticket_id: int, db: AsyncSession = Depends(get_db)):
+    """Any ticket with its thread (the customer endpoint only serves the owner's)."""
+    ticket = await db.get(SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    return await _with_messages(db, ticket)
 
 
 @router.post(

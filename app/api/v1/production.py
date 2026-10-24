@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.product import Product
 from app.models.production import BillOfMaterials, BomComponent, ProductionOrder
 from app.models.user import User
@@ -121,7 +121,7 @@ async def list_boms(
     q = select(BillOfMaterials).order_by(BillOfMaterials.id.desc())
     if product_id is not None:
         q = q.where(BillOfMaterials.product_id == product_id)
-    boms = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    boms = await paged(db, q, page)
     if not boms:
         return []
     # Batch all components in one query (no N+1 across the page).
@@ -180,7 +180,7 @@ async def list_production_orders(
     q = select(ProductionOrder).order_by(ProductionOrder.id.desc())
     if status_filter:
         q = q.where(ProductionOrder.status == status_filter)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.get("/production-orders/{pro_id}", response_model=ProductionOut, operation_id="get_production_order")

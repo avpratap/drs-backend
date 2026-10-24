@@ -1,17 +1,17 @@
 """Admin depth: audit log, CSV exports, feature flags, outbound webhooks, product search."""
 import datetime as dt
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clientip import client_ip
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.admin_tools import (
     AdminAuditLog,
     FeatureFlag,
@@ -20,6 +20,7 @@ from app.models.admin_tools import (
 )
 from app.models.product import Product
 from app.schemas.common import reject_nulls
+from app.schemas.product import ProductOut
 from app.services import admin_tools as svc
 
 router = APIRouter(prefix="/admin", tags=["admin-tools"], dependencies=[Depends(require_role("admin"))])
@@ -109,7 +110,7 @@ async def list_audit_log(
         q = q.where(AdminAuditLog.action == action)
     if admin_user_id is not None:
         q = q.where(AdminAuditLog.admin_user_id == admin_user_id)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 # ---------- CSV exports ----------
@@ -189,11 +190,7 @@ async def create_outbound_webhook(data: WebhookIn, db: AsyncSession = Depends(ge
 
 @router.get("/outbound-webhooks", response_model=list[WebhookOut], operation_id="list_outbound_webhooks")
 async def list_outbound_webhooks(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
-    return (
-        await db.execute(
-            select(OutboundWebhook).order_by(OutboundWebhook.id.desc()).limit(page.limit).offset(page.offset)
-        )
-    ).scalars().all()
+    return await paged(db, select(OutboundWebhook).order_by(OutboundWebhook.id.desc()), page)
 
 
 @router.delete(
@@ -232,15 +229,12 @@ async def list_webhook_deliveries(
 ):
     if await db.get(OutboundWebhook, hook_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook not found")
-    return (
-        await db.execute(
-            select(OutboundWebhookDelivery)
-            .where(OutboundWebhookDelivery.webhook_id == hook_id)
-            .order_by(OutboundWebhookDelivery.id.desc())
-            .limit(page.limit)
-            .offset(page.offset)
-        )
-    ).scalars().all()
+    q = (
+        select(OutboundWebhookDelivery)
+        .where(OutboundWebhookDelivery.webhook_id == hook_id)
+        .order_by(OutboundWebhookDelivery.id.desc())
+    )
+    return await paged(db, q, page)
 
 
 @router.post(
@@ -267,6 +261,31 @@ async def test_outbound_webhook(hook_id: int, db: AsyncSession = Depends(get_db)
     return delivery
 
 
+# ---------- Admin product list ----------
+@router.get("/products", response_model=list[ProductOut], operation_id="admin_list_products")
+async def admin_list_products(
+    status_filter: str = Query("all", alias="status", pattern="^(all|active|retired)$"),
+    q: str | None = None,
+    category: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    """Catalogue list for the admin dashboard. Unlike the storefront `/products`
+    (active only, cached) this can include retired products and reports a total."""
+    query = select(Product).order_by(Product.id.desc())
+    if status_filter != "all":
+        query = query.where(Product.status == status_filter)
+    if category is not None:
+        query = query.where(Product.category == category)
+    if q:
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        query = query.where(
+            or_(Product.name.ilike(like, escape="\\"), Product.sku.ilike(like, escape="\\"))
+        )
+    return await paged(db, query, page)
+
+
 # ---------- Full-text product search ----------
 @router.get("/products/search", response_model=list[ProductSearchOut], operation_id="admin_product_search")
 async def product_search(
@@ -282,7 +301,6 @@ async def product_search(
             )
         )
         .order_by(Product.id)
-        .limit(page.limit)
-        .offset(page.offset)
+        .params(q=q)
     )
-    return (await db.execute(stmt, {"q": q})).scalars().all()
+    return await paged(db, stmt, page)

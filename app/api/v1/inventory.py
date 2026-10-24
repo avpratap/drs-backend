@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.batch import StockBatch
 from app.models.inventory import StockItem, StockMovement
 from app.models.product import Product
@@ -138,9 +138,7 @@ async def update_location(location_id: int, data: LocationPatch, db: AsyncSessio
 
 @router.get("/locations", response_model=list[LocationOut], operation_id="list_locations")
 async def list_locations(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
-    return (
-        await db.execute(select(Location).order_by(Location.id).limit(page.limit).offset(page.offset))
-    ).scalars().all()
+    return await paged(db, select(Location).order_by(Location.id), page)
 
 
 # ---------- Stock ----------
@@ -161,7 +159,7 @@ async def list_stock(
         q = q.where(StockItem.location_id == location_id)
     if product_id is not None:
         q = q.where(StockItem.product_id == product_id)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.get("/stock/low", response_model=list[StockItemOut], operation_id="list_low_stock")
@@ -170,7 +168,7 @@ async def list_low_stock(db: AsyncSession = Depends(get_db), page: Page = Depend
     q = select(StockItem).where(
         StockItem.reorder_point > 0, StockItem.qty_on_hand <= StockItem.reorder_point
     ).order_by(StockItem.product_id)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 class ReorderSuggestionOut(BaseModel):
@@ -191,18 +189,15 @@ async def list_reorder_suggestions(
 ):
     """For each item at/below its reorder point, suggest a replenishment qty that
     tops it back up to 2x the reorder point (a starting point for a purchase order)."""
-    rows = (
-        await db.execute(
-            select(StockItem)
-            .where(
-                StockItem.reorder_point > 0,
-                StockItem.qty_on_hand <= StockItem.reorder_point,
-            )
-            .order_by(StockItem.product_id)
-            .limit(page.limit)
-            .offset(page.offset)
+    q = (
+        select(StockItem)
+        .where(
+            StockItem.reorder_point > 0,
+            StockItem.qty_on_hand <= StockItem.reorder_point,
         )
-    ).scalars().all()
+        .order_by(StockItem.product_id)
+    )
+    rows = await paged(db, q, page)
     out = []
     for it in rows:
         target = float(it.reorder_point) * 2
@@ -347,7 +342,7 @@ async def list_batches(
         q = q.where(
             StockBatch.expiry_date.is_not(None), StockBatch.expiry_date < expiring_before
         )
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 class ExpireResultOut(BaseModel):
@@ -380,11 +375,9 @@ async def expire_batches(
 async def movements(
     product_id: int, db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)
 ):
-    res = await db.execute(
+    q = (
         select(StockMovement)
         .where(StockMovement.product_id == product_id)
         .order_by(StockMovement.id.desc())
-        .limit(page.limit)
-        .offset(page.offset)
     )
-    return res.scalars().all()
+    return await paged(db, q, page)

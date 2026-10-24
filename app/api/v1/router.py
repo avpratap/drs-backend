@@ -4,6 +4,7 @@ from app.api.v1 import (
     account,
     admin,
     admin_analytics,
+    admin_ops,
     admin_sales,
     admin_tools,
     ai,
@@ -70,6 +71,7 @@ api_router.include_router(ml.router)
 api_router.include_router(ai.router)
 api_router.include_router(admin_sales.router)
 api_router.include_router(admin_analytics.router)
+api_router.include_router(admin_ops.router)
 api_router.include_router(uploads.router)
 api_router.include_router(home.router)
 api_router.include_router(inbox.router)

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.order import Order
 from app.models.rma import ReturnRequest, ReturnRequestItem
 from app.models.shop import CustomerAccount
@@ -176,7 +176,7 @@ async def admin_list_returns(
     q = select(ReturnRequest).order_by(ReturnRequest.id.desc())
     if status_filter:
         q = q.where(ReturnRequest.status == status_filter)
-    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    rows = await paged(db, q, page)
     return await _outs(db, list(rows))
 
 

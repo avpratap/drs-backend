@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.procurement import PurchaseOrder, PurchaseOrderItem, Supplier
 from app.models.product import Product
 from app.models.user import User
@@ -121,9 +121,7 @@ async def create_supplier(data: SupplierIn, db: AsyncSession = Depends(get_db)):
 
 @router.get("/suppliers", response_model=list[SupplierOut], operation_id="list_suppliers")
 async def list_suppliers(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
-    return (
-        await db.execute(select(Supplier).order_by(Supplier.id).limit(page.limit).offset(page.offset))
-    ).scalars().all()
+    return await paged(db, select(Supplier).order_by(Supplier.id), page)
 
 
 # ---------- Purchase orders ----------
@@ -154,7 +152,7 @@ async def list_pos(
     q = select(PurchaseOrder).order_by(PurchaseOrder.id.desc())
     if status_filter:
         q = q.where(PurchaseOrder.status == status_filter)
-    pos = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    pos = await paged(db, q, page)
     if not pos:
         return []
     # Batch all line items in one query (no N+1 across the page).

@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.sendlimit import allow_send
 from app.deps.auth import require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.newsletter import NewsletterSubscriber
 from app.services.notifications import senders as sender_mod
 
@@ -211,4 +211,4 @@ async def list_subscribers(
     q = select(NewsletterSubscriber).order_by(NewsletterSubscriber.id.desc())
     if status_filter:
         q = q.where(NewsletterSubscriber.status == status_filter)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)

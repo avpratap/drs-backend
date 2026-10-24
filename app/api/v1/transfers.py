@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.transfer import StockTransfer, StockTransferItem
 from app.models.user import User
 from app.services import transfers
@@ -87,7 +87,7 @@ async def list_transfers(
     q = select(StockTransfer).order_by(StockTransfer.id.desc())
     if status_filter:
         q = q.where(StockTransfer.status == status_filter)
-    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    rows = await paged(db, q, page)
     if not rows:
         return []
     # Fetch all line items for the page in ONE query (no N+1 across transfers).

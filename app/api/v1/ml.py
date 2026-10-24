@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.churn import ChurnScore
 from app.models.delivery import DeliveryOrder
 from app.models.product import Product
@@ -78,7 +78,7 @@ async def list_churn(
     q = select(ChurnScore).order_by(ChurnScore.score.desc())
     if risk in ("low", "medium", "high"):
         q = q.where(ChurnScore.risk == risk)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.post("/admin/ml/churn/score", response_model=ChurnRunOut, operation_id="run_churn_scoring",

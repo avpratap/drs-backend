@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.loyalty import GiftCard, LoyaltyAccount
 from app.models.shop import CustomerAccount
 from app.models.user import User
@@ -237,13 +237,7 @@ async def admin_issue_gift_card(data: IssueGiftIn, db: AsyncSession = Depends(ge
     dependencies=[Depends(require_role("admin"))],
 )
 async def admin_list_loyalty(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
-    rows = (
-        await db.execute(
-            select(LoyaltyAccount).order_by(LoyaltyAccount.points_balance.desc())
-            .limit(page.limit).offset(page.offset)
-        )
-    ).scalars().all()
-    return rows
+    return await paged(db, select(LoyaltyAccount).order_by(LoyaltyAccount.points_balance.desc()), page)
 
 
 @router.get(
@@ -263,7 +257,7 @@ async def admin_list_gift_cards(
         q = q.where(GiftCard.status == status_filter)
     if issued_to is not None:
         q = q.where(GiftCard.issued_to_account_id == issued_to)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.post(

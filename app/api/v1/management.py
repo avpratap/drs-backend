@@ -14,7 +14,7 @@ from app.core.db import get_db
 from app.core.phone import is_indian_mobile, normalize_phone
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
-from app.deps.pagination import Page, pagination
+from app.deps.pagination import Page, paged, pagination
 from app.models.billing import CreditLedger, Wallet, WithdrawalRequest
 from app.models.coupon import Coupon
 from app.models.delivery import DeliveryOrder
@@ -139,8 +139,7 @@ async def list_delivery_assignments(
         q = q.where(DeliveryAssignment.delivery_id == delivery_id)
     if shop_id is not None:
         q = q.where(DeliveryAssignment.shop_id == shop_id)
-    res = await db.execute(q.limit(page.limit).offset(page.offset))
-    return res.scalars().all()
+    return await paged(db, q, page)
 
 
 @router.delete(
@@ -247,7 +246,7 @@ async def list_product_prices(
     q = select(ProductPrice).order_by(ProductPrice.id.desc())
     if product_id is not None:
         q = q.where(ProductPrice.product_id == product_id)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.get(
@@ -420,7 +419,7 @@ async def list_users(
         q = q.where(User.role == role)
     if status_filter is not None:
         q = q.where(User.status == status_filter)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.patch("/users/{user_id}", response_model=UserAdminOut, operation_id="update_user")
@@ -504,7 +503,7 @@ async def list_coupons(
     q = select(Coupon).order_by(Coupon.id.desc())
     if active is not None:
         q = q.where(Coupon.active == active)
-    return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    return await paged(db, q, page)
 
 
 @router.get("/coupons/{coupon_id}", response_model=CouponOut, operation_id="get_coupon")
@@ -650,8 +649,7 @@ async def admin_settle_credit(
 # ---------- Shop management ----------
 @router.get("/shops", response_model=list[ShopOut], operation_id="admin_list_shops")
 async def admin_list_shops(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
-    res = await db.execute(select(Shop).order_by(Shop.id).limit(page.limit).offset(page.offset))
-    return res.scalars().all()
+    return await paged(db, select(Shop).order_by(Shop.id), page)
 
 
 @router.patch("/shops/{shop_id}", response_model=ShopOut, operation_id="admin_update_shop")
@@ -678,7 +676,7 @@ async def admin_list_withdrawals(
     q = select(WithdrawalRequest).order_by(WithdrawalRequest.id.desc())
     if status_filter:
         q = q.where(WithdrawalRequest.status == status_filter)
-    rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
+    rows = await paged(db, q, page)
     return [
         {"id": w.id, "account_id": w.account_id, "amount": float(w.amount), "status": w.status}
         for w in rows
