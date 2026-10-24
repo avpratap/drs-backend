@@ -1,5 +1,5 @@
 """Tier-4 #36: loyalty points + referral + gift cards."""
-from conftest import auth, login
+from conftest import auth, ik, login
 
 
 async def _account_id(client, h) -> int:
@@ -11,13 +11,13 @@ async def test_points_adjust_and_insufficient(client):
     cust = auth(await login(client, "9100001001"))
     aid = await _account_id(client, cust)
 
-    r = await client.post(f"/api/v1/admin/loyalty/{aid}/adjust", json={"points": 100, "reason": "promo"}, headers=admin)
+    r = await client.post(f"/api/v1/admin/loyalty/{aid}/adjust", json={"points": 100, "reason": "promo"}, headers=ik(admin))
     assert r.status_code == 200 and r.json()["points_balance"] == 100
 
-    r2 = await client.post(f"/api/v1/admin/loyalty/{aid}/adjust", json={"points": -40}, headers=admin)
+    r2 = await client.post(f"/api/v1/admin/loyalty/{aid}/adjust", json={"points": -40}, headers=ik(admin))
     assert r2.json()["points_balance"] == 60
 
-    over = await client.post(f"/api/v1/admin/loyalty/{aid}/adjust", json={"points": -100}, headers=admin)
+    over = await client.post(f"/api/v1/admin/loyalty/{aid}/adjust", json={"points": -100}, headers=ik(admin))
     assert over.status_code == 409
 
     mine = (await client.get("/api/v1/loyalty", headers=cust)).json()
@@ -46,7 +46,7 @@ async def test_gift_card_redeem(client):
     cust = auth(await login(client, "9100003001"))
     aid = await _account_id(client, cust)
 
-    gc = (await client.post("/api/v1/admin/gift-cards", json={"amount": 500, "issued_to_account_id": aid}, headers=admin)).json()
+    gc = (await client.post("/api/v1/admin/gift-cards", json={"amount": 500, "issued_to_account_id": aid}, headers=ik(admin))).json()
     code = gc["code"]
     assert gc["balance"] == 500.0
 
@@ -72,7 +72,7 @@ async def test_gift_card_over_redeem_and_expired(client):
     cust = auth(await login(client, "9100004001"))
     aid = await _account_id(client, cust)
 
-    small = (await client.post("/api/v1/admin/gift-cards", json={"amount": 100, "issued_to_account_id": aid}, headers=admin)).json()
+    small = (await client.post("/api/v1/admin/gift-cards", json={"amount": 100, "issued_to_account_id": aid}, headers=ik(admin))).json()
     over = await client.post("/api/v1/loyalty/gift-cards/redeem", json={"code": small["code"], "amount": 150}, headers=cust)
     assert over.status_code == 422
 
@@ -80,7 +80,7 @@ async def test_gift_card_over_redeem_and_expired(client):
     r = await client.post(
         "/api/v1/admin/gift-cards",
         json={"amount": 100, "issued_to_account_id": aid, "expires_at": "2020-01-01"},
-        headers=admin,
+        headers=ik(admin),
     )
     assert r.status_code == 422
 
@@ -88,4 +88,4 @@ async def test_gift_card_over_redeem_and_expired(client):
 async def test_loyalty_admin_gate(client):
     cust = auth(await login(client, "9100005001"))
     assert (await client.post("/api/v1/admin/gift-cards", json={"amount": 100}, headers=cust)).status_code == 403
-    assert (await client.post("/api/v1/admin/loyalty/1/adjust", json={"points": 10}, headers=cust)).status_code == 403
+    assert (await client.post("/api/v1/admin/loyalty/1/adjust", json={"points": 10}, headers=ik(cust))).status_code == 403

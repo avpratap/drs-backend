@@ -44,6 +44,28 @@ async def get_or_create_wallet(db: AsyncSession, account_id: int, *, lock: bool 
     return wallet
 
 
+# Ledger entries that move CASH in or out of the wallet. Gift-card redemptions, RMA store
+# credit and admin goodwill are wallet credit too, but were never paid in as money, so
+# they can be spent on deliveries but never paid out as cash.
+_CASH_TXN_TYPES = ("topup", "refund_reversal", "refund_release", "withdrawal")
+
+
+async def withdrawable_cash(db: AsyncSession, account_id: int, balance: float) -> float:
+    """Cash the account may withdraw: its net cash paid in, never above the balance."""
+    cash = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(WalletTransaction.amount), 0))
+            .join(Wallet, Wallet.id == WalletTransaction.wallet_id)
+            .where(
+                Wallet.account_id == account_id,
+                WalletTransaction.txn_type.in_(_CASH_TXN_TYPES),
+            )
+        )
+        or 0
+    )
+    return max(round(min(cash, float(balance)), 2), 0.0)
+
+
 async def wallet_adjust(
     db: AsyncSession,
     account_id: int,

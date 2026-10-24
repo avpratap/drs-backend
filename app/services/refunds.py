@@ -34,6 +34,7 @@ async def refunded_to_source(db: AsyncSession, order_id: int) -> float:
             .where(
                 Payment.ref_type == "order",
                 Payment.ref_id == order_id,
+                Payment.is_excess.is_(False),  # a duplicate capture's refund isn't the order's
                 Refund.status != "failed",
             )
         )
@@ -56,3 +57,31 @@ async def order_refund_headroom(db: AsyncSession, order: Order) -> float:
     """How much more can be refunded on this order across BOTH paths."""
     used = await refunded_to_source(db, order.id) + await refunded_via_rma(db, order.id)
     return max(round(float(order.total) - used, 2), 0.0)
+
+
+# Orders whose payment was captured (whatever has since been refunded).
+SETTLED_STATUSES = ("paid", "partially_refunded", "refunded")
+
+
+def net_order_value():
+    """SQL expression: an order's total minus everything refunded on it (processed refunds
+    to source on its own payments + RMA store credit) — the revenue it actually kept."""
+    to_source = (
+        select(func.coalesce(func.sum(Refund.amount), 0))
+        .join(Payment, Payment.id == Refund.payment_id)
+        .where(
+            Payment.ref_type == "order",
+            Payment.ref_id == Order.id,
+            Payment.is_excess.is_(False),
+            Refund.status == "processed",
+        )
+        .correlate(Order)
+        .scalar_subquery()
+    )
+    via_rma = (
+        select(func.coalesce(func.sum(ReturnRequest.refund_amount), 0))
+        .where(ReturnRequest.order_id == Order.id, ReturnRequest.status == "refunded")
+        .correlate(Order)
+        .scalar_subquery()
+    )
+    return Order.total - to_source - via_rma

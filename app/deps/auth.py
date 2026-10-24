@@ -4,10 +4,11 @@ Shop-scoping (allowed_shop_ids) is added when shop endpoints land — see
 the drs-backend skill for the full multi-shop RBAC pattern.
 """
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.admin_audit import tag_admin_write
 from app.core.db import get_db
 from app.core.security import decode_token
 from app.models.user import User
@@ -37,6 +38,7 @@ async def get_optional_user(
 
 
 async def get_current_user(
+    request: Request,
     cred: HTTPAuthorizationCredentials = Depends(_bearer),
     db: AsyncSession = Depends(get_db),
 ) -> User:
@@ -55,6 +57,7 @@ async def get_current_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found or inactive")
     if user.token_version != payload.get("ver"):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token revoked")
+    await tag_admin_write(request, db.sync_session, user)  # audit every admin write
     return user
 
 

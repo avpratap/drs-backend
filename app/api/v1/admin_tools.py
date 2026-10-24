@@ -35,6 +35,8 @@ class AuditLogOut(BaseModel):
     resource_type: str | None = None
     resource_id: str | None = None
     ip: str | None = None
+    detail: dict | None = None
+    created_at: dt.datetime | None = None
 
 
 class FeatureFlagIn(BaseModel):

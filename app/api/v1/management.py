@@ -46,6 +46,7 @@ from app.schemas.shop import ShopOut
 from app.services import admin_tools as audit_svc
 from app.services import billing as billing_svc
 from app.services import dpdp
+from app.services import refunds as refund_acct
 
 router = APIRouter(
     prefix="/admin", tags=["management"], dependencies=[Depends(require_role("admin"))]
@@ -645,6 +646,11 @@ async def approve_withdrawal(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Withdrawal not found")
     if wd.status != "requested":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Withdrawal is {wd.status}")
+    wallet = await billing_svc.get_or_create_wallet(db, wd.account_id, lock=True)
+    if float(wd.amount) > await billing_svc.withdrawable_cash(db, wd.account_id, float(wallet.balance)):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Withdrawal exceeds the cash withdrawable from the wallet"
+        )
     try:
         await billing_svc.wallet_adjust(
             db, wd.account_id, -float(wd.amount), "withdrawal", "withdrawal", wd.id
@@ -695,7 +701,9 @@ async def reject_withdrawal(
 async def reports_summary(db: AsyncSession = Depends(get_db)):
     """At-a-glance operational + financial counters for the admin dashboard."""
     paid_revenue = await db.scalar(
-        select(func.coalesce(func.sum(Order.total), 0)).where(Order.payment_status == "paid")
+        select(func.coalesce(func.sum(refund_acct.net_order_value()), 0)).where(
+            Order.payment_status.in_(refund_acct.SETTLED_STATUSES)
+        )
     )
     wallet_float = await db.scalar(select(func.coalesce(func.sum(Wallet.balance), 0)))
     # Outstanding postpaid credit = latest balance per account, summed.

@@ -9,6 +9,8 @@
 - cart_items UNIQUE(cart_id, product_id): concurrent adds can't create duplicate lines.
 - subscription_items UNIQUE(subscription_id, product_id): no duplicate product lines.
 - shops: at most one is_home shop per account.
+- payments.is_excess: a capture that did not settle its order (a duplicate capture after
+  another payment paid it) — refunded on its own, never reversing the order/invoice.
 - payments amount CHECK: a zero amount is allowed ONLY for the no-gateway settlement of
   a fully-discounted order (gateway='none'); every gateway payment stays > 0.
 
@@ -32,6 +34,10 @@ def upgrade() -> None:
     op.drop_constraint("ck_payments_amount_pos", "payments", type_="check")
     op.create_check_constraint(
         "ck_payments_amount_pos", "payments", "amount > 0 OR (gateway = 'none' AND amount = 0)"
+    )
+    op.add_column(
+        "payments",
+        sa.Column("is_excess", sa.Boolean(), server_default=sa.false(), nullable=False),
     )
     op.add_column(
         "users", sa.Column("email_verified_at", sa.DateTime(timezone=True), nullable=True)
@@ -106,6 +112,7 @@ def downgrade() -> None:
     op.drop_constraint("uq_subscription_items_sub_product", "subscription_items", type_="unique")
     op.drop_constraint("uq_cart_items_cart_product", "cart_items", type_="unique")
     op.drop_column("refunds", "ledger_applied_at")
+    op.drop_column("payments", "is_excess")
     op.drop_column("users", "email_verified_at")
     op.drop_index("ix_locations_driver_user_id", table_name="locations")
     op.drop_column("locations", "driver_user_id")

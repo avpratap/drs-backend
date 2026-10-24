@@ -13,7 +13,7 @@ _STATES: dict[str, tuple[str, tuple[str, ...]]] = {
     "02": ("Himachal Pradesh", ("HP",)),
     "03": ("Punjab", ("PB",)),
     "04": ("Chandigarh", ("CH",)),
-    "05": ("Uttarakhand", ("UK", "UT", "Uttaranchal")),
+    "05": ("Uttarakhand", ("UK", "Uttaranchal")),
     "06": ("Haryana", ("HR",)),
     "07": ("Delhi", ("DL", "New Delhi", "NCT of Delhi")),
     "08": ("Rajasthan", ("RJ",)),

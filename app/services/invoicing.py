@@ -237,6 +237,10 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
     )
     if existing is not None:
         return existing
+    if float(order.total or 0) <= 0:
+        # A fully discounted order has no taxable supply value: no ₹0 document burns a
+        # serial (same rule as delivery invoices).
+        raise NothingToInvoice("nothing was charged on this order")
 
     place = canonical(await _order_place_of_supply(db, order)) or settings.SELLER_STATE
     interstate = not same_state(place, settings.SELLER_STATE)
@@ -355,9 +359,26 @@ def _retotal(note: Invoice, lines: list[InvoiceLine]) -> None:
 
 
 async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str | None) -> Invoice:
+    """FULL reversal of an invoice (see build_full_credit_note). Commits."""
+    note = await build_full_credit_note(db, invoice, reason)
+    await db.commit()
+    await db.refresh(note)
+    return note
+
+
+async def credited_value(db: AsyncSession, invoice: Invoice) -> float:
+    """Gross value already reversed by the invoice's credit note (0 if none)."""
+    existing = await _existing_credit_note(db, invoice)
+    return round(-float(existing.total), 2) if existing is not None else 0.0
+
+
+async def build_full_credit_note(
+    db: AsyncSession, invoice: Invoice, reason: str | None
+) -> Invoice:
     """FULL reversal of an invoice. One credit note per invoice (uq_credit_note_original):
     idempotent if a full CN exists; an existing PARTIAL CN is upgraded in place to the
-    full reversal (so the invoice is reversed exactly once). Commits."""
+    full reversal (so the invoice is reversed exactly once). Flush-only: callers holding
+    row locks (refund effects) commit it together with the rest of their transaction."""
     if invoice.is_credit_note:
         raise ValueError("cannot issue a credit note against a credit note")
     await db.execute(select(func.pg_advisory_xact_lock(_CN_LOCK_NS, _lk(invoice.id))))
@@ -396,8 +417,7 @@ async def generate_credit_note(db: AsyncSession, invoice: Invoice, reason: str |
     ]
     db.add_all(new_lines)
     _retotal(note, new_lines)
-    await db.commit()
-    await db.refresh(note)
+    await db.flush()
     return note
 
 
@@ -482,17 +502,28 @@ async def generate_credit_note_for_lines(
         await db.flush()
     else:
         note = existing
-    # Allocate `target` across portions by gross value; the LAST portion takes the
-    # remainder so the lines sum to target to the paisa. Each line total is split with
-    # the same inclusive formula as the invoice, so taxable + tax == line total exactly.
+    # Allocate `target` across portions by gross value, in paise: round down, then hand
+    # the leftover paise out one at a time to portions with room, so the lines sum to
+    # target exactly and no line is negative or above what its product has un-reversed.
+    # Each line total is split with the same inclusive formula as the invoice, so
+    # taxable + tax == line total exactly.
+    caps = [round(min(gross, left_val(pid)) * 100) for pid, _, gross in portions]
+    want = round(target * 100)
+    alloc = [min(int(want * g / gross_total + 1e-9), c)
+             for (_, _, g), c in zip(portions, caps, strict=True)]
+    left = want - sum(alloc)
+    while left > 0:
+        moved = False
+        for k in range(len(alloc)):
+            if left > 0 and alloc[k] < caps[k]:
+                alloc[k] += 1
+                left -= 1
+                moved = True
+        if not moved:
+            break
     new_lines: list[InvoiceLine] = []
-    running = 0.0
-    for idx, (pid, qty, gross) in enumerate(portions):
-        if idx < len(portions) - 1:
-            lt = round(target * gross / gross_total, 2)
-        else:
-            lt = round(target - running, 2)
-        running = round(running + lt, 2)
+    for (pid, qty, _gross), paise in zip(portions, alloc, strict=True):
+        lt = round(paise / 100, 2)
         if lt <= 0 and qty <= 0:
             continue
         t = tmpl[pid]

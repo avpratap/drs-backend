@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.loyalty import GiftCard, LoyaltyAccount
 from app.models.shop import CustomerAccount
@@ -195,7 +196,7 @@ async def redeem_gift_card(
     "/admin/loyalty/{account_id}/adjust",
     response_model=LoyaltyOut,
     operation_id="admin_adjust_points",
-    dependencies=[Depends(require_role("admin"))],
+    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
 )
 async def admin_adjust_points(account_id: int, data: AdjustPointsIn, db: AsyncSession = Depends(get_db)):
     if await db.get(CustomerAccount, account_id) is None:
@@ -214,7 +215,7 @@ async def admin_adjust_points(account_id: int, data: AdjustPointsIn, db: AsyncSe
     "/admin/gift-cards",
     response_model=GiftCardOut,
     operation_id="admin_issue_gift_card",
-    dependencies=[Depends(require_role("admin"))],
+    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
 )
 async def admin_issue_gift_card(data: IssueGiftIn, db: AsyncSession = Depends(get_db)):
     if data.issued_to_account_id is not None and await db.get(CustomerAccount, data.issued_to_account_id) is None:

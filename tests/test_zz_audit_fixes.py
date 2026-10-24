@@ -3,7 +3,7 @@ credit notes, order cancellation guards, and input hardening.
 """
 from uuid import uuid4
 
-from conftest import auth, idem, login
+from conftest import auth, idem, ik, login
 
 
 async def _pid(client, token, sku) -> int:
@@ -52,7 +52,7 @@ async def test_full_refund_issues_credit_note(client):
     oid, pay_id, _ = await _paid_order(client, cust, ghee, qty=1)
     # Invoice first, then full refund -> order refunded + a credit note exists.
     inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=auth(cust))).json()
-    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=ik(auth(admin)))
     assert r.status_code == 200
     o = (await client.get(f"/api/v1/orders/{oid}", headers=auth(cust))).json()
     assert o["payment_status"] == "refunded"
@@ -404,7 +404,7 @@ async def test_full_credit_note_nets_out_prior_partial(client):
     # Now a FULL refund-to-source of the payment. One CN per invoice is enforced
     # (uq_credit_note_original), so the existing PARTIAL CN is UPGRADED in place to the
     # full reversal — no second CN, and no GST double-reversal.
-    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=ik(auth(admin)))
     assert r.status_code == 200
     # M6: the ₹500 already refunded via the RMA is counted — only ₹1000 goes to source
     # (previously ₹1500 → ₹2000 paid out on a ₹1500 order).
@@ -413,7 +413,7 @@ async def test_full_credit_note_nets_out_prior_partial(client):
         "payment_status"
     ] == "refunded"
     # Nothing left to refund on either path.
-    again = await client.post(f"/api/v1/payments/{pay_id}/refund", json={"amount": 1}, headers=auth(admin))
+    again = await client.post(f"/api/v1/payments/{pay_id}/refund", json={"amount": 1}, headers=ik(auth(admin)))
     assert again.status_code == 422
 
     invoices = (await client.get("/api/v1/invoices", headers=auth(admin))).json()

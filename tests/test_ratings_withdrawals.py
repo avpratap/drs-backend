@@ -73,10 +73,10 @@ async def test_withdrawal_reject(client):
     wd_id = (await client.post("/api/v1/billing/withdrawals", json={"amount": 20}, headers=auth(sub))).json()["id"]
     rej = await client.post(f"/api/v1/admin/withdrawals/{wd_id}/reject", headers=auth(admin))
     assert rej.status_code == 200 and rej.json()["status"] == "rejected"
-    # Nothing was debited, and the reservation is released: the full balance can be
+    # Nothing was debited, and the reservation is released: the same cash can be
     # requested again.
     assert (await client.get("/api/v1/billing/me", headers=auth(sub))).json()["wallet_balance"] == bal
-    again = await client.post("/api/v1/billing/withdrawals", json={"amount": bal}, headers=auth(sub))
+    again = await client.post("/api/v1/billing/withdrawals", json={"amount": 20}, headers=auth(sub))
     assert again.status_code == 200
     await client.post(f"/api/v1/admin/withdrawals/{again.json()['id']}/reject", headers=auth(admin))
 

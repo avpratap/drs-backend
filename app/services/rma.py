@@ -19,8 +19,9 @@ from app.services import refunds as refund_acct
 
 async def create_request(db: AsyncSession, user, order: Order, items, reason) -> ReturnRequest:
     """Each requested line must be on the order and not exceed the (un-returned) ordered qty.
-    Only a paid, non-cancelled order can be returned."""
-    if order.payment_status != "paid":
+    Only a paid (or partly refunded — the shared refund cap still bounds it), non-cancelled
+    order can be returned."""
+    if order.payment_status not in ("paid", "partially_refunded"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Only a paid order can be returned"
         )
@@ -186,9 +187,23 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
             returned[li.product_id] = returned.get(li.product_id, 0.0) + float(li.qty)
         # Prorate the credit note to the amount actually refunded (goodwill partials
         # must not over-reverse output GST).
-        await invoicing.generate_credit_note_for_lines(
-            db, inv, returned, reason=f"Return {rr.rma_no}", amount=round(float(amount), 2)
-        )
+        amt = round(float(amount), 2)
+        reason = f"Return {rr.rma_no}"
+        before = await invoicing.credited_value(db, inv)
+        await invoicing.generate_credit_note_for_lines(db, inv, returned, reason=reason, amount=amt)
+        # A value-only credit note from an earlier partial refund to source may already
+        # have reversed part of the returned products' value: reverse the shortfall from
+        # the other products so the credit note still matches the money handed back.
+        short = round(amt - (await invoicing.credited_value(db, inv) - before), 2)
+        if short > 0:
+            await invoicing.generate_credit_note_for_lines(db, inv, None, reason=reason, amount=short)
+    if order is not None and order.payment_status in ("paid", "partially_refunded"):
+        # Nothing left to refund across both paths -> the order is fully refunded and its
+        # invoice fully reversed; otherwise a refund to source earlier stays partial.
+        if await refund_acct.order_refund_headroom(db, order) <= 0:
+            order.payment_status = "refunded"
+            if inv is not None:
+                await invoicing.build_full_credit_note(db, inv, reason=f"Return {rr.rma_no}")
     return rr
 
 

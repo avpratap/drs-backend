@@ -110,10 +110,12 @@ async def request_withdrawal(
         )
         or 0
     )
-    if data.amount > round(float(wallet.balance) - pending, 2):
+    cash = await billing_service.withdrawable_cash(db, account.id, float(wallet.balance))
+    if data.amount > round(cash - pending, 2):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Amount exceeds available wallet balance (after pending withdrawals)",
+            "Amount exceeds the withdrawable wallet balance (cash paid in, after pending "
+            "withdrawals; gift-card and store credit can't be withdrawn)",
         )
     wd = WithdrawalRequest(account_id=account.id, amount=data.amount, note=data.note)
     db.add(wd)

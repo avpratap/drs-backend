@@ -1,6 +1,8 @@
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import ORMExecuteState, Session
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
@@ -39,6 +41,16 @@ def _engine_kwargs() -> dict:
 
 engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs())
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _locked_reads_refresh(state: ORMExecuteState) -> None:
+    """A SELECT ... FOR UPDATE must load the row as the lock sees it. With
+    expire_on_commit=False the identity map would otherwise hand back a copy read
+    before an earlier commit in this session (e.g. a wallet balance read before a
+    refund's gateway call), and the read-modify-write would lose a concurrent update."""
+    if state.is_select and getattr(state.statement, "_for_update_arg", None) is not None:
+        state.update_execution_options(populate_existing=True)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

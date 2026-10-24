@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
+from app.models.billing import WalletTransaction
 from app.models.invoice import Invoice
 from app.models.order import Order
 from app.models.payment import Payment
@@ -78,17 +80,25 @@ async def _finalize_payment(db: AsyncSession, payment: Payment, gateway_payment_
     elif payment.payment_type == "order_payment" and payment.ref_id:
         order = await refund_acct.lock_order(db, payment.ref_id)
         if order is None or order.account_id != payment.account_id:
+            payment.is_excess = True
             return
-        if order.status == "cancelled" or order.payment_status != "pending":
-            # Money was captured for an order that was cancelled (or already settled by
-            # another payment) meanwhile. Record the capture — it must be refunded — but
-            # never resurrect a cancelled order to 'confirmed' (its coupon was released).
+        if order.payment_status != "pending":
+            # Another payment already settled this order: this capture is a duplicate.
+            # It is refunded on its own (is_excess) and never reverses the order/invoice.
             log.warning(
-                "payment %s captured for order %s in state %s/%s — needs refund",
-                payment.id, order.id, order.status, order.payment_status,
+                "payment %s is a duplicate capture for order %s (%s) — needs refund",
+                payment.id, order.id, order.payment_status,
             )
-            if order.payment_status == "pending":
-                order.payment_status = "paid"
+            payment.is_excess = True
+            return
+        if order.status == "cancelled":
+            # Money was captured for an order that was cancelled meanwhile. Record the
+            # capture — it must be refunded — but never resurrect a cancelled order to
+            # 'confirmed' (its coupon was released).
+            log.warning(
+                "payment %s captured for cancelled order %s — needs refund", payment.id, order.id
+            )
+            order.payment_status = "paid"
             return
         order.payment_status = "paid"
         order.status = "confirmed"
@@ -121,6 +131,11 @@ async def _my_account_ids(db: AsyncSession, user: User) -> set[int]:
         select(CustomerAccount.id).where(CustomerAccount.owner_user_id == user.id)
     )
     return set(res.scalars().all())
+
+
+# A 'creating' payment older than this belongs to a request that died before the
+# gateway answered (the HTTP timeout is 10s): it no longer blocks a new checkout.
+CREATING_STALE_AFTER = dt.timedelta(minutes=1)
 
 
 @router.post("/create", response_model=PaymentCreateOut, operation_id="create_payment")
@@ -164,12 +179,19 @@ async def create_payment(
                 .where(
                     Payment.ref_type == "order",
                     Payment.ref_id == order.id,
-                    Payment.status.in_(("initiated", "success")),
+                    Payment.status.in_(("creating", "initiated", "success")),
                 )
                 .order_by(Payment.id.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
+        if open_pay is not None and open_pay.status == "creating":
+            if open_pay.created_at > dt.datetime.now(dt.UTC) - CREATING_STALE_AFTER:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT, "A checkout for this order is being opened; retry"
+                )
+            open_pay.status = "failed"  # its request died before the gateway answered
+            open_pay = None
         if open_pay is not None:
             if open_pay.status == "success":
                 raise HTTPException(status.HTTP_409_CONFLICT, "Order already paid")
@@ -208,26 +230,32 @@ async def create_payment(
         if amount <= 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount must be > 0")
 
-    try:
-        gateway_order_id = await pay_service.create_gateway_order(amount)
-    except httpx.HTTPError as exc:
-        log.warning("gateway order create failed: %s", exc)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, "Payment gateway unavailable; try again"
-        ) from None
     payment = Payment(
         account_id=account.id,
         payment_type=data.purpose,
         gateway="razorpay",
-        gateway_order_id=gateway_order_id,
         amount=amount,
-        status="initiated",
+        status="creating",
         ref_type=ref_type,
         ref_id=ref_id,
     )
     db.add(payment)
+    # Commit the 'creating' placeholder BEFORE the gateway HTTP call: it is the order's one
+    # open payment (a concurrent create sees it and backs off), and the Order row lock is
+    # released instead of being held across a call that can take the full timeout.
     await db.commit()
-    await db.refresh(payment)
+    try:
+        gateway_order_id = await pay_service.create_gateway_order(amount)
+    except httpx.HTTPError as exc:
+        log.warning("gateway order create failed: %s", exc)
+        payment.status = "failed"
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "Payment gateway unavailable; try again"
+        ) from None
+    payment.gateway_order_id = gateway_order_id
+    payment.status = "initiated"
+    await db.commit()
     return PaymentCreateOut(
         payment_id=payment.id,
         gateway_order_id=gateway_order_id,
@@ -270,6 +298,16 @@ async def verify_payment(
     return {"detail": "payment successful", "payment_id": payment.id, "status": payment.status}
 
 
+async def _topup_hold(db: AsyncSession, refund_id: int) -> bool:
+    """Whether the wallet hold for a top-up refund was taken (and not released)."""
+    moved = await db.scalar(
+        select(func.coalesce(func.sum(WalletTransaction.amount), 0)).where(
+            WalletTransaction.ref_type == "refund", WalletTransaction.ref_id == refund_id
+        )
+    )
+    return float(moved or 0) < 0
+
+
 async def _apply_refund_effect(db: AsyncSession, payment: Payment, refund: Refund) -> float:
     """Apply a PROCESSED refund's ledger effect exactly once (marker: ledger_applied_at),
     so admin reconciliation can safely re-run it after a failure. Returns wallet balance.
@@ -278,16 +316,25 @@ async def _apply_refund_effect(db: AsyncSession, payment: Payment, refund: Refun
         return float((await billing_service.get_or_create_wallet(db, payment.account_id)).balance)
     amount = float(refund.amount)
     if payment.payment_type == "wallet_topup":
-        # Reverse the top-up: pull the money back out of the wallet (the gateway refund
-        # already returned it to the customer's card/UPI).
-        wallet = await billing_service.wallet_adjust(
-            db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
-            allow_negative=True,
-        )
+        # Reverse the top-up: the money is pulled back out of the wallet when the refund
+        # is INITIATED (a hold, so it can't be spent/withdrawn during the gateway call);
+        # only a refund recorded before that hold existed is debited here.
+        if await _topup_hold(db, refund.id):
+            wallet = await billing_service.get_or_create_wallet(db, payment.account_id)
+        else:
+            wallet = await billing_service.wallet_adjust(
+                db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
+                allow_negative=True,
+            )
     else:
         # order_payment -> refunded TO SOURCE (card/UPI). Do NOT also credit the wallet.
+        # A duplicate (excess) capture is handed back without touching the order it never
+        # settled: its status and tax invoice belong to the payment that did.
         wallet = await billing_service.get_or_create_wallet(db, payment.account_id)
-        order = await refund_acct.lock_order(db, payment.ref_id) if payment.ref_id else None
+        order = (
+            await refund_acct.lock_order(db, payment.ref_id)
+            if payment.ref_id and not payment.is_excess else None
+        )
         if order is not None:
             processed = float(
                 await db.scalar(
@@ -311,7 +358,7 @@ async def _apply_refund_effect(db: AsyncSession, payment: Payment, refund: Refun
             )
             if inv is not None:
                 if fully:
-                    await invoicing.generate_credit_note(
+                    await invoicing.build_full_credit_note(
                         db, inv, reason=f"Refund for order {order.order_no}"
                     )
                 else:
@@ -336,10 +383,13 @@ async def _apply_refund_effect(db: AsyncSession, payment: Payment, refund: Refun
     "/{payment_id}/refund",
     operation_id="refund_payment",
     response_model=RefundOut,
-    dependencies=[Depends(require_role("admin"))],
+    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
 )
 async def refund_payment(
-    payment_id: int, data: RefundIn, db: AsyncSession = Depends(get_db)
+    payment_id: int,
+    data: RefundIn,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Refund a successful payment (full or partial). Top-up refunds reverse the wallet
     credit; order-payment refunds return money to source and mark the order refunded.
@@ -378,7 +428,7 @@ async def refund_payment(
         or 0
     )
     remaining = round(float(payment.amount) - already, 2)
-    if payment.payment_type == "order_payment" and payment.ref_id:
+    if payment.payment_type == "order_payment" and payment.ref_id and not payment.is_excess:
         # One cap across RMA store-credit refunds AND refunds to source (under the order
         # lock), so an order can't be refunded twice through the two paths.
         order = await refund_acct.lock_order(db, payment.ref_id)
@@ -403,6 +453,19 @@ async def refund_payment(
         status="initiated",
     )
     db.add(refund)
+    await db.flush()
+    if payment.payment_type == "wallet_topup":
+        # Hold the money now, under the wallet lock the cap was computed with: committing
+        # 'initiated' releases that lock, and a withdrawal/delivery debit during the
+        # gateway call could otherwise spend the same balance a second time.
+        await billing_service.wallet_adjust(
+            db, payment.account_id, -amount, "refund_reversal", "refund", refund.id,
+            allow_negative=True,
+        )
+    await audit_svc.record_audit(
+        db, actor.id, "payment_refund", "payment", payment.id,
+        {"refund_id": refund.id, "amount": amount},
+    )
     # COMMIT the 'initiated' row BEFORE the gateway call so refund.id is durable: a retry
     # after a crash reuses the same id → the same gateway Idempotency-Key → Razorpay
     # returns the original refund instead of issuing a second one.
@@ -410,40 +473,94 @@ async def refund_payment(
     # The gateway call can time out AFTER Razorpay actually processed the refund, so a
     # failure here is AMBIGUOUS. Persist it as 'pending' (never 'failed'): it keeps
     # counting toward the cap and blocks new refunds until reconciled.
+    refund_id = refund.id
+    gateway_refund_id: str | None = None
+    gateway_exc: Exception | None = None
     try:
-        refund.gateway_refund_id = await pay_service.create_gateway_refund(
-            payment.gateway_payment_id, amount, idempotency_key=f"drs-refund-{refund.id}"
+        gateway_refund_id = await pay_service.create_gateway_refund(
+            payment.gateway_payment_id, amount, idempotency_key=f"drs-refund-{refund_id}"
         )
     except Exception as exc:
+        gateway_exc = exc
+    # The locks were released by the commit above: re-lock Payment -> Refund (same order as
+    # reconcile) and re-read the refund, so a reconcile that settled it meanwhile is seen
+    # and its terminal status / applied effect are never overwritten or applied twice.
+    payment, refund = await _lock_payment_refund(db, payment.id, refund_id)
+    if refund.status != "initiated":
+        log.warning(
+            "refund %s was settled to %s during its gateway call (gateway %s)",
+            refund_id, refund.status, "error" if gateway_exc else "ok",
+        )
+        if gateway_exc is None and refund.status == "failed":
+            log.error("refund %s: gateway refunded but it was reconciled 'failed'", refund_id)
+        if gateway_refund_id and not refund.gateway_refund_id:
+            refund.gateway_refund_id = gateway_refund_id
+        await db.commit()
+        if gateway_exc is not None or refund.status != "processed":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, f"Refund {refund_id} was reconciled as {refund.status}"
+            )
+    elif gateway_exc is not None:
         refund.status = "pending"
-        refund.reason = ((refund.reason or "") + f" [gateway error, needs reconcile: {str(exc)[:60]}]")[:255]
+        refund.reason = (
+            (refund.reason or "") + f" [gateway error, needs reconcile: {str(gateway_exc)[:60]}]"
+        )[:255]
         await db.commit()
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "Refund is pending at the gateway and needs reconciliation; it was NOT retried "
             "automatically to avoid a double refund.",
-        ) from exc
-    # The gateway has moved the money: record 'processed' and COMMIT before the ledger
-    # effect, so nothing later can cause a second gateway refund.
-    refund.status = "processed"
-    await db.commit()
-    try:
-        await _apply_refund_effect(db, payment, refund)
+        ) from gateway_exc
+    else:
+        # The gateway has moved the money: record 'processed' and COMMIT before the ledger
+        # effect, so nothing later can cause a second gateway refund.
+        refund.gateway_refund_id = gateway_refund_id
+        refund.status = "processed"
         await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        log.exception("refund %s ledger effect failed", refund.id)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            f"Refund {refund.id} recorded at gateway but the wallet/order update failed; "
-            "it will not be re-refunded — re-apply it via the reconcile endpoint.",
-        ) from exc
+        try:
+            payment, refund = await _lock_payment_refund(db, payment.id, refund_id)
+            await _apply_refund_effect(db, payment, refund)
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            log.exception("refund %s ledger effect failed", refund_id)
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Refund {refund_id} recorded at gateway but the wallet/order update failed; "
+                "it will not be re-refunded — re-apply it via the reconcile endpoint.",
+            ) from exc
     return {
         "refund_id": refund.id,
         "payment_id": payment.id,
         "amount": amount,
         "status": refund.status,
     }
+
+
+async def _lock_payment_refund(
+    db: AsyncSession, payment_id: int, refund_id: int
+) -> tuple[Payment, Refund]:
+    """Lock Payment then Refund FOR UPDATE (the order every refund path uses), re-reading
+    both so a change committed by a concurrent transaction is not missed."""
+    payment = (
+        await db.execute(
+            select(Payment).where(Payment.id == payment_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    refund = (
+        await db.execute(
+            select(Refund).where(Refund.id == refund_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    return payment, refund
+
+
+# An 'initiated' refund younger than this may still have its gateway call in flight
+# (httpx timeout 10s + margin): reconciling it 'failed' would free the cap while the
+# gateway may still refund, allowing a second real refund.
+RECONCILE_INITIATED_AFTER = dt.timedelta(minutes=10)
 
 
 class RefundReconcileIn(BaseModel):
@@ -471,21 +588,24 @@ async def reconcile_refund(
     refund = await db.get(Refund, refund_id)
     if refund is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Refund not found")
-    payment = (
-        await db.execute(
-            select(Payment).where(Payment.id == refund.payment_id).with_for_update()
-        )
-    ).scalar_one()
-    refund = (
-        await db.execute(
-            select(Refund).where(Refund.id == refund_id).with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one()
+    payment, refund = await _lock_payment_refund(db, refund.payment_id, refund_id)
     if refund.status in ("failed",) or (refund.status == "processed" and data.outcome == "failed"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Refund is already {refund.status}")
+    if refund.status == "initiated" and refund.created_at > (
+        dt.datetime.now(dt.UTC) - RECONCILE_INITIATED_AFTER
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Refund's gateway call may still be in flight; reconcile it later",
+        )
     if data.outcome == "failed":
         refund.status = "failed"
+        if payment.payment_type == "wallet_topup" and await _topup_hold(db, refund.id):
+            # The gateway never refunded: give the held money back to the wallet.
+            await billing_service.wallet_adjust(
+                db, payment.account_id, float(refund.amount), "refund_release", "refund",
+                refund.id,
+            )
     else:
         refund.status = "processed"
         if data.gateway_refund_id:

@@ -5,7 +5,7 @@ import datetime as dt
 import uuid
 
 import sqlalchemy as sa
-from conftest import auth, login
+from conftest import auth, ik, login
 
 from app.core.db import engine
 
@@ -62,7 +62,7 @@ async def test_admin_can_cancel_a_fully_refunded_order(client):
         "gateway_order_id": pay["gateway_order_id"], "gateway_payment_id": "p", "signature": "dev"}, headers=ch)
     # Paid → must refund first.
     assert (await client.post(f"/api/v1/admin/orders/{o['id']}/cancel", headers=ah)).status_code == 409
-    assert (await client.post(f"/api/v1/payments/{pay['payment_id']}/refund", json={}, headers=ah)).status_code == 200
+    assert (await client.post(f"/api/v1/payments/{pay['payment_id']}/refund", json={}, headers=ik(ah))).status_code == 200
     r = await client.post(f"/api/v1/admin/orders/{o['id']}/cancel", headers=ah)
     assert r.status_code == 200 and r.json()["status"] == "cancelled"
 

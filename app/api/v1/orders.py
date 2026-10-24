@@ -18,6 +18,7 @@ from app.schemas.invoice import InvoiceLineOut, InvoiceOut
 from app.schemas.order import OrderCreate, OrderItemOut, OrderOut
 from app.services import coupons, invoicing
 from app.services import orders as order_service
+from app.services import refunds as refund_acct
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -246,13 +247,36 @@ async def cancel_order(
 async def generate_order_invoice(
     order_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    """Issue (or fetch the existing) GST tax invoice for a paid one-time order. Idempotent."""
+    """Issue (or fetch the existing) GST tax invoice for a paid one-time order. Idempotent.
+    An order refunded (in part or whole) before its first invoice gets the invoice AND the
+    credit note for what was already refunded, so output GST isn't over-reported."""
     order = await _owned_order(db, order_id, user)
-    if order.payment_status != "paid":
+    if order.payment_status not in ("paid", "partially_refunded", "refunded"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Invoice is available only after the order is paid"
         )
-    inv = await invoicing.generate_for_order(db, order)
+    try:
+        inv = await invoicing.generate_for_order(db, order)
+    except invoicing.NothingToInvoice as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    if order.payment_status != "paid":
+        # Under the order lock (the refund paths take it too) so concurrent requests can't
+        # both add the catch-up credit note.
+        order = await refund_acct.lock_order(db, order.id)
+        if await invoicing.credited_value(db, inv) == 0:
+            reason = f"Refund for order {order.order_no}"
+            if order.payment_status == "refunded":
+                await invoicing.build_full_credit_note(db, inv, reason=reason)
+            else:
+                refunded = round(
+                    await refund_acct.refunded_to_source(db, order.id)
+                    + await refund_acct.refunded_via_rma(db, order.id), 2,
+                )
+                if refunded > 0:
+                    await invoicing.generate_credit_note_for_lines(
+                        db, inv, None, reason=reason, amount=refunded
+                    )
+        await db.commit()
     # Build the full view (with lines) — returning the ORM row gave `lines: []`.
     lines = (
         await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == inv.id))

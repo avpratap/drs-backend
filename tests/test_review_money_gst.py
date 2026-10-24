@@ -1,7 +1,7 @@
 """Regression tests for the full-backend review: money/ledger (M*) and GST (G*) fixes.
 IDs refer to scratchpad/MASTER_FIXLIST.md."""
 import sqlalchemy as sa
-from conftest import auth, login
+from conftest import auth, ik, login
 
 from app.core.db import engine
 
@@ -124,7 +124,7 @@ async def test_zero_total_order_settles_without_gateway(client):
     order = (await client.get(f"/api/v1/orders/{o['id']}", headers=auth(cust))).json()
     assert order["payment_status"] == "paid" and order["status"] == "confirmed"
     # Nothing was charged → nothing to refund.
-    r = await client.post(f"/api/v1/payments/{pay['payment_id']}/refund", json={}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pay['payment_id']}/refund", json={}, headers=ik(auth(admin)))
     assert r.status_code == 409
 
 
@@ -141,13 +141,13 @@ async def test_pending_refund_blocks_new_refund_and_reconcile_applies_once(clien
         raise TimeoutError("gateway timed out")
 
     monkeypatch.setattr(pay_service, "create_gateway_refund", timeout)
-    r = await client.post(f"/api/v1/payments/{pid_}/refund", json={"amount": 100}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pid_}/refund", json={"amount": 100}, headers=ik(auth(admin)))
     assert r.status_code == 502
     [(rid, status)] = await _q("SELECT id, status FROM refunds WHERE payment_id=:p", p=pid_)
     assert status == "pending"
     monkeypatch.undo()
     # The blind retry (same partial amount) must NOT issue a second gateway refund.
-    retry = await client.post(f"/api/v1/payments/{pid_}/refund", json={"amount": 100}, headers=auth(admin))
+    retry = await client.post(f"/api/v1/payments/{pid_}/refund", json={"amount": 100}, headers=ik(auth(admin)))
     assert retry.status_code == 409
     # Admin confirms the gateway did refund: ledger effect applied exactly once.
     rec = await client.post(f"/api/v1/payments/refunds/{rid}/reconcile",
@@ -175,11 +175,11 @@ async def test_failed_reconcile_frees_the_cap(client, monkeypatch):
         raise TimeoutError("x")
 
     monkeypatch.setattr(pay_service, "create_gateway_refund", boom)
-    assert (await client.post(f"/api/v1/payments/{pid_}/refund", json={}, headers=auth(admin))).status_code == 502
+    assert (await client.post(f"/api/v1/payments/{pid_}/refund", json={}, headers=ik(auth(admin)))).status_code == 502
     monkeypatch.undo()
     [(rid,)] = await _q("SELECT id FROM refunds WHERE payment_id=:p", p=pid_)
     await client.post(f"/api/v1/payments/refunds/{rid}/reconcile", json={"outcome": "failed"}, headers=auth(admin))
-    ok = await client.post(f"/api/v1/payments/{pid_}/refund", json={}, headers=auth(admin))
+    ok = await client.post(f"/api/v1/payments/{pid_}/refund", json={}, headers=ik(auth(admin)))
     assert ok.status_code == 200 and ok.json()["amount"] == 200.0
 
 
@@ -196,8 +196,8 @@ async def test_topup_refund_capped_at_wallet_balance(client):
         await billing.wallet_adjust(db, acct, -150, "debit_order")
         await db.commit()
     assert (await client.post(f"/api/v1/payments/{pid_}/refund", json={"amount": 100},
-                              headers=auth(admin))).status_code == 422
-    r = await client.post(f"/api/v1/payments/{pid_}/refund", json={}, headers=auth(admin))
+                              headers=ik(auth(admin)))).status_code == 422
+    r = await client.post(f"/api/v1/payments/{pid_}/refund", json={}, headers=ik(auth(admin)))
     assert r.status_code == 200 and r.json()["amount"] == 50.0
     assert await _wallet(client, cust) == 0.0
 
@@ -212,7 +212,7 @@ async def test_gift_card_redeem_credits_wallet_and_balance_is_private(client):
         "SELECT a.id FROM customer_accounts a JOIN users u ON u.id=a.owner_user_id WHERE u.phone='9000000808'"
     ))[0][0]
     gc = (await client.post("/api/v1/admin/gift-cards",
-                            json={"amount": 250, "issued_to_account_id": acct}, headers=auth(admin))).json()
+                            json={"amount": 250, "issued_to_account_id": acct}, headers=ik(auth(admin)))).json()
     code = gc["code"]
     assert (await client.get(f"/api/v1/loyalty/gift-cards/{code}/balance", headers=auth(other))).status_code == 404
     assert (await client.get(f"/api/v1/loyalty/gift-cards/{code}/balance", headers=auth(cust))).status_code == 200
@@ -325,13 +325,13 @@ async def test_partial_refund_to_source_issues_value_credit_note(client):
     ghee = await _pid(client, cust, "GHEE-1KG")
     oid, pay_id = await _paid(client, cust, ghee, 3)
     inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=auth(cust))).json()
-    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={"amount": 300}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={"amount": 300}, headers=ik(auth(admin)))
     assert r.status_code == 200
     [(cn_id, total)] = await _q("SELECT id, total FROM invoices WHERE original_invoice_id=:i", i=inv["id"])
     assert float(total) == -300.0
     assert all(float(q) == 0 for (q,) in await _q("SELECT qty FROM invoice_lines WHERE invoice_id=:i", i=cn_id))
     # The remainder refund upgrades it to the exact full reversal.
-    rest = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
+    rest = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=ik(auth(admin)))
     assert rest.status_code == 200 and rest.json()["amount"] == 1200.0
     [(total2, partial2)] = await _q("SELECT total, is_partial FROM invoices WHERE id=:i", i=cn_id)
     assert float(total2) == -1500.0 and partial2 is False

@@ -1,5 +1,5 @@
 """Admin CRUD completion: pricing/coupon edit+delete, CMS page/banner, loyalty admin."""
-from conftest import auth, login
+from conftest import auth, ik, login
 
 
 async def _admin(client):
@@ -60,7 +60,7 @@ async def test_loyalty_and_gift_card_admin(client):
     lst = await client.get("/api/v1/admin/loyalty?limit=200", headers=h)
     assert lst.status_code == 200 and lst.json()  # the account just created is listed
 
-    gc = (await client.post("/api/v1/admin/gift-cards", json={"amount": 500}, headers=h)).json()
+    gc = (await client.post("/api/v1/admin/gift-cards", json={"amount": 500}, headers=ik(h))).json()
     listed = await client.get("/api/v1/admin/gift-cards?limit=200", headers=h)
     assert listed.status_code == 200
     gid = next(g["id"] for g in listed.json() if g["code"] == gc["code"])

@@ -180,6 +180,13 @@ def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def ik(headers: dict) -> dict:
+    """Headers plus a fresh Idempotency-Key (required on money-moving admin writes)."""
+    import uuid
+
+    return {**headers, "Idempotency-Key": uuid.uuid4().hex}
+
+
 def idem(headers: dict) -> dict:
     """Auth headers + a fresh Idempotency-Key, for endpoints that require one
     (GRN receive, manual wallet/credit money writes)."""
