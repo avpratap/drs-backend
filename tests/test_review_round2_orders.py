@@ -1,7 +1,7 @@
 """Regression tests for the second review round: orders / notifications / auth / DPDP
 (R2-O*). IDs refer to scratchpad/MASTER_FIXLIST.md."""
 import sqlalchemy as sa
-from conftest import auth, ik, login
+from conftest import auth, erase_confirm, ik, login
 
 from app.core.db import SessionLocal, engine
 
@@ -167,9 +167,11 @@ async def test_erasure_blocked_by_pending_withdrawal(client):
     await client.post("/api/v1/payments/verify", json={"gateway_order_id": pay["gateway_order_id"],
                                                        "gateway_payment_id": "p", "signature": "dev"}, headers=h)
     wd = (await client.post("/api/v1/billing/withdrawals", json={"amount": 50}, headers=h)).json()
-    assert (await client.post("/api/v1/account/erase", headers=h)).status_code == 409
+    assert (await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000001110"),
+                              headers=h)).status_code == 409
     await client.post(f"/api/v1/admin/withdrawals/{wd['id']}/reject", headers=ah)
-    assert (await client.post("/api/v1/account/erase", headers=h)).status_code == 200
+    assert (await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000001110"),
+                              headers=h)).status_code == 200
 
 
 # ---------- R2-O7: uploads are private references with metadata stripped ----------
@@ -251,3 +253,39 @@ async def test_admin_can_set_account_type(client):
                            json={"account_type": "b2b", "billing_mode": "postpaid_credit"}, headers=ah)
     assert r.status_code == 200 and r.json()["account_type"] == "b2b"
     assert ik  # (fixture helper import kept for parity with other review tests)
+
+
+# ---------- R3-2: erasing your own account needs a fresh OTP ----------
+async def test_self_erasure_requires_fresh_otp(client):
+    h = auth(await login(client, "9000001120"))
+    assert (await client.post("/api/v1/account/erase", headers=h)).status_code == 422  # no OTP
+    assert (await client.post("/api/v1/account/erase", json={"otp": "000000"}, headers=h)).status_code == 403
+    assert (await client.get("/api/v1/auth/me", headers=h)).status_code == 200  # still there
+    ok = await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000001120"), headers=h)
+    assert ok.status_code == 200
+
+
+# ---------- R3-3: payment-method tokens come from the gateway, never the client ----------
+async def test_payment_method_token_only_from_verified_payment(client):
+    h = auth(await login(client, "9000001121"))
+    other = auth(await login(client, "9000001122"))
+    forged = await client.post("/api/v1/payment-methods", json={
+        "method_type": "card", "gateway_token": "token_someone_else"}, headers=h)
+    assert forged.status_code == 422
+    pay = (await client.post("/api/v1/payments/create", json={"purpose": "wallet_topup", "amount": 10},
+                             headers=h)).json()
+    await client.post("/api/v1/payments/verify", json={
+        "gateway_order_id": pay["gateway_order_id"], "gateway_payment_id": "pay_r3_1121", "signature": "dev"},
+        headers=h)
+    # Another user can't save my payment's instrument.
+    assert (await client.post("/api/v1/payment-methods/from-payment", json={"payment_id": pay["payment_id"]},
+                              headers=other)).status_code == 404
+    r = await client.post("/api/v1/payment-methods/from-payment", json={"payment_id": pay["payment_id"]},
+                          headers=h)
+    assert r.status_code == 201, r.text
+    assert r.json()["method_type"] == "upi" and r.json()["display"] == "dev@upi"
+    again = await client.post("/api/v1/payment-methods/from-payment", json={"payment_id": pay["payment_id"]},
+                              headers=h)
+    assert again.json()["id"] == r.json()["id"]  # idempotent
+    token = (await _q("SELECT gateway_token FROM payment_methods WHERE id=:i", i=r.json()["id"]))[0][0]
+    assert token.startswith("token_dev_")

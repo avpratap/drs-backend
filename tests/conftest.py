@@ -176,6 +176,12 @@ async def login(client: AsyncClient, phone: str) -> str:
     return r.json()["access_token"]
 
 
+async def erase_confirm(client: AsyncClient, phone: str) -> dict:
+    """Body for POST /account/erase: a fresh OTP for the caller's phone (step-up)."""
+    r = await client.post("/api/v1/auth/otp/request", json={"phone": phone})
+    return {"otp": r.json()["dev_otp"]}
+
+
 def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 

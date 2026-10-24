@@ -1,5 +1,7 @@
 import datetime as dt
+from types import SimpleNamespace
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -13,6 +15,7 @@ from app.core.db import get_db
 from app.core.sendlimit import allow_send
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
+from app.models.payment import Payment
 from app.models.profile import Address, PaymentMandate, PaymentMethod
 from app.models.user import User
 from app.schemas.common import DataExportOut, EraseResultOut
@@ -24,12 +27,15 @@ from app.schemas.profile import (
     ConsentOut,
     MandateIn,
     MandateOut,
+    PaymentMethodFromPaymentIn,
     PaymentMethodIn,
     PaymentMethodOut,
     ProfileOut,
     ProfileUpdate,
 )
 from app.services import dpdp, email_verify
+from app.services import otp as otp_service
+from app.services import payments as pay_service
 from app.services import profile as svc
 from app.services.notifications import senders
 
@@ -215,11 +221,22 @@ async def export_my_data(
     return await dpdp.export_user_data(db, user)
 
 
+class EraseConfirmIn(BaseModel):
+    # A FRESH OTP for the account's phone (POST /auth/otp/request first): a stolen or
+    # left-open session alone must not be able to irreversibly erase the account.
+    otp: str = Field(pattern=r"^\d{6}$")
+
+
 @router.post("/account/erase", operation_id="erase_my_account", response_model=EraseResultOut)
 async def erase_my_account(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    data: EraseConfirmIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Right to erasure — anonymizes PII; tax/financial records are retained by law."""
+    """Right to erasure — anonymizes PII; tax/financial records are retained by law.
+    Irreversible, so it requires step-up confirmation with a fresh OTP."""
+    if not await otp_service.verify_otp(user.phone, data.otp):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid or expired OTP")
     try:
         return await dpdp.erase_user(db, user)
     except dpdp.ErasureBlocked as exc:
@@ -384,6 +401,71 @@ async def create_payment_method(
 ):
     account = await svc.get_or_create_account(db, user)
     pm = await svc.create_payment_method(db, account.id, data)
+    await db.commit()
+    await db.refresh(pm)
+    return pm
+
+
+@router.post(
+    "/payment-methods/from-payment",
+    response_model=PaymentMethodOut,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="save_payment_method_from_payment",
+)
+async def save_payment_method_from_payment(
+    data: PaymentMethodFromPaymentIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save the instrument of one of the caller's own SUCCESSFUL gateway payments. The
+    token, customer id, brand and last digits come from the gateway's record of that
+    payment — never from the client."""
+    payment = await db.get(Payment, data.payment_id)
+    if (
+        payment is None
+        or payment.account_id not in await svc.my_account_ids(db, user)
+        or payment.status != "success"
+        or payment.gateway != "razorpay"
+        or not payment.gateway_payment_id
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+    try:
+        gp = await pay_service.fetch_gateway_payment(payment.gateway_payment_id)
+    except httpx.HTTPError:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Payment gateway unavailable") from None
+    method = gp.get("method")
+    token = gp.get("token_id")
+    if method not in ("upi", "card", "netbanking") or not token:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "This payment's instrument can't be saved"
+        )
+    existing = await db.scalar(
+        select(PaymentMethod).where(
+            PaymentMethod.account_id == payment.account_id,
+            PaymentMethod.gateway_token == token,
+            PaymentMethod.status == "active",
+        )
+    )
+    if existing is not None:
+        return existing
+    card = gp.get("card") or {}
+    if method == "card":
+        display = f"•••• {card.get('last4', '')}".strip()
+    elif method == "upi":
+        display = gp.get("vpa")
+    else:
+        display = gp.get("bank")
+    fields = SimpleNamespace(
+        method_type=method,
+        gateway_customer_id=gp.get("customer_id"),
+        gateway_token=token,
+        display=(display or None) and str(display)[:64],
+        brand=(card.get("network") or None) and str(card["network"])[:32],
+        expiry_month=card.get("expiry_month"),
+        expiry_year=card.get("expiry_year"),
+        is_default=data.is_default,
+    )
+    pm = await svc.create_payment_method(db, payment.account_id, fields)
     await db.commit()
     await db.refresh(pm)
     return pm

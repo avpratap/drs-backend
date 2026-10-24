@@ -163,8 +163,44 @@ async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) 
     except IntegrityError:
         # uq(code_id, referee_account_id) — the other request won; no double-award.
         raise HTTPException(status.HTTP_409_CONFLICT, "Referral already redeemed") from None
-    await earn_points(db, rc.account_id, rc.reward_points, "referral", "referral_code", rc.id)
+    # A referee who has already bought something qualifies right away; otherwise the
+    # reward waits for their first paid order (reward_referral_on_purchase).
+    await reward_referral_on_purchase(db, referee_account_id)
     return rc
+
+
+async def reward_referral_on_purchase(db: AsyncSession, referee_account_id: int) -> bool:
+    """Pay the referrer once the referee has a paid order. Idempotent (rewarded_at under
+    a row lock); called on redeem and whenever an order becomes paid. Flush-only."""
+    from app.models.order import Order
+
+    red = (
+        await db.execute(
+            select(ReferralRedemption)
+            .where(
+                ReferralRedemption.referee_account_id == referee_account_id,
+                ReferralRedemption.rewarded_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    if red is None:
+        return False
+    paid = await db.scalar(
+        select(func.count()).select_from(Order).where(
+            Order.account_id == referee_account_id,
+            Order.payment_status.in_(("paid", "partially_refunded", "refunded")),
+            Order.status != "cancelled",
+        )
+    )
+    if not paid:
+        return False
+    rc = await db.get(ReferralCode, red.code_id)
+    if rc is None:
+        return False
+    red.rewarded_at = dt.datetime.now(dt.UTC)
+    await earn_points(db, rc.account_id, rc.reward_points, "referral", "referral_code", rc.id)
+    return True
 
 
 async def issue_gift_card(db: AsyncSession, amount: float, issued_to=None, expires_at: dt.date | None = None) -> GiftCard:

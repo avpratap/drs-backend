@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import reject_nulls
 
@@ -125,12 +125,29 @@ class AddressOut(BaseModel):
 # ---------- Payment method ----------
 class PaymentMethodIn(BaseModel):
     method_type: Literal["upi", "card", "netbanking"]
+    # Gateway tokens are NEVER taken from the client (anyone could attach someone else's
+    # token): a chargeable method is saved server-side from a verified payment via
+    # POST /payment-methods/from-payment. These fields only exist to reject old clients.
     gateway_customer_id: str | None = Field(default=None, max_length=64)
     gateway_token: str | None = Field(default=None, max_length=128)
     display: str | None = Field(default=None, max_length=64)
     brand: str | None = Field(default=None, max_length=32)
     expiry_month: int | None = Field(default=None, ge=1, le=12)
     expiry_year: int | None = Field(default=None, ge=2024, le=2099)
+    is_default: bool = False
+
+    @model_validator(mode="after")
+    def _no_client_tokens(self):
+        if self.gateway_token or self.gateway_customer_id:
+            raise ValueError(
+                "gateway tokens are set server-side; save the method from a completed "
+                "payment with POST /payment-methods/from-payment"
+            )
+        return self
+
+
+class PaymentMethodFromPaymentIn(BaseModel):
+    payment_id: int
     is_default: bool = False
 
 

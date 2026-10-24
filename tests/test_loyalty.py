@@ -33,7 +33,26 @@ async def test_referral_flow(client):
     referee = auth(await login(client, "9100002002"))
     r = await client.post("/api/v1/loyalty/referral/redeem", json={"code": code1}, headers=referee)
     assert r.status_code == 200
-    # Referrer awarded reward points.
+    # No reward for a bare sign-up: the referrer is paid on the referee's first paid order.
+    assert (await client.get("/api/v1/loyalty", headers=referrer)).json()["points_balance"] == 0
+    prods = (await client.get("/api/v1/products", headers=referee)).json()
+    milk = next(p["id"] for p in prods if p["sku"] == "MILK-1L")
+    o = (await client.post("/api/v1/orders", json={"items": [{"product_id": milk, "qty": 1}]},
+                           headers=referee)).json()
+    pay = (await client.post("/api/v1/payments/create", json={"purpose": "order_payment", "order_id": o["id"]},
+                             headers=referee)).json()
+    await client.post("/api/v1/payments/verify", json={
+        "gateway_order_id": pay["gateway_order_id"], "gateway_payment_id": "p", "signature": "dev"},
+        headers=referee)
+    assert (await client.get("/api/v1/loyalty", headers=referrer)).json()["points_balance"] == 100
+    # A second paid order does not pay again.
+    o2 = (await client.post("/api/v1/orders", json={"items": [{"product_id": milk, "qty": 1}]},
+                            headers=referee)).json()
+    pay2 = (await client.post("/api/v1/payments/create", json={"purpose": "order_payment", "order_id": o2["id"]},
+                              headers=referee)).json()
+    await client.post("/api/v1/payments/verify", json={
+        "gateway_order_id": pay2["gateway_order_id"], "gateway_payment_id": "p2", "signature": "dev"},
+        headers=referee)
     assert (await client.get("/api/v1/loyalty", headers=referrer)).json()["points_balance"] == 100
     # Duplicate redemption by same referee -> 409.
     assert (await client.post("/api/v1/loyalty/referral/redeem", json={"code": code1}, headers=referee)).status_code == 409

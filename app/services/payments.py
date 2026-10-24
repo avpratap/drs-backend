@@ -66,6 +66,25 @@ async def create_gateway_refund(
     return resp.json()["id"]
 
 
+async def fetch_gateway_payment(gateway_payment_id: str) -> dict:
+    """The gateway's own record of a captured payment (method, card/VPA details, saved
+    token and customer). Dev stub returns a synthetic UPI payment."""
+    if not gateway_enabled():
+        return {
+            "id": gateway_payment_id, "status": "captured", "method": "upi",
+            "vpa": "dev@upi", "token_id": "token_dev_" + gateway_payment_id[-8:],
+            "customer_id": "cust_dev",
+        }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"https://api.razorpay.com/v1/payments/{gateway_payment_id}",
+            auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
+            params={"expand[]": "card"},
+        )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
     """Razorpay signs webhook bodies with the webhook secret (HMAC-SHA256)."""
     if not settings.RAZORPAY_WEBHOOK_SECRET:

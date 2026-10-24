@@ -87,7 +87,7 @@ async def test_credit_billing_net_of_returns(client, monkeypatch):
         f"/api/v1/delivery/orders/{order['id']}/deliver",
         json={
             "items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}],
-            "returns": [{"product_id": item["product_id"], "qty_returned": 1, "reason": "damaged"}],
+            "pod": {"signature_url": "https://cdn.example.com/sig.png"}, "returns": [{"product_id": item["product_id"], "qty_returned": 1, "reason": "damaged"}],
         },
         headers=auth(delivery),
     )

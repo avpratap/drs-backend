@@ -318,12 +318,16 @@ async def apply_tracking(
                 # order is now paid (COD orders otherwise stayed 'pending' forever: no
                 # invoice, no verified review, and their coupon blocked re-use). Atomic
                 # guarded UPDATE; drafts never receive webhooks, so no lock-order clash.
-                await db.execute(
+                res = await db.execute(
                     update(Order)
                     .where(Order.id == ship.order_id, Order.payment_status == "pending",
                            Order.status != "cancelled")
                     .values(payment_status="paid")
                 )
+                if res.rowcount:
+                    from app.services import loyalty
+
+                    await loyalty.reward_referral_on_purchase(db, ship.account_id)
             await _notify_delivered(db, ship)
     return ship
 

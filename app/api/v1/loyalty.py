@@ -144,7 +144,10 @@ async def redeem_referral(
     acct = await _my_account(db, user)
     rc = await loyalty.redeem_referral(db, data.code, acct.id)
     await db.commit()
-    return ReferralRedeemedOut(detail="Referral redeemed", code=rc.code)
+    return ReferralRedeemedOut(
+        detail="Referral redeemed; the referrer is rewarded on your first paid order",
+        code=rc.code,
+    )
 
 
 # ---------- Customer: gift cards ----------

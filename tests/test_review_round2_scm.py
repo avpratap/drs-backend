@@ -68,7 +68,7 @@ async def test_driver_cannot_close_future_stop(client, monkeypatch):
     pid, shop, _sid, order = await _stop(client, h, "2041-04-04")
     did = (await _q("SELECT id FROM users WHERE phone='9999900003'"))[0][0]
     await client.post("/api/v1/admin/delivery-assignments", json={"delivery_id": did, "shop_id": shop}, headers=h)
-    body = {"items": [{"product_id": pid, "qty_delivered": 5}]}
+    body = {"items": [{"product_id": pid, "qty_delivered": 5}], "pod": {"signature_url": "https://cdn.example.com/sig.png"}}
     r = await client.post(f"/api/v1/delivery/orders/{order['id']}/deliver", json=body, headers=driver)
     assert r.status_code == 409, r.text
     f = await client.post(f"/api/v1/delivery/orders/{order['id']}/fail", json={"reason": "customer_unavailable"},
@@ -162,3 +162,21 @@ async def test_freeze_lifts_after_tonights_run(client, monkeypatch):
     finally:
         await _q("DELETE FROM delivery_schedule_runs WHERE for_delivery_date=:d AND orders_generated=0 "
                  "AND status='frozen'", d=tomorrow)
+
+
+# ---------- R3-1: drivers must attach proof of delivery ----------
+async def test_driver_delivery_requires_pod(client, monkeypatch):
+    h = auth(await login(client, "9999900001"))
+    driver = auth(await login(client, "9999900003"))
+    pid, shop, _sid, order = await _stop(client, h, "2041-06-06")
+    did = (await _q("SELECT id FROM users WHERE phone='9999900003'"))[0][0]
+    await client.post("/api/v1/admin/delivery-assignments", json={"delivery_id": did, "shop_id": shop}, headers=h)
+    driver_today(monkeypatch, "2041-06-06")
+    url = f"/api/v1/delivery/orders/{order['id']}/deliver"
+    items = [{"product_id": pid, "qty_delivered": 5}]
+    assert (await client.post(url, json={"items": items}, headers=driver)).status_code == 422
+    assert (await client.post(url, json={"items": items, "pod": {"recipient_name": "x"}},
+                              headers=driver)).status_code == 422
+    ok = await client.post(url, json={"items": items, "pod": {"photo_url": "https://cdn.example.com/p.jpg"}},
+                           headers=driver)
+    assert ok.status_code == 200, ok.text

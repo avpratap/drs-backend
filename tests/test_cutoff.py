@@ -39,6 +39,7 @@ async def test_cutoff_generates_then_no_clobber(client, monkeypatch):
         json={
             "items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}],
             "returns": [],
+            "pod": {"signature_url": "https://cdn.example.com/sig.png"},
         },
         headers=auth(delivery),
     )

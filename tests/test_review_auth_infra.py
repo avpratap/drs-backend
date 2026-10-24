@@ -5,7 +5,7 @@ import time
 
 import pytest
 import sqlalchemy as sa
-from conftest import auth, login
+from conftest import auth, erase_confirm, login
 from starlette.requests import Request
 
 from app.core.db import SessionLocal, engine
@@ -67,7 +67,8 @@ async def test_erasure_revokes_cancels_tombstones_and_is_final(client):
     uid = (await _q("SELECT id FROM users WHERE phone='9000000950'"))[0][0]
     await _q("INSERT INTO notifications (user_id, event_type, channel, category, status, to_addr, body) "
              "VALUES (:u, 'x', 'sms', 'transactional', 'queued', '9000000950', 'hi')", u=uid)
-    assert (await client.post("/api/v1/account/erase", headers=auth(access))).status_code == 200
+    assert (await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000000950"),
+                              headers=auth(access))).status_code == 200
     shop = await _q("SELECT s.name, s.address, s.status FROM shops s JOIN subscriptions sub ON sub.shop_id=s.id "
                     "WHERE sub.id=:i", i=sid)
     assert shop == [("erased", None, "inactive")]
@@ -132,7 +133,8 @@ async def test_erasure_keeps_newsletter_of_unverified_email(client):
     await _q("INSERT INTO newsletter_subscribers (email, status) VALUES (:e, 'subscribed')", e=victim)
     h = auth(await login(client, "9000000954"))
     await client.patch("/api/v1/profile", json={"email": victim}, headers=h)  # squat, never verified
-    assert (await client.post("/api/v1/account/erase", headers=h)).status_code == 200
+    assert (await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000000954"),
+                              headers=h)).status_code == 200
     assert (await _q("SELECT status FROM newsletter_subscribers WHERE email=:e", e=victim)) == [("subscribed",)]
 
 

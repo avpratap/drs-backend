@@ -26,6 +26,7 @@ from app.schemas.payment import PaymentCreate, PaymentCreateOut, PaymentVerify, 
 from app.services import admin_tools as audit_svc
 from app.services import billing as billing_service
 from app.services import invoicing
+from app.services import loyalty as loyalty_svc
 from app.services import notifications as notify
 from app.services import payments as pay_service
 from app.services import profile as profile_svc
@@ -103,6 +104,7 @@ async def _finalize_payment(db: AsyncSession, payment: Payment, gateway_payment_
             return
         order.payment_status = "paid"
         order.status = "confirmed"
+        await loyalty_svc.reward_referral_on_purchase(db, order.account_id)
 
 
 async def _account(db: AsyncSession, user: User) -> CustomerAccount:

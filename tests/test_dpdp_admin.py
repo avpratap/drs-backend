@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, erase_confirm, login
 
 
 async def test_export_my_data(client):
@@ -29,7 +29,8 @@ async def test_erase_my_account(client):
     await client.patch(
         "/api/v1/profile", json={"display_name": "Zap", "email": "z@x.com"}, headers=auth(victim)
     )
-    r = await client.post("/api/v1/account/erase", headers=auth(victim))
+    r = await client.post("/api/v1/account/erase", json=await erase_confirm(client, "9000000822"),
+                          headers=auth(victim))
     assert r.status_code == 200
     # Token is invalidated (token_version bumped) -> old token now rejected.
     me = await client.get("/api/v1/auth/me", headers=auth(victim))

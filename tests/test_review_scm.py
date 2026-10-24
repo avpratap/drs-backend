@@ -171,7 +171,7 @@ async def test_driver_delivery_deducts_vehicle_stock(client, monkeypatch):
     order = next(o for o in orders if o["status"] == "generated")
     lines = [{"product_id": i["product_id"], "qty_delivered": i["qty_planned"]} for i in order["items"]]
     r = await client.post(f"/api/v1/delivery/orders/{order['id']}/deliver",
-                          json={"items": lines, "returns": []}, headers=auth(driver))
+                          json={"items": lines, "returns": [], "pod": {"signature_url": "https://cdn.example.com/sig.png"}}, headers=auth(driver))
     assert r.status_code == 200, r.text
     planned = sum(i["qty_planned"] for i in order["items"] if i["product_id"] == milk)
     assert await _on_hand(milk, van) == 50 - planned

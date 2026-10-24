@@ -65,7 +65,8 @@ async def test_admin_credit_settlement_reduces_outstanding(client, monkeypatch):
     item = order["items"][0]
     await client.post(
         f"/api/v1/delivery/orders/{order['id']}/deliver",
-        json={"items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}], "returns": []},
+        json={"items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}], "returns": [],
+              "pod": {"signature_url": "https://cdn.example.com/sig.png"}},
         headers=auth(delivery),
     )
     outstanding = (await client.get(f"/api/v1/admin/accounts/{acct}/billing", headers=auth(admin))).json()["credit_outstanding"]
@@ -122,7 +123,8 @@ async def test_settle_credit_overpay_rejected(client):
     item = order["items"][0]
     await client.post(
         f"/api/v1/delivery/orders/{order['id']}/deliver",
-        json={"items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}], "returns": []},
+        json={"items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}], "returns": [],
+              "pod": {"signature_url": "https://cdn.example.com/sig.png"}},
         headers=auth(delivery),
     )
     outstanding = (await client.get(f"/api/v1/admin/accounts/{acct}/billing", headers=auth(admin))).json()["credit_outstanding"]

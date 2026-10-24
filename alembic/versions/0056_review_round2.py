@@ -11,6 +11,7 @@
   one coupon redemption per order, one referral per referee, non-negative balances and
   coupon counters (unique ones only when existing data already satisfies them; the
   ledgers are append-only, so history is never rewritten to fit).
+- referral_redemptions.rewarded_at: the referrer is paid on the referee's first paid order.
 - products.pack_size Numeric(10,3) like variants (0.125 was stored as 0.13).
 
 Revision ID: 0056_review_round2
@@ -72,6 +73,13 @@ def upgrade() -> None:
         postgresql_where=sa.text("ref_type = 'order' AND status IN ('creating', 'initiated')"),
     )
     _more_upgrade()
+    # Referral rewards are paid on the referee's first paid order; every existing
+    # redemption was already rewarded at redeem time.
+    op.add_column(
+        "referral_redemptions",
+        sa.Column("rewarded_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.execute("UPDATE referral_redemptions SET rewarded_at = created_at")
 
 
 _INDEXES = [
@@ -150,6 +158,7 @@ def _more_downgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_column("referral_redemptions", "rewarded_at")
     _more_downgrade()
     op.drop_index("uq_payments_one_open_per_order", table_name="payments")
     op.alter_column("user_profiles", "notify_whatsapp", server_default=sa.true())

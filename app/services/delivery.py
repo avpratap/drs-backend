@@ -28,6 +28,18 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
         raise HTTPException(
             status.HTTP_409_CONFLICT, "This stop is scheduled for a later date"
         )
+    delivered_any = any(float(di.qty_delivered) > 0 for di in data.items)
+    if (
+        user.role != "admin"
+        and delivered_any
+        and (data.pod is None or not (data.pod.photo_url or data.pod.signature_url))
+    ):
+        # Proof of delivery is what settles a "never received it" dispute: a driver
+        # must attach a photo or signature (admins correcting records are exempt).
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Proof of delivery (photo or signature) is required",
+        )
     if data.pod is not None:
         for ref in (data.pod.photo_url, data.pod.signature_url):
             if media.is_ref(ref) and user.role != "admin" and not media.ref_owned(ref, "pod", user.id):
