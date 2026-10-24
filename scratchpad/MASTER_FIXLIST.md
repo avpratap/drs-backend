@@ -168,7 +168,82 @@ Test files: `rmg` = tests/test_review_money_gst.py, `rcs` = test_review_cutoff_s
 | T12 | weak/tautological asserts (≈25 places: `>= 0`, `in (401,403)`, `pytest.raises(Exception)` + "check", key-only, `all([])`, fixed OTP guess, IDOR without side-effect checks) | exact amounts / deltas, exact codes and exception types + constraint names, positive controls, guaranteed-wrong OTP |
 | T13 | `pytest-randomly` is not installed (so `-p no:randomly` is a no-op) | the suite was verified with a shuffle plugin: file order + 7 shuffled orders (seeds 1–5, module-mode 7/99) all green. Adding pytest-randomly as a dev dependency is left as a follow-up for the maintainers |
 
+## Round 2 — independent re-review (8 reviewers: 4 diff reviews of round 1, 4 whole-codebase audits)
+
+Commits: `2ff6f2a` (money), `2578754` (orders/notify/auth/DPDP), `93056d7` (cutoff/delivery/SCM),
+`906b09c` (infra/schema/validation). Tests: `r2m` = tests/test_review_round2_money.py,
+`r2o` = test_review_round2_orders.py, `r2s` = test_review_round2_scm.py, `r2i` = test_review_round2_infra.py.
+
+### R2-M — money / refunds / GST
+| ID | Sev | Finding | Resolution | Test |
+|---|---|---|---|---|
+| M1 | High | refunding a duplicate capture reversed the whole order + its invoice and ate the order's refund cap | `payments.is_excess` set when a capture didn't settle its order; refunded on its own, excluded from the order cap/net revenue | r2m::test_duplicate_capture_refund_leaves_order_and_invoice_alone |
+| M2 | High | reconcile racing the gateway call → effect applied twice / terminal status overwritten | refund_payment re-locks Payment→Refund (populate_existing) after every commit, never overwrites a settled status | r2m::test_refund_settled_during_gateway_call_is_not_applied_twice, ::test_gateway_error_never_overwrites_a_reconciled_status |
+| M3 | High | reconcile 'failed' on an in-flight 'initiated' refund → second real refund | 'initiated' reconcilable only after 10 min | r2m::test_young_initiated_refund_cannot_be_reconciled |
+| M4 | High | stale wallet balance after commit (identity map) → lost update | every SELECT … FOR UPDATE refreshes the row (session hook) | r2m::test_locked_select_refreshes_identity_map |
+| M5 | High | top-up refund cap checked, then lock released before the debit (withdrawal could spend it too) | wallet debit held at 'initiated'; released on 'failed' reconcile | r2m::test_topup_refund_holds_wallet_during_gateway_call |
+| M6 | High | retrying a partial refund after a lost 200 paid twice; refunds unaudited | Idempotency-Key required; audit row | r2m::test_refund_requires_idempotency_key_and_is_audited |
+| M7 | Med | RMA after a partial refund to source under-reversed GST, order stuck partially_refunded | shortfall reversed by value mode; headroom 0 → refunded + full CN; returns allowed on partially refunded orders | r2m::test_rma_after_partial_refund_…, ::test_rma_that_exhausts_headroom_… |
+| M8 | Med | full credit note committed inside the refund transaction | flush-only build_full_credit_note | covered by M2/M7 |
+| M9 | Low | CN allocation could emit a negative / over-cap line | paise allocation with per-line caps | r2m::test_credit_note_lines_are_never_negative |
+| M10 | Low | order refunded before invoicing could never be invoiced; ₹0 invoice for free orders | invoice + catch-up CN under the order lock; free orders: no invoice | r2m::test_partially_refunded_order_gets_invoice_…, ::test_free_order_gets_no_zero_invoice |
+| M11 | Low | "UT" alias mapped to Uttarakhand | removed | — |
+| M12 | Med | gift-card / store credit withdrawable as cash | withdrawals capped at net cash paid in (request + approve) | r2m::test_gift_card_credit_cannot_be_withdrawn_as_cash |
+| M13 | Med | ~80 admin money/price/stock writes unaudited; audit log hid detail/time | every admin write audited automatically in the same transaction; detail + created_at exposed | r2m::test_admin_writes_are_audited_automatically |
+| M14 | Med | create_payment held the order lock across the gateway HTTP call | 'creating' placeholder committed first; unique open payment per order | suite (payments) |
+| M15 | Med | analytics revenue ignored refunds | revenue net of processed refunds + RMA credit; credit outstanding consistent | suite |
+| M16 | Low | gift-card issue / points adjust not idempotent | Idempotency-Key required | test_loyalty |
+
+### R2-O — orders / notifications / auth / DPDP
+| ID | Sev | Finding | Resolution | Test |
+|---|---|---|---|---|
+| O1 | Med-High | COD orders never became paid → coupon blocked forever, no invoice, reviews unverified | paid on courier delivery; shipped COD orders don't block the coupon | r2o::test_cod_order_paid_on_delivery_and_coupon_reusable |
+| O2 | Med | transactional SMS failed 5× per event in prod | skipped as provider_unavailable (not retried) | r2o::test_sms_skipped_when_provider_unavailable_in_prod |
+| O3 | Med | unverified email claims locked the owner out; no send throttles; '|' broke tokens; newsletter enumerable | verified-only, case-insensitive uniqueness; per-recipient throttles; rsplit parsing; uniform newsletter answer | r2o::test_email_unique_only_when_verified_and_throttled, ::test_email_with_pipe_…, ::test_newsletter_… |
+| O4 | Med | WhatsApp opt-in implied marketing; marketing_push ignored; marketing_opt_in settable without consent; WhatsApp on by default; bell showed gated marketing | marketing_whatsapp purpose; master derived from all marketing consents; toggle ⇄ ledger; default off (+migration); bell filter | r2o::test_whatsapp_optin_does_not_grant_marketing, ::test_whatsapp_toggle_is_recorded_as_consent |
+| O5 | Med | address/payment-method default race; default could be unset; mandates outlived their method; no mandate cancel | re-check after lock; unset refused; cascade cancel; cancel endpoint; past valid_to refused | r2o::test_address_default_rules, ::test_mandate_cancel_and_cascade_… |
+| O6 | Med | erasure left tomorrow's deliveries and pending withdrawals | deliveries cancelled; erasure waits for withdrawals (409) | r2o::test_erasure_blocked_by_pending_withdrawal |
+| O7 | High | POD photos / uploads public, with GPS EXIF, no quota | private media refs, EXIF stripped, daily quota, owner-only attach, signed view URLs | r2o::test_upload_is_private_ref_with_exif_stripped |
+| O8 | Low | rating/wishlist rollback 500; referral/profile create races; recompute lost votes; cart add vs checkout; override/item upsert races; stale CN PDF cached; drain read stale consent | savepoints, product lock, cart lock, item/sub locks, conditional PDF cache write, populate_existing at send | suite + r2o |
+| O9 | Low | self/hidden review votes; whole units only at checkout; "+91 0…" phones; stale draft blocked cancel; avatar javascript:; account type by first endpoint; export newsletter/GPS | fixed each; admin account-type endpoint | r2o::test_review_votes_rules, ::test_whole_units_enforced_in_cart, ::test_phone_…, ::test_admin_can_set_account_type |
+
+### R2-C — cutoff / delivery / SCM
+| ID | Sev | Finding | Resolution | Test |
+|---|---|---|---|---|
+| C1 | High | cash collected at the door never settled the bill (COD charged twice); amount unbounded | posted against the bill (wallet credit / credit payment), capped at amount due; method enum | r2s::test_cash_collected_pays_the_delivery |
+| C2 | Med | drivers could deliver/fail future-dated stops | refused for non-admins | r2s::test_driver_cannot_close_future_stop |
+| C3 | Med | inactive shops / suspended owners still got deliveries + bills | cutoff filters shop + owner status; inactive shops get no new standing orders | r2s::test_cutoff_skips_inactive_shop |
+| C4 | Med | cutoff retry after midnight built the wrong day | date from arq enqueue_time | r2s::test_scheduled_cutoff_date_from_enqueue_time |
+| C5 | Med | set_items rejected qty-0 lines and tomorrow-dated prices | priced as of first delivery date, qty-0 skipped; future overrides bounded per item | r2s::test_set_items_allows_zero_qty_… |
+| C6 | Low | sweep used the run-start snapshot (NOT IN with N params); IN lists over 32k params | decided at sweep time (NOT EXISTS); ANY(array) binds | suite |
+| C7 | Low | freeze lasted until midnight; re-subscribe skipped it | lifts when tonight's run has frozen tomorrow; applied on re-subscribe | r2s::test_freeze_lifts_after_tonights_run |
+| C8 | Low | substitute driver drew another van; vans not re-bindable; forecast UTC dates; future as_of wrote off stock; expiry < mfg; route counted closed stops; dead code | fixed each (PATCH /admin/locations/{id}) | r2s::test_substitute_driver_…, ::test_expire_as_of_future_rejected_… |
+
+### R2-I — infra / schema / validation
+| ID | Sev | Finding | Resolution | Test |
+|---|---|---|---|---|
+| I1 | Med | churn lock never blocked (`got is False`) | redis_ok flag + atomic release | r2i::test_churn_lock_blocks_concurrent_run |
+| I2 | Low-Med | chunked oversize → 400 on most routes, logged as 500 | send-side 413 replacement; not counted as 500 | r2i::test_chunked_body_413_without_idempotency_key |
+| I3 | Low | global handlers silent + echoed input | log + no input | suite |
+| I4 | Low | https scheme lost behind proxy; TRUSTED_PROXY_HOPS=0 trap; /metrics public; / disclosed ENV; seed had no prod guard | ProxySchemeMiddleware, prod warning, env/docs, METRICS_TOKEN, seed refuses prod | r2i::test_proxy_scheme_and_root_and_metrics, ::test_seed_refuses_prod |
+| I5 | High | (ref_type, ref_id) scans on every delivery/checkout/refund; FK indexes missing | migration 0056 indexes | r2i::test_integrity_backstops_exist |
+| I6 | High | autogenerate would drop DB-only backstops | include_object guard; models mirror new uniques | — |
+| I7 | Med | 0055 could delete the ACTIVE subscription line; downgrades failed on real data (0048/0049/0055) | ranked dedupe; safe downgrades (verified up/down/up) | migration round trip |
+| I8 | Med | explicit null → 409/500 on PATCH | reject_nulls on every patch model | r2i::test_patch_nulls_and_bounds_are_422 |
+| I9 | Med | Numeric(12,2) overflow; gst 99.995; pack_size Infinity; unbounded ints/lists; free-text state/pincode | bounds + order cap + state/pincode validation; products.pack_size Numeric(10,3) | r2i::test_unknown_state_…, ::test_order_value_overflow_is_422 |
+| I10 | Med | code-only rules without DB backstops | conditional partial uniques (one charge/delivery, redemption/order, referral/referee) + NOT VALID CHECKs | r2i::test_integrity_backstops_exist |
+| I11 | Low | unbounded purges / GPS table; home sections aborted each other; shipment N+1; webhook non-string fields; stale sitemap; CSV dropped newest; webhook Host port; HTTP inside txn | batched purges + retention + ping throttle; savepoints; batched events; coercion; invalidation; newest-first + header; Host:port; commit first | r2i::test_csv_export_…, ::test_shipping_webhook_…, ::test_sitemap_… |
+
+### Deliberately NOT changed (needs a product/ops decision — not code defects)
+- Re-authentication before self-erasure: tokens live 15 min; a step-up OTP flow is a product feature.
+- Mandatory POD for drivers: policy choice (POD URLs are now validated and private).
+- Payment-method gateway tokens supplied by the client: needs the gateway's tokenisation API; responses never expose them.
+- Referral reward before the referee's first purchase: business rule.
+- Idempotent get-or-create on some GETs (accounts/wallet/cart): harmless, kept for client compatibility.
+- 0045 historic data migration: already applied everywhere; left untouched.
+
 ## Verification
-- `uv run pytest -p no:randomly -q`: **400 passed**. `uv run ruff check .`: clean.
-- Shuffled runs: seeds 1, 2, 3, 4, 5 and module-mode 7, 99 all pass.
-- Docker: image built and run against local Postgres + Redis. It migrated a fresh database to 0055, `/healthz` and `/readyz` returned 200, the container health status is `healthy`, and it runs as a non-root user. A spoofed X-Forwarded-For was ignored, a 9 MB chunked body got 413, both the worker and the API refuse an incomplete prod config, and `docker compose config` is valid. In this sandbox the build pulls uv from PyPI instead of `ghcr.io` (that host is blocked here); CI builds the real Dockerfile.
+- `uv run pytest -p no:randomly -q`: **448 passed** (400 → 448 with round-2 regression tests). `uv run ruff check .`: clean.
+- Shuffled runs (sequential, never concurrent): seeds 11, 22, 33 all pass; round 1 also passed seeds 1–5, 7, 99.
+- Migrations: fresh upgrade to 0056, downgrade to 0054, upgrade again — clean.
+- Docker (local-verify image; CI builds the real Dockerfile): migrated a fresh DB to 0056, `/readyz` ok, a forwarded-https trailing-slash redirect now points at https. Round 1 also verified: XFF spoof ignored, chunked 413, non-root, prod guards.
