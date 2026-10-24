@@ -15,10 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache_delete
 from app.core.db import get_db
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
 from app.models.content import Article, Banner, StaticPage
+from app.schemas.common import reject_nulls
 from app.services import content as content_svc
 
 
@@ -64,6 +66,9 @@ class ArticleIn(BaseModel):
     _v_cover = field_validator("cover_image_url")(lambda v: _safe_web_url(v))
 
 
+_reject_nulls = reject_nulls
+
+
 class ArticleUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     body_html: str | None = Field(default=None, max_length=_BODY_MAX)
@@ -76,6 +81,7 @@ class ArticleUpdate(BaseModel):
     cover_image_url: str | None = Field(default=None, max_length=512)
 
     _v_cover = field_validator("cover_image_url")(lambda v: _safe_web_url(v))
+    _v_nulls = _reject_nulls("title", "body_html")
 
 
 class ArticleOut(BaseModel):
@@ -109,6 +115,8 @@ class PageUpdate(BaseModel):
     meta_title: str | None = Field(default=None, max_length=255)
     meta_description: str | None = Field(default=None, max_length=320)
 
+    _v_nulls = _reject_nulls("title", "body_html")
+
 
 class PageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -126,7 +134,7 @@ class BannerIn(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     image_url: str = Field(min_length=1, max_length=512)
     cta_link: str | None = Field(default=None, max_length=512)
-    position: int = 0
+    position: int = Field(default=0, ge=-1_000_000, le=1_000_000)
     active: bool = True
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
@@ -138,12 +146,13 @@ class BannerUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     image_url: str | None = Field(default=None, min_length=1, max_length=512)
     cta_link: str | None = Field(default=None, max_length=512)
-    position: int | None = None
+    position: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
     active: bool | None = None
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
 
     _v_urls = field_validator("image_url", "cta_link")(lambda v: _safe_web_url(v))
+    _v_nulls = _reject_nulls("title", "image_url", "position", "active")
 
 
 class BannerOut(BaseModel):
@@ -198,12 +207,17 @@ async def _get_article(db: AsyncSession, article_id: int) -> Article:
     return art
 
 
+async def _invalidate_sitemap() -> None:
+    await cache_delete(content_svc.SITEMAP_CACHE_KEY)
+
+
 @router.patch("/articles/{article_id}", response_model=ArticleOut, operation_id="update_article")
 async def update_article(article_id: int, data: ArticleUpdate, db: AsyncSession = Depends(get_db)):
     art = await _get_article(db, article_id)
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(art, k, v)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
     await db.refresh(art)
     return art
 
@@ -213,6 +227,7 @@ async def publish_article(article_id: int, db: AsyncSession = Depends(get_db)):
     art = await _get_article(db, article_id)
     content_svc.publish(art)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
     await db.refresh(art)
     return art
 
@@ -222,6 +237,7 @@ async def unpublish_article(article_id: int, db: AsyncSession = Depends(get_db))
     art = await _get_article(db, article_id)
     content_svc.unpublish(art)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
     await db.refresh(art)
     return art
 
@@ -231,6 +247,7 @@ async def delete_article(article_id: int, db: AsyncSession = Depends(get_db)):
     art = await _get_article(db, article_id)
     await db.delete(art)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
 
 
 # ---------- Admin: static pages ----------
@@ -268,6 +285,7 @@ async def update_page(page_id: int, data: PageUpdate, db: AsyncSession = Depends
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(obj, k, v)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
     await db.refresh(obj)
     return obj
 
@@ -277,6 +295,7 @@ async def publish_page(page_id: int, db: AsyncSession = Depends(get_db)):
     obj = await _get_page(db, page_id)
     content_svc.publish(obj)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
     await db.refresh(obj)
     return obj
 
@@ -286,6 +305,7 @@ async def unpublish_page(page_id: int, db: AsyncSession = Depends(get_db)):
     obj = await _get_page(db, page_id)
     content_svc.unpublish(obj)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
     await db.refresh(obj)
     return obj
 
@@ -295,6 +315,7 @@ async def delete_page(page_id: int, db: AsyncSession = Depends(get_db)):
     obj = await _get_page(db, page_id)
     await db.delete(obj)
     await db.commit()
+    await _invalidate_sitemap()  # slugs/visibility changed
 
 
 # ---------- Admin: banners ----------

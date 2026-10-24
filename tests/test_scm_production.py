@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _product(client, h, sku) -> int:
@@ -6,7 +6,9 @@ async def _product(client, h, sku) -> int:
 
 
 async def _stock(client, h, pid) -> float:
-    rows = (await client.get("/api/v1/admin/stock", headers=h)).json()
+    # Filter server-side: the unfiltered list is paginated (50 rows), so a product created
+    # late in the suite fell off the page and this silently returned 0.0.
+    rows = (await client.get(f"/api/v1/admin/stock?product_id={pid}", headers=h)).json()
     return next((s["qty_on_hand"] for s in rows if s["product_id"] == pid), 0.0)
 
 
@@ -14,7 +16,7 @@ async def _seed_batch(client, h, pid, qty, batch_no):
     await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": batch_no, "qty": qty, "expiry_date": "2041-01-01"},
-        headers=h,
+        headers=idem(h),
     )
 
 

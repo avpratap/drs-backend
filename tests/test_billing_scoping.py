@@ -1,4 +1,13 @@
-from conftest import auth, idem, login
+from conftest import auth, driver_today, idem, login
+
+
+async def _corner_store_id() -> int:
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    async with engine.connect() as conn:
+        return (await conn.execute(sa.text("SELECT id FROM shops WHERE name='Corner Store'"))).scalar()
 
 
 async def _account(client, token):
@@ -52,19 +61,23 @@ async def test_delivery_unknown_order_404(client):
     assert r.status_code == 404
 
 
-async def test_credit_billing_net_of_returns(client):
+async def test_credit_billing_net_of_returns(client, monkeypatch):
     """Postpaid delivery charges credit = delivered - returned, idempotently."""
     admin = await login(client, "9999900001")
     delivery = await login(client, "9999900003")
     subscriber = await login(client, "9999900002")
     date = "2031-09-09"
+    driver_today(monkeypatch, date)
 
     run = await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
     assert run.json()["orders_generated"] >= 1
     orders = (
         await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(delivery))
     ).json()
-    order = orders[0]
+    # The seeded Corner Store order specifically (the driver may be assigned other shops
+    # by other tests, so orders[0] could be anyone's).
+    corner = await _corner_store_id()
+    order = next(o for o in orders if o["shop_id"] == corner)
     item = order["items"][0]
     unit = item["unit_price"]
 
@@ -74,7 +87,7 @@ async def test_credit_billing_net_of_returns(client):
         f"/api/v1/delivery/orders/{order['id']}/deliver",
         json={
             "items": [{"product_id": item["product_id"], "qty_delivered": item["qty_planned"]}],
-            "returns": [{"product_id": item["product_id"], "qty_returned": 1, "reason": "damaged"}],
+            "pod": {"signature_url": "https://cdn.example.com/sig.png"}, "returns": [{"product_id": item["product_id"], "qty_returned": 1, "reason": "damaged"}],
         },
         headers=auth(delivery),
     )

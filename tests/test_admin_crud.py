@@ -1,5 +1,5 @@
 """Admin CRUD completion: pricing/coupon edit+delete, CMS page/banner, loyalty admin."""
-from conftest import auth, login
+from conftest import auth, ik, login
 
 
 async def _admin(client):
@@ -57,12 +57,11 @@ async def test_loyalty_and_gift_card_admin(client):
     h = await _admin(client)
     cust = await login(client, "9876543210")
     await client.get("/api/v1/loyalty", headers=auth(cust))  # creates the loyalty account
-    lst = await client.get("/api/v1/admin/loyalty", headers=h)
-    assert lst.status_code == 200 and isinstance(lst.json(), list)
+    lst = await client.get("/api/v1/admin/loyalty?limit=200", headers=h)
+    assert lst.status_code == 200 and lst.json()  # the account just created is listed
 
-    gc = (await client.post("/api/v1/admin/gift-cards", json={"amount": 500}, headers=h)).json()
-    gid = gc["id"] if "id" in gc else None
-    listed = await client.get("/api/v1/admin/gift-cards", headers=h)
+    gc = (await client.post("/api/v1/admin/gift-cards", json={"amount": 500}, headers=ik(h))).json()
+    listed = await client.get("/api/v1/admin/gift-cards?limit=200", headers=h)
     assert listed.status_code == 200
     gid = next(g["id"] for g in listed.json() if g["code"] == gc["code"])
     v = await client.post(f"/api/v1/admin/gift-cards/{gid}/void", headers=h)

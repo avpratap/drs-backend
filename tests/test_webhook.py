@@ -2,6 +2,8 @@ from conftest import auth, login
 
 
 async def _wallet(client, token) -> float:
+    # Ensure the account exists (it's created lazily) so this file also passes alone.
+    await client.get("/api/v1/loyalty", headers=auth(token))
     d = (await client.get("/api/v1/billing/me", headers=auth(token))).json()
     return float(d["wallet_balance"])
 
@@ -26,6 +28,16 @@ async def test_webhook_finalizes_unverified_payment(client):
     r = await client.post("/api/v1/payments/webhook", json=event)
     assert r.status_code == 200 and r.json()["status"] == "ok"
     assert round(await _wallet(client, cust) - before, 2) == 120.0
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    async with engine.connect() as conn:
+        status, gpid = (await conn.execute(
+            sa.text("SELECT status, gateway_payment_id FROM payments WHERE id=:i"),
+            {"i": create.json()["payment_id"]},
+        )).one()
+    assert status == "success" and gpid == "pay_hook"
 
     # Duplicate delivery of the same event is a no-op (wallet not credited twice).
     dup = await client.post("/api/v1/payments/webhook", json=event)

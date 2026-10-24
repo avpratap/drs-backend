@@ -117,7 +117,12 @@ async def generate_invoice(delivery_order_id: int, db: AsyncSession = Depends(ge
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Invoice can only be generated for a delivered order"
         )
-    inv = await invoicing.generate_for_delivery(db, order)
+    try:
+        inv = await invoicing.generate_for_delivery(db, order)
+    except invoicing.NothingToInvoice:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Nothing was supplied on this order; no invoice to issue"
+        ) from None
     return await _detail(db, inv)
 
 

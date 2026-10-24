@@ -3,7 +3,7 @@ credit notes, order cancellation guards, and input hardening.
 """
 from uuid import uuid4
 
-from conftest import auth, idem, login
+from conftest import auth, idem, ik, login
 
 
 async def _pid(client, token, sku) -> int:
@@ -52,7 +52,7 @@ async def test_full_refund_issues_credit_note(client):
     oid, pay_id, _ = await _paid_order(client, cust, ghee, qty=1)
     # Invoice first, then full refund -> order refunded + a credit note exists.
     inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=auth(cust))).json()
-    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=ik(auth(admin)))
     assert r.status_code == 200
     o = (await client.get(f"/api/v1/orders/{oid}", headers=auth(cust))).json()
     assert o["payment_status"] == "refunded"
@@ -103,6 +103,9 @@ async def test_customer_self_cancel_unpaid_then_paid_blocked(client):
     assert (
         await client.post(f"/api/v1/orders/{oid2}/cancel", headers=auth(other))
     ).status_code == 404
+    # …and the attempt had no effect on the owner's order.
+    mine = (await client.get(f"/api/v1/orders/{oid2}", headers=auth(cust))).json()
+    assert mine["status"] == "created"
 
 
 # ---------- subscription cadence validation ----------
@@ -211,16 +214,28 @@ async def test_retail_prepaid_cutoff_skips_on_low_balance(client):
         )
     ).json()
     shop_id = sub["shop_id"]
-    await client.put(
+    put = await client.put(
         f"/api/v1/subscriptions/{sub['id']}/items",
         json=[{"product_id": milk, "default_qty": 2, "frequency": "daily"}],
         headers=auth(cust),
     )
+    assert put.status_code == 200, put.text  # else the "skip" below would pass vacuously
     date = "2035-03-03"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
     # Wallet is 0 < order total -> no delivery order should have been generated.
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(admin))).json()
     assert all(o["shop_id"] != shop_id for o in orders)
+    # Positive control: once the wallet covers it, the same subscription IS materialized.
+    pay = (await client.post("/api/v1/payments/create", json={"purpose": "wallet_topup", "amount": 100},
+                             headers=auth(cust))).json()
+    await client.post("/api/v1/payments/verify", json={
+        "gateway_order_id": pay["gateway_order_id"], "gateway_payment_id": "p", "signature": "dev"},
+        headers=auth(cust))
+    date2 = "2035-03-04"
+    await client.post(f"/api/v1/admin/cutoff/run?date={date2}", json={}, headers=auth(admin))
+    orders2 = (await client.get(f"/api/v1/delivery/orders?date={date2}", headers=auth(admin))).json()
+    mine = [o for o in orders2 if o["shop_id"] == shop_id]
+    assert len(mine) == 1 and mine[0]["total"] == 54.0
 
 
 # ========== Second-pass (12-agent) audit fixes ==========
@@ -389,8 +404,17 @@ async def test_full_credit_note_nets_out_prior_partial(client):
     # Now a FULL refund-to-source of the payment. One CN per invoice is enforced
     # (uq_credit_note_original), so the existing PARTIAL CN is UPGRADED in place to the
     # full reversal — no second CN, and no GST double-reversal.
-    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=auth(admin))
+    r = await client.post(f"/api/v1/payments/{pay_id}/refund", json={}, headers=ik(auth(admin)))
     assert r.status_code == 200
+    # M6: the ₹500 already refunded via the RMA is counted — only ₹1000 goes to source
+    # (previously ₹1500 → ₹2000 paid out on a ₹1500 order).
+    assert r.json()["amount"] == 1000.0
+    assert (await client.get(f"/api/v1/orders/{oid}", headers=auth(cust))).json()[
+        "payment_status"
+    ] == "refunded"
+    # Nothing left to refund on either path.
+    again = await client.post(f"/api/v1/payments/{pay_id}/refund", json={"amount": 1}, headers=ik(auth(admin)))
+    assert again.status_code == 422
 
     invoices = (await client.get("/api/v1/invoices", headers=auth(admin))).json()
     cns = [i for i in invoices if i["is_credit_note"] and i["original_invoice_id"] == inv["id"]]

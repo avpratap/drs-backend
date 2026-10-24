@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _product(client, h, sku) -> int:
@@ -10,7 +10,7 @@ async def _location(client, h, name) -> int:
 
 
 async def _stock_at(client, h, pid, loc) -> float:
-    rows = (await client.get(f"/api/v1/admin/stock?location_id={loc}", headers=h)).json()
+    rows = (await client.get(f"/api/v1/admin/stock?location_id={loc}&product_id={pid}", headers=h)).json()
     return next((s["qty_on_hand"] for s in rows if s["product_id"] == pid), 0.0)
 
 
@@ -30,7 +30,7 @@ async def test_transfer_full_flow_preserves_lot(client):
     await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": "LOT-TR1", "qty": 50, "location_id": src, "expiry_date": "2041-01-01"},
-        headers=h,
+        headers=idem(h),
     )
     assert await _stock_at(client, h, pid, src) == 50.0
     assert await _stock_at(client, h, pid, dst) == 0.0
@@ -70,7 +70,7 @@ async def test_transfer_insufficient_stock_422(client):
     await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": "LOT-SHORT", "qty": 5, "location_id": src, "expiry_date": "2041-01-01"},
-        headers=h,
+        headers=idem(h),
     )
     tid = (await client.post(
         "/api/v1/admin/transfers",
@@ -134,7 +134,7 @@ async def test_transfer_cannot_cancel_in_transit(client):
     await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": "LOT-NC", "qty": 10, "location_id": src, "expiry_date": "2041-01-01"},
-        headers=h,
+        headers=idem(h),
     )
     tid = (await client.post(
         "/api/v1/admin/transfers",

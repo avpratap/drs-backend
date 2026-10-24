@@ -12,7 +12,7 @@ from app.models.cart import Cart, CartItem
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.order import Order
 from app.models.product import Product
-from app.models.shop import Shop
+from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
 from app.schemas.order import OrderItemIn
 from app.services import orders as order_service
@@ -46,12 +46,23 @@ async def get_or_create_active_cart(db: AsyncSession, account_id: int) -> Cart:
     return cart
 
 
-async def _require_product(db: AsyncSession, product_id: int) -> None:
+async def _require_product(db: AsyncSession, product_id: int) -> Product:
     product = await db.get(Product, product_id)
     if product is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     if product.status != "active":  # can't add a retired/soft-deleted product
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Product is not available")
+    return product
+
+
+async def _lock_active_cart(db: AsyncSession, cart: Cart) -> None:
+    """Serialize with checkout (which locks the cart and converts it): an add/update that
+    raced it would land on the converted cart and be silently lost."""
+    row = (
+        await db.execute(select(Cart).where(Cart.id == cart.id).with_for_update())
+    ).scalar_one()
+    if row.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This cart was just checked out; retry")
 
 
 async def _items(db: AsyncSession, cart_id: int) -> list[CartItem]:
@@ -78,7 +89,8 @@ async def _locked_item(db: AsyncSession, cart_id: int, item_id: int) -> CartItem
 
 
 async def add_item(db: AsyncSession, cart: Cart, product_id: int, qty: float) -> None:
-    await _require_product(db, product_id)
+    product = await _require_product(db, product_id)
+    await _lock_active_cart(db, cart)
     existing = (
         await db.execute(
             select(CartItem)
@@ -87,14 +99,48 @@ async def add_item(db: AsyncSession, cart: Cart, product_id: int, qty: float) ->
         )
     ).scalar_one_or_none()
     if existing is not None:  # merge same product into one line
-        existing.qty = round(float(existing.qty) + qty, 3)
-    else:
-        db.add(CartItem(cart_id=cart.id, product_id=product_id, qty=qty))
+        new_qty = round(float(existing.qty) + qty, 3)
+        _check_qty(new_qty)
+        order_service.check_whole_units(product, new_qty)
+        existing.qty = new_qty
+        return
+    _check_qty(round(qty, 3))
+    order_service.check_whole_units(product, round(qty, 3))
+    # No row to lock yet: a concurrent first add could insert too. UNIQUE(cart_id,
+    # product_id) arbitrates; the loser merges into the winner's row.
+    try:
+        async with db.begin_nested():
+            db.add(CartItem(cart_id=cart.id, product_id=product_id, qty=round(qty, 3)))
+            await db.flush()
+    except IntegrityError:
+        row = (
+            await db.execute(
+                select(CartItem)
+                .where(CartItem.cart_id == cart.id, CartItem.product_id == product_id)
+                .with_for_update()
+            )
+        ).scalar_one()
+        new_qty = round(float(row.qty) + qty, 3)
+        _check_qty(new_qty)
+        row.qty = new_qty
+
+
+def _check_qty(qty: float) -> None:
+    # The merged line must stay within what checkout accepts (else checkout 500'd on an
+    # internal OrderItemIn validation, or the Numeric column overflowed).
+    if qty <= 0 or qty > order_service.MAX_LINE_QTY:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Quantity must be in (0, {order_service.MAX_LINE_QTY:g}]",
+        )
 
 
 async def set_item_qty(db: AsyncSession, cart: Cart, item_id: int, qty: float) -> None:
+    await _lock_active_cart(db, cart)
     item = await _locked_item(db, cart.id, item_id)
-    item.qty = qty
+    _check_qty(round(qty, 3))
+    order_service.check_whole_units(await db.get(Product, item.product_id), round(qty, 3))
+    item.qty = round(qty, 3)
 
 
 async def remove_item(db: AsyncSession, cart: Cart, item_id: int) -> None:
@@ -103,17 +149,25 @@ async def remove_item(db: AsyncSession, cart: Cart, item_id: int) -> None:
 
 
 async def _tier_id(db: AsyncSession, account_id: int) -> int | None:
-    """Indicative pricing tier for the cart: the account's home shop drives it
-    (shop -> account -> RETAIL). Authoritative pricing is re-resolved at checkout."""
+    """Pricing tier for the cart — the SAME resolution checkout uses: the account's
+    is_home shop (shop -> account -> RETAIL). Using the account's first shop priced a
+    B2B subscriber's cart at their store tier while checkout charged retail."""
     shop = (
         await db.execute(
-            select(Shop).where(Shop.account_id == account_id).order_by(Shop.id).limit(1)
+            select(Shop)
+            .where(Shop.account_id == account_id, Shop.is_home.is_(True))
+            .order_by(Shop.id)
+            .limit(1)
         )
     ).scalar_one_or_none()
     if shop is not None:
         return await resolve_tier_id(db, shop)
     from app.models.pricing import PriceTier
 
+    # No home shop yet: checkout would create one with no tier -> account tier -> RETAIL.
+    account = await db.get(CustomerAccount, account_id)
+    if account is not None and account.price_tier_id:
+        return account.price_tier_id
     return await db.scalar(select(PriceTier.id).where(PriceTier.code == "RETAIL"))
 
 
@@ -180,7 +234,9 @@ async def coupon_preview(db: AsyncSession, code: str, account_id: int, subtotal:
     return round(min(discount, subtotal), 2)
 
 
-async def checkout(db: AsyncSession, user: User, address, coupon_code) -> Order:
+async def checkout(
+    db: AsyncSession, user: User, address, coupon_code, *, state=None, pincode=None
+) -> Order:
     account = await order_service._get_or_create_account(db, user)
     cart = await get_or_create_active_cart(db, account.id)
     # Lock the cart row and re-assert it's still active, so two concurrent checkouts
@@ -208,4 +264,6 @@ async def checkout(db: AsyncSession, user: User, address, coupon_code) -> Order:
     # raises (e.g. unpriced/retired product), the session rolls back and the cart
     # stays active.
     locked.status = "converted"
-    return await order_service.create_order(db, user, payload, address, coupon_code)
+    return await order_service.create_order(
+        db, user, payload, address, coupon_code, state=state, pincode=pincode
+    )

@@ -32,8 +32,8 @@ async def create_order(db: AsyncSession, bom_id, planned_qty, location_id, user_
         raise HTTPException(status.HTTP_404_NOT_FOUND, "BOM not found")
     if bom.status != "active":
         raise HTTPException(status.HTTP_409_CONFLICT, "BOM is not active")
-    if location_id is None:
-        location_id = await inventory.default_location_id(db)
+    # Validate/default the location (404 / 409 instead of an FK / NOT NULL 500).
+    location_id = await inventory.require_location(db, location_id)
     pro = ProductionOrder(
         pro_no=f"PENDING-{uuid4().hex[:20]}",
         bom_id=bom.id,
@@ -69,6 +69,11 @@ async def start_order(db: AsyncSession, pro: ProductionOrder, user_id) -> Produc
     # the gate and drive stock negative (TOCTOU).
     for product_id, need in sorted(needs.items()):
         item = await inventory._locked_item(db, product_id, pro.location_id)
+        # Expired-but-unswept lots are not usable: write them off under the lock before
+        # the gate (they were counted as available and later written off again).
+        await batch_svc._expire_unswept(
+            db, item, product_id, pro.location_id, batch_svc._today(), user_id
+        )
         if float(item.qty_on_hand) < need:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -13,6 +13,7 @@ from app.models.product import Product
 from app.models.rating import Rating, ReviewHelpful
 from app.models.user import User
 from app.models.variant import ProductVariant
+from app.schemas.common import reject_nulls
 from app.schemas.product import ProductCreate, ProductOut, ProductUpdate
 from app.services import reviews as review_svc
 
@@ -195,9 +196,13 @@ async def rate_product(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if await db.get(Product, product_id) is None:
+    product = await db.get(Product, product_id)
+    if product is None or product.status != "active":  # retired products can't be rated
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     verified = await review_svc.is_verified_purchase(db, user.id, product_id)
+    # Only a verified purchase publishes immediately; anyone else's review is held for
+    # moderation (it was auto-approved, letting any account drive a product's rating).
+    initial_status = "approved" if verified else "pending"
     # One rating per user per product — upsert.
     existing = await db.scalar(
         select(Rating).where(Rating.user_id == user.id, Rating.product_id == product_id)
@@ -208,28 +213,36 @@ async def rate_product(
         existing.verified_purchase = verified
         # Editing a review an admin REJECTED must not quietly keep the old verdict on new
         # text — send it back to moderation (hidden from public) instead of auto-publishing.
-        if existing.status == "rejected":
+        if existing.status == "rejected" or (not verified and existing.status == "approved"):
             existing.status = "pending"
         row = existing
         await db.flush()
     else:
         row = Rating(
             user_id=user.id, product_id=product_id, stars=data.stars, comment=data.comment,
-            verified_purchase=verified,
+            verified_purchase=verified, status=initial_status,
         )
-        db.add(row)
         try:
-            await db.flush()
+            # Savepoint: a full rollback would expire `user` (same session) and the next
+            # attribute access would 500.
+            async with db.begin_nested():
+                db.add(row)
+                await db.flush()
         except IntegrityError:
             # Concurrent first rating by the same user (uq_rating_user_product) — fall back
-            # to updating the row the other request committed.
-            await db.rollback()
-            row = await db.scalar(
-                select(Rating).where(Rating.user_id == user.id, Rating.product_id == product_id)
-            )
+            # to updating the row the other request committed, with the same rules.
+            row = (
+                await db.execute(
+                    select(Rating)
+                    .where(Rating.user_id == user.id, Rating.product_id == product_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
             row.stars = data.stars
             row.comment = data.comment
             row.verified_purchase = verified
+            if row.status == "rejected" or (not verified and row.status == "approved"):
+                row.status = "pending"
             await db.flush()
     await review_svc.recompute_product_rating(db, product_id)
     await db.commit()
@@ -272,8 +285,11 @@ async def toggle_helpful(
     row = (
         await db.execute(select(Rating).where(Rating.id == rating_id).with_for_update())
     ).scalar_one_or_none()
-    if row is None or row.product_id != product_id:
+    # Only published reviews can be voted on (a pending/rejected one isn't visible).
+    if row is None or row.product_id != product_id or row.status != "approved":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Review not found")
+    if row.user_id == user.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You can't vote on your own review")
     vote = await db.scalar(
         select(ReviewHelpful).where(
             ReviewHelpful.rating_id == rating_id, ReviewHelpful.user_id == user.id
@@ -356,7 +372,7 @@ class VariantIn(BaseModel):
     price: float = Field(default=0, ge=0, le=1_000_000, allow_inf_nan=False)
     mrp: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
     image_url: str | None = Field(default=None, max_length=512)
-    sort_order: int = 0
+    sort_order: int = Field(default=0, ge=-1_000_000, le=1_000_000)
 
 
 class VariantUpdate(BaseModel):
@@ -366,7 +382,9 @@ class VariantUpdate(BaseModel):
     mrp: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
     image_url: str | None = Field(default=None, max_length=512)
     status: str | None = Field(default=None, pattern="^(active|inactive)$")
-    sort_order: int | None = None
+    sort_order: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
+
+    _v_nulls = reject_nulls("label", "pack_size", "price", "status", "sort_order")
 
 
 class VariantOut(BaseModel):
@@ -422,6 +440,10 @@ async def list_variants(
     user: User | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
+    is_admin = user is not None and user.role == "admin"
+    product = await db.get(Product, product_id)
+    if product is None or (product.status != "active" and not is_admin):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     q = select(ProductVariant).where(ProductVariant.product_id == product_id)
     # Only admins may request inactive variants via ?all=true; everyone else sees active.
     if not (all and user is not None and user.role == "admin"):

@@ -16,6 +16,9 @@ def today_ist() -> dt.date:
     return dt.datetime.now(IST).date()
 
 
+MAX_FUTURE_OVERRIDES = 400  # per item: bounds the rows a script could create
+
+
 def assert_editable(for_date: dt.date) -> None:
     """You may edit tomorrow (before cutoff) or any later date. Never today/past, never
     tomorrow once the cutoff hour has passed."""
@@ -50,33 +53,20 @@ def _matches(item: SubscriptionItem, sub: Subscription, d: dt.date) -> bool:
     return True
 
 
-async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -> list[dict]:
+def plan_from(
+    sub: Subscription,
+    items: list[SubscriptionItem],
+    overrides: dict[int, SubscriptionOverride],
+    for_date: dt.date,
+) -> list[dict]:
+    """Pure plan computation over preloaded ACTIVE items + that date's overrides (by
+    item id). Shared by the per-sub API and the batched cutoff (no per-sub queries)."""
     if sub.status != "active":
         return []
     if sub.end_date and for_date > sub.end_date:
         return []
     if for_date < sub.start_date:
         return []
-
-    res = await db.execute(
-        select(SubscriptionItem).where(
-            SubscriptionItem.subscription_id == sub.id,
-            SubscriptionItem.active.is_(True),
-        )
-    )
-    items = res.scalars().all()
-    item_ids = [i.id for i in items]
-
-    overrides: dict[int, SubscriptionOverride] = {}
-    if item_ids:
-        res = await db.execute(
-            select(SubscriptionOverride).where(
-                SubscriptionOverride.subscription_item_id.in_(item_ids),
-                SubscriptionOverride.for_date == for_date,
-            )
-        )
-        overrides = {o.subscription_item_id: o for o in res.scalars().all()}
-
     # Aggregate by product_id so a product covered by >1 subscription item produces ONE
     # line (delivery/invoice key by product_id; duplicate lines would be mis-handled).
     by_product: dict[int, float] = {}
@@ -93,3 +83,68 @@ async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -
         if qty > 0:
             by_product[it.product_id] = by_product.get(it.product_id, 0.0) + qty
     return [{"product_id": pid, "qty": qty} for pid, qty in by_product.items()]
+
+
+async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -> list[dict]:
+    if sub.status != "active":
+        return []
+    res = await db.execute(
+        select(SubscriptionItem).where(
+            SubscriptionItem.subscription_id == sub.id,
+            SubscriptionItem.active.is_(True),
+        )
+    )
+    items = list(res.scalars().all())
+    item_ids = [i.id for i in items]
+    overrides: dict[int, SubscriptionOverride] = {}
+    if item_ids:
+        res = await db.execute(
+            select(SubscriptionOverride).where(
+                SubscriptionOverride.subscription_item_id.in_(item_ids),
+                SubscriptionOverride.for_date == for_date,
+            )
+        )
+        overrides = {o.subscription_item_id: o for o in res.scalars().all()}
+    return plan_from(sub, items, overrides, for_date)
+
+
+async def assert_standing_change_allowed(db, user_role: str) -> None:
+    """Standing-order changes (items, pause/resume/cancel/re-subscribe) are frozen from the
+    cutoff hour until TOMORROW'S RUN HAS FINISHED: while it runs, a change could be read
+    half-way. Once tomorrow's order is frozen, a change applies from the next undelivered
+    day, so it's allowed again (the freeze used to last until midnight). Admins may
+    override."""
+    if user_role == "admin":
+        return
+    now = dt.datetime.now(IST)
+    if now.hour < settings.CUTOFF_HOUR:
+        return
+    from sqlalchemy import select
+
+    from app.models.delivery import ScheduleRun
+
+    tomorrow = now.date() + dt.timedelta(days=1)
+    cutoff_at = now.replace(hour=settings.CUTOFF_HOUR, minute=0, second=0, microsecond=0)
+    # Tonight's run (started after the cutoff) has finished and frozen tomorrow, and no
+    # later run (e.g. the scheduled one after a manual admin run) is in progress: the
+    # LATEST run for tomorrow decides.
+    latest = (
+        await db.execute(
+            select(ScheduleRun.status, ScheduleRun.started_at, ScheduleRun.finished_at)
+            .where(ScheduleRun.for_delivery_date == tomorrow)
+            .order_by(ScheduleRun.started_at.desc(), ScheduleRun.id.desc())
+            .limit(1)
+        )
+    ).first()
+    done = (
+        latest is not None
+        and latest.status == "frozen"
+        and latest.finished_at is not None
+        and latest.started_at >= cutoff_at
+    )
+    if not done:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Changes are frozen after the {settings.CUTOFF_HOUR}:00 cutoff until tomorrow's "
+            "orders are fixed; try again shortly",
+        )

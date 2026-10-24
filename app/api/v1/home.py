@@ -78,25 +78,29 @@ async def my_home(user: User = Depends(get_current_user), db: AsyncSession = Dep
     # Optional sections — best-effort, never fail the whole screen.
     loyalty_points = 0
     try:
-        la = await db.scalar(
-            select(LoyaltyAccount).where(LoyaltyAccount.account_id == account.id)
-        )
+        async with db.begin_nested():  # a failed section must not abort the others' txn
+            la = await db.scalar(
+                select(LoyaltyAccount).where(LoyaltyAccount.account_id == account.id)
+            )
         loyalty_points = int(la.points_balance) if la else 0
     except Exception:
         log.warning("home: loyalty lookup failed")
 
     banners: list[HomeBannerOut] = []
     try:
+        async with db.begin_nested():
+            active = await content_svc.active_banners(db)
         banners = [
             HomeBannerOut(id=b.id, title=b.title, image_url=b.image_url, cta_link=b.cta_link)
-            for b in await content_svc.active_banners(db)
+            for b in active
         ]
     except Exception:
         log.warning("home: banners lookup failed")
 
     recommendations: list[dict] = []
     try:
-        recommendations = await rec_svc.personalized(db, account.id, limit=5)
+        async with db.begin_nested():
+            recommendations = await rec_svc.personalized(db, account.id, limit=5)
     except Exception:
         log.warning("home: recommendations failed")
 

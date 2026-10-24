@@ -10,7 +10,12 @@ from app.models.shop import CustomerAccount
 
 
 async def recompute_product_rating(db: AsyncSession, product_id: int) -> None:
-    """Refresh Product.avg_rating + rating_count over APPROVED reviews only."""
+    """Refresh Product.avg_rating + rating_count over APPROVED reviews only.
+    Lock the product FIRST so concurrent recomputes serialize and each counts the other's
+    committed rating (count-then-write without it dropped a vote)."""
+    product = (
+        await db.execute(select(Product).where(Product.id == product_id).with_for_update())
+    ).scalar_one_or_none()
     count, avg = (
         await db.execute(
             select(func.count(), func.coalesce(func.avg(Rating.stars), 0)).where(
@@ -18,7 +23,6 @@ async def recompute_product_rating(db: AsyncSession, product_id: int) -> None:
             )
         )
     ).one()
-    product = await db.get(Product, product_id)
     if product is not None:
         product.rating_count = int(count)
         product.avg_rating = round(float(avg), 2)
@@ -37,7 +41,7 @@ async def is_verified_purchase(db: AsyncSession, user_id: int, product_id: int) 
         .join(OrderItem, OrderItem.order_id == Order.id)
         .where(
             Order.account_id.in_(acct_ids),
-            Order.payment_status == "paid",
+            Order.payment_status.in_(("paid", "partially_refunded")),
             OrderItem.product_id == product_id,
         )
     )

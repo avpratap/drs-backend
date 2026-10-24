@@ -17,7 +17,7 @@ async def test_support_bot_devstub(client):
 
 async def test_support_requires_auth(client):
     r = await client.post("/api/v1/ai/support", json={"message": "hi"})
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
 
 
 async def test_admin_copilot_devstub(client):

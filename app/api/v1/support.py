@@ -1,9 +1,10 @@
 """Support tickets: customer inbox + admin console."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import media
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
@@ -28,11 +29,19 @@ def _safe_attachment_url(v: str | None) -> str | None:
     if v is None:
         return v
     s = v.strip()
+    if media.is_ref(s):
+        return s  # a private upload reference (ownership checked by the endpoint)
     if s.lower().startswith("https://"):
         return v
     if s.startswith("/") and not s.startswith(("//", "/\\")):
         return v
     raise ValueError("attachment_url must be an absolute https URL or a same-origin path")
+
+
+def _own_attachment(value: str | None, user: User) -> None:
+    """A private upload may be attached only by the user who uploaded it."""
+    if media.is_ref(value) and not media.ref_owned(value, "uploads", user.id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown attachment")
 
 
 class MessageIn(BaseModel):
@@ -53,6 +62,10 @@ class MessageOut(BaseModel):
     body: str
     attachment_url: str | None = None
 
+    @field_serializer("attachment_url")
+    def _view_url(self, v: str | None) -> str | None:
+        return media.resolve(v)  # private upload -> short-lived signed URL
+
 
 class TicketOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -65,15 +78,57 @@ class TicketOut(BaseModel):
     messages: list[MessageOut] = []
 
 
+_THREAD_CAP = 1000  # a single thread view is bounded too
+
+
 async def _messages(db: AsyncSession, ticket_id: int) -> list[MessageOut]:
     rows = (
         await db.execute(
             select(TicketMessage)
             .where(TicketMessage.ticket_id == ticket_id)
-            .order_by(TicketMessage.id)
+            .order_by(TicketMessage.id.desc())  # the NEWEST _THREAD_CAP, shown oldest-first
+            .limit(_THREAD_CAP)
         )
     ).scalars().all()
-    return [MessageOut.model_validate(m) for m in rows]
+    return [MessageOut.model_validate(m) for m in reversed(rows)]
+
+
+_LIST_MSG_CAP = 50  # list views carry the latest messages only (full thread on GET by id)
+
+
+async def _with_messages_many(db: AsyncSession, tickets: list[SupportTicket]) -> list[TicketOut]:
+    """List views with ONE batched message query (was a query per ticket — N+1), capped
+    per ticket so a long thread can't bloat a 200-row admin page."""
+    if not tickets:
+        return []
+    by_ticket: dict[int, list[MessageOut]] = {}
+    # Cap IN the query (latest N per ticket via a window), not after loading every
+    # message of every ticket into memory.
+    rn = (
+        func.row_number()
+        .over(partition_by=TicketMessage.ticket_id, order_by=TicketMessage.id.desc())
+        .label("rn")
+    )
+    latest = (
+        select(TicketMessage.id, rn)
+        .where(TicketMessage.ticket_id.in_([t.id for t in tickets]))
+        .subquery()
+    )
+    for m in (
+        await db.execute(
+            select(TicketMessage)
+            .join(latest, latest.c.id == TicketMessage.id)
+            .where(latest.c.rn <= _LIST_MSG_CAP)
+            .order_by(TicketMessage.ticket_id, TicketMessage.id)
+        )
+    ).scalars():
+        by_ticket.setdefault(m.ticket_id, []).append(MessageOut.model_validate(m))
+    outs = []
+    for t in tickets:
+        o = TicketOut.model_validate(t)
+        o.messages = by_ticket.get(t.id, [])
+        outs.append(o)
+    return outs
 
 
 async def _with_messages(db: AsyncSession, ticket: SupportTicket) -> TicketOut:
@@ -116,7 +171,7 @@ async def list_my_tickets(
             .offset(page.offset)
         )
     ).scalars().all()
-    return [await _with_messages(db, t) for t in rows]
+    return await _with_messages_many(db, list(rows))
 
 
 @router.get("/support/tickets/{ticket_id}", response_model=TicketOut, operation_id="get_ticket")
@@ -137,6 +192,7 @@ async def reply_ticket(
     db: AsyncSession = Depends(get_db),
 ):
     ticket = await _owned_or_404(db, ticket_id, user)
+    _own_attachment(data.attachment_url, user)
     await support.add_message(db, ticket, user, data.body, data.attachment_url)
     await db.commit()
     await db.refresh(ticket)
@@ -162,7 +218,7 @@ async def admin_list_tickets(
     if category:
         q = q.where(SupportTicket.category == category)
     rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _with_messages(db, t) for t in rows]
+    return await _with_messages_many(db, list(rows))
 
 
 @router.post(
@@ -180,6 +236,7 @@ async def admin_reply_ticket(
     ticket = await db.get(SupportTicket, ticket_id)
     if ticket is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    _own_attachment(data.attachment_url, user)
     await support.add_message(db, ticket, user, data.body, data.attachment_url)
     await db.commit()
     await db.refresh(ticket)

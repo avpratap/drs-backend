@@ -20,9 +20,18 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(requir
 
 
 @router.post("/cutoff/run", response_model=CutoffResult, operation_id="run_cutoff")
-async def run_cutoff_endpoint(date: dt.date | None = None, db: AsyncSession = Depends(get_db)):
-    """Materialize active subscriptions into delivery_orders for a date (default tomorrow)."""
+async def run_cutoff_endpoint(
+    date: dt.date | None = None, force: bool = False, db: AsyncSession = Depends(get_db)
+):
+    """Materialize active subscriptions into delivery_orders for a date (default tomorrow).
+    Today/past dates are refused unless force=true: a rerun on delivery day rebuilds open
+    orders mid-route, and a past date would create orders that then get billed."""
     delivery_date = date or (today_ist() + dt.timedelta(days=1))
+    if delivery_date <= today_ist() and not force:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Cutoff can only run for tomorrow or later (pass force=true to override)",
+        )
     return await run_cutoff(db, delivery_date)
 
 
@@ -123,10 +132,20 @@ async def resend_notification(notif_id: int, db: AsyncSession = Depends(get_db))
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Skipped notifications can't be resent (gating applied)"
         )
+    if (
+        notif.status == "sending"
+        and notif.last_attempt_at is not None
+        and dt.datetime.now(dt.UTC) - notif.last_attempt_at < dt.timedelta(minutes=5)
+    ):
+        # Its provider call may still be in flight — resending now can double-send.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Notification is being sent; retry in a few minutes"
+        )
     notif.status = "queued"
     notif.attempts = 0  # reset so a notification that hit max-attempts is actually retried
     notif.next_attempt_at = None
-    notif.scheduled_for = None
+    if notif.category != "marketing":
+        notif.scheduled_for = None  # marketing keeps its quiet-hours deferral
     notif.error = None
     await db.commit()
     return ResendOut(id=notif.id, status=notif.status)

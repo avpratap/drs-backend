@@ -21,7 +21,9 @@ async def test_profile_validation(client):
 
 
 async def test_address_default_flip(client):
-    token = await login(client, "9876543210")
+    # Own customer: "first address is auto-default" depends on having NO prior address,
+    # and other tests add addresses for the shared 9876543210.
+    token = await login(client, "9100000971")
     a1 = await client.post(
         "/api/v1/addresses",
         json={"line1": "1 A Rd", "city": "Jaipur", "state": "RJ", "pincode": "302001"},

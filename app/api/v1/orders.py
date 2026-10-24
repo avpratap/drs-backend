@@ -8,14 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
+from app.models.invoice import InvoiceLine
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
+from app.schemas.invoice import InvoiceLineOut, InvoiceOut
 from app.schemas.order import OrderCreate, OrderItemOut, OrderOut
 from app.services import coupons, invoicing
 from app.services import orders as order_service
+from app.services import refunds as refund_acct
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -162,27 +165,12 @@ async def reorder(
     if not src_items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Order has no items to reorder")
     items = [_ReorderItem(i.product_id, float(i.qty)) for i in src_items]
-    order = await order_service.create_order(db, user, items, None, None)
+    # Same destination as the source order, so GST place of supply carries over.
+    order = await order_service.create_order(db, user, items, None, None, state=src.ship_state)
     return await _detail(db, order)
 
 
 # ---------- Invoice + live tracking ----------
-class InvoiceOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    invoice_no: str
-    invoice_date: dt.date
-    # A GST tax invoice must show the place of supply and the tax split so the buyer can
-    # see CGST+SGST (intra-state) vs IGST (inter-state).
-    place_of_supply: str | None = None
-    is_interstate: bool = False
-    taxable_value: float = 0.0
-    cgst: float = 0.0
-    sgst: float = 0.0
-    igst: float = 0.0
-    total: float
-
-
 class TrackingEventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     status: str
@@ -242,6 +230,12 @@ async def cancel_order(
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Order is {order.status} and can no longer be cancelled"
         )
+    if await order_service.has_live_shipment(db, order.id):
+        # A COD order can ship while unpaid; once a parcel is with the courier the order
+        # can't be cancelled from the app (the courier would deliver it anyway).
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Order has already been shipped and can't be cancelled"
+        )
     order.status = "cancelled"
     # Release any coupon reservation so an unpaid cancelled order doesn't burn the code.
     await coupons.release_for_order(db, order.id)
@@ -253,14 +247,40 @@ async def cancel_order(
 async def generate_order_invoice(
     order_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    """Issue (or fetch the existing) GST tax invoice for a paid one-time order. Idempotent."""
+    """Issue (or fetch the existing) GST tax invoice for a paid one-time order. Idempotent.
+    An order refunded (in part or whole) before its first invoice gets the invoice AND the
+    credit note for what was already refunded, so output GST isn't over-reported."""
     order = await _owned_order(db, order_id, user)
-    if order.payment_status != "paid":
+    if order.payment_status not in ("paid", "partially_refunded", "refunded"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Invoice is available only after the order is paid"
         )
-    inv = await invoicing.generate_for_order(db, order)
-    return inv
+    try:
+        inv = await invoicing.generate_for_order(db, order)
+    except invoicing.NothingToInvoice as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    # Catch the credit note up with refunds that settled before (or while) the invoice
+    # was issued. Under the order lock the refund paths also take; the shortfall is
+    # settled-and-applied refunds minus what the credit note already reverses, so it's
+    # idempotent and never double-counts a refund whose own effect adds its CN lines.
+    order = await refund_acct.lock_order(db, order.id)
+    owed = round(
+        await refund_acct.credited_refunds(db, order.id) - await invoicing.credited_value(db, inv), 2
+    )
+    if owed > 0:
+        reason = f"Refund for order {order.order_no}"
+        if await refund_acct.refunded_settled(db, order.id) >= round(float(order.total), 2):
+            await invoicing.build_full_credit_note(db, inv, reason=reason)
+        else:
+            await invoicing.generate_credit_note_for_lines(db, inv, None, reason=reason, amount=owed)
+    await db.commit()
+    # Build the full view (with lines) — returning the ORM row gave `lines: []`.
+    lines = (
+        await db.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == inv.id))
+    ).scalars().all()
+    out = InvoiceOut.model_validate(inv)
+    out.lines = [InvoiceLineOut.model_validate(ln) for ln in lines]
+    return out
 
 
 @router.get("/{order_id}/tracking", response_model=OrderTrackingOut, operation_id="track_order")
@@ -272,7 +292,9 @@ async def track_order(
     order = await _owned_order(db, order_id, user)
     shipments = (
         await db.execute(
-            select(Shipment).where(Shipment.order_id == order.id).order_by(Shipment.id.desc())
+            select(Shipment)
+            .where(Shipment.order_id == order.id, Shipment.status != "draft")  # not shipped yet
+            .order_by(Shipment.id.desc())
         )
     ).scalars().all()
     out_shipments: list[ShipmentTrackOut] = []

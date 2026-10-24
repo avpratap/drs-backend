@@ -1,13 +1,14 @@
 """Tier-4 #38 delivery-app APIs: location, route, summary, failed-delivery."""
-from conftest import auth, login
+from conftest import auth, driver_today, login
 
 
 async def _materialize(client, admin_h, date):
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=admin_h)
 
 
-async def test_location_route_summary_fail(client):
+async def test_location_route_summary_fail(client, monkeypatch):
     date = "2039-08-08"
+    driver_today(monkeypatch, date)
     admin = await login(client, "9999900001")
     ah = auth(admin)
     deliver = await login(client, "9999900003")
@@ -22,6 +23,7 @@ async def test_location_route_summary_fail(client):
     stops = route.json()
     assert stops and stops[0]["sequence"] == 1
     oid = stops[0]["order"]["id"]
+    failed0 = (await client.get(f"/api/v1/delivery/summary?date={date}", headers=dh)).json()["failed"]
 
     f = await client.post(
         f"/api/v1/delivery/orders/{oid}/fail", json={"reason": "customer_unavailable"}, headers=dh
@@ -30,7 +32,7 @@ async def test_location_route_summary_fail(client):
     assert f.json()["status"] == "failed" and f.json()["failure_reason"] == "customer_unavailable"
 
     s = await client.get(f"/api/v1/delivery/summary?date={date}", headers=dh)
-    assert s.status_code == 200 and s.json()["failed"] >= 1
+    assert s.status_code == 200 and s.json()["failed"] == failed0 + 1
 
     # Terminal order can't be failed again.
     again = await client.post(

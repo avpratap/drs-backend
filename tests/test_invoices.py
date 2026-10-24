@@ -120,6 +120,10 @@ async def test_invoice_scoping(client):
             f"/api/v1/admin/invoices/generate?delivery_order_id={do_id}", headers=auth(admin)
         )
     ).json()
-    # Admin's invoice is not visible to an unrelated customer.
+    # Admin's invoice is not visible to an unrelated customer — by id, as a PDF link, or
+    # in their list — while the owner (admin here) can see it (positive control).
     r = await client.get(f"/api/v1/invoices/{inv['id']}", headers=auth(other))
     assert r.status_code == 404
+    assert (await client.get(f"/api/v1/invoices/{inv['id']}/pdf", headers=auth(other))).status_code == 404
+    assert all(i["id"] != inv["id"] for i in (await client.get("/api/v1/invoices", headers=auth(other))).json())
+    assert (await client.get(f"/api/v1/invoices/{inv['id']}", headers=auth(admin))).status_code == 200

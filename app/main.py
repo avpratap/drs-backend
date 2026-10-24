@@ -1,3 +1,4 @@
+import logging
 import math
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -6,10 +7,14 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from sqlalchemy.exc import DataError, IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
+from app.core.bodylimit import BodySizeLimitMiddleware
+from app.core.clientip import ProxySchemeMiddleware
 from app.core.config import settings
 from app.core.db import engine
 from app.core.idempotency import IdempotencyMiddleware
@@ -25,25 +30,8 @@ from app.core.redis import redis_client
 configure_logging()
 init_sentry()
 
-# Production safety guards: fail fast instead of booting an insecure instance.
-if settings.ENV == "prod":
-    if "dev-only" in settings.JWT_SECRET or len(settings.JWT_SECRET) < 32:
-        raise RuntimeError("JWT_SECRET must be a strong secret (>=32 chars) in prod")
-    if "*" in settings.cors_origins_list:
-        raise RuntimeError("CORS_ORIGINS must be an explicit allow-list in prod")
-    # Payment secrets: without these the gateway stub accepts the "dev" signature
-    # and unsigned webhooks — forgeable payments. Refuse to boot.
-    if not (settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET):
-        raise RuntimeError("RAZORPAY_KEY_ID/SECRET required in prod")
-    if not settings.RAZORPAY_WEBHOOK_SECRET:
-        raise RuntimeError("RAZORPAY_WEBHOOK_SECRET required in prod")
-    # GST tax invoices are not legally valid without the seller's GSTIN.
-    if not settings.SELLER_GSTIN:
-        raise RuntimeError("SELLER_GSTIN required in prod (GST tax invoices)")
-    # Without the Shiprocket webhook token the tracking webhook is unauthenticated
-    # (anyone could drive a shipment to delivered + fire notifications). Refuse to boot.
-    if not settings.SHIPROCKET_WEBHOOK_TOKEN:
-        raise RuntimeError("SHIPROCKET_WEBHOOK_TOKEN required in prod")
+# Production safety guards (secrets, payment/GST/courier credentials, CORS, storage)
+# are enforced by Settings._prod_boot_guard at import time — shared with the worker.
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -69,25 +57,9 @@ app.add_middleware(RequestContextMiddleware)  # times & tags every request
 
 # Hard cap on request body size (defense against a single huge-body DoS). Generous
 # enough for the 5 MB image uploads + multipart framing; blocks multi-hundred-MB bodies.
+# Enforced on the bytes actually received (chunked bodies carry no Content-Length).
 _MAX_BODY_BYTES = 8 * 1024 * 1024
-
-
-@app.middleware("http")
-async def limit_body_size(request: Request, call_next):
-    cl = request.headers.get("content-length")
-    if cl is not None:
-        try:
-            if int(cl) > _MAX_BODY_BYTES:
-                return JSONResponse(
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                    content={"detail": "Request body too large", "error_code": "payload_too_large"},
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": "Invalid Content-Length", "error_code": "bad_request"},
-            )
-    return await call_next(request)
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=_MAX_BODY_BYTES)
 
 
 @app.middleware("http")
@@ -103,6 +75,16 @@ async def security_headers(request: Request, call_next):
         )
     return response
 
+
+app.add_middleware(ProxySchemeMiddleware)  # https scheme behind the trusted proxy
+
+if settings.ENV == "prod" and settings.TRUSTED_PROXY_HOPS == 0:
+    # Behind a proxy this makes every request appear to come from the proxy's IP: ONE
+    # shared rate-limit / OTP-per-IP bucket for all users.
+    logging.getLogger("drs").warning(
+        "TRUSTED_PROXY_HOPS=0 in prod: client IPs come from the socket peer. Set it to the "
+        "number of proxies in front of the app (Railway: 1)."
+    )
 
 # Registered LAST so it is the OUTERMOST middleware — error responses produced by the
 # inner middleware (429 rate-limit, 413 body-size, 409/422 idempotency) then still carry
@@ -141,6 +123,9 @@ def _error_code(status_code: int) -> str:
         return "error"
 
 
+_log = logging.getLogger("drs.errors")
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
@@ -160,6 +145,43 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+@app.exception_handler(IntegrityError)
+async def integrity_exception_handler(request: Request, exc: IntegrityError):
+    # Safety net: a constraint violation (duplicate / dangling FK / CHECK) is a client
+    # conflict, not a server crash. Specific paths still validate up front; this stops
+    # any missed one from surfacing as an opaque 500. The DB message is not echoed, but
+    # it IS logged: a code bug (FK/NOT NULL) must stay visible, not vanish into a 409.
+    _log.warning("IntegrityError on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "Request conflicts with existing data", "error_code": "conflict"},
+    )
+
+
+@app.exception_handler(DataError)
+async def data_exception_handler(request: Request, exc: DataError):
+    # Value out of range for its column (too long / numeric overflow): invalid input.
+    _log.warning("DataError on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": "A value is out of range or too long", "error_code": "unprocessable_entity"},
+    )
+
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_handler(request: Request, exc: ValidationError):
+    # A schema built inside a handler (not request parsing) failed validation. Never echo
+    # the input (it may be server-built data: gateway/AI payloads); log it for debugging.
+    _log.warning("ValidationError on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": _sanitize(exc.errors(include_input=False, include_url=False)),
+            "error_code": "unprocessable_entity",
+        },
+    )
+
+
 from app.api.v1.content import public_root_router  # noqa: E402
 
 app.include_router(health_router)  # /healthz, /readyz
@@ -168,7 +190,17 @@ app.include_router(api_router)  # /api/v1/...
 
 
 @app.get("/metrics", include_in_schema=False)
-async def metrics():
+async def metrics(request: Request):
+    # Request counts/latencies per route are operational intel: when METRICS_TOKEN is
+    # set, the scraper must present it (Authorization: Bearer <token>).
+    if settings.METRICS_TOKEN:
+        import hmac
+
+        got = request.headers.get("authorization", "")
+        if not hmac.compare_digest(got, f"Bearer {settings.METRICS_TOKEN}"):
+            from fastapi import HTTPException
+
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
     return metrics_response()
 
 
@@ -181,10 +213,16 @@ if not _storage_enabled():
     from fastapi import HTTPException
     from fastapi.responses import FileResponse
 
+    from app.core.storage import PRIVATE_PREFIX, verify_dev_signature
+
     @app.get("/files/{key:path}", include_in_schema=False)
-    async def serve_file(key: str):
+    async def serve_file(key: str, exp: str | None = None, sig: str | None = None):
         safe = os.path.normpath(key).replace("\\", "/")
         if safe.startswith("..") or os.path.isabs(safe):
+            raise HTTPException(status_code=404)
+        # Private objects (invoices) need the short-lived signature minted after an
+        # authorization check; 404 (not 403) so their existence isn't probeable.
+        if safe.startswith(PRIVATE_PREFIX) and not verify_dev_signature(safe, exp, sig):
             raise HTTPException(status_code=404)
         path = os.path.join(settings.STORAGE_DIR, safe)
         if not os.path.isfile(path):
@@ -194,4 +232,5 @@ if not _storage_enabled():
 
 @app.get("/", include_in_schema=False)
 async def root():
-    return {"app": "DRS API", "env": settings.ENV, "docs": "/docs"}
+    # No environment disclosure; docs are only served outside prod.
+    return {"app": "DRS API", "docs": "/docs" if settings.ENV != "prod" else None}

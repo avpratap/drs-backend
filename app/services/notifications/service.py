@@ -30,9 +30,10 @@ log = logging.getLogger("drs.notify")
 MAX_ATTEMPTS = 5
 
 _CONSENT_PURPOSE = {
-    "whatsapp": "whatsapp_optin",
+    "whatsapp": "marketing_whatsapp",
     "sms": "marketing_sms",
     "email": "marketing_email",
+    "push": "marketing_push",
 }
 _TOGGLE_ATTR = {
     "whatsapp": "notify_whatsapp",
@@ -67,8 +68,36 @@ def _addr(channel: str, user: User) -> str | None:
     if channel in ("whatsapp", "sms"):
         return user.phone
     if channel == "email":
-        return user.email
+        # Only a VERIFIED inbox: anyone can type someone else's address into a profile,
+        # and we must not mail (or market to) a person who never confirmed it.
+        return user.email if user.email_verified_at is not None else None
     return None  # push -> device token (not modeled yet)
+
+
+def _gate_reason(prof, consents: dict, channel: str, category: str) -> str | None:
+    """Why this channel may NOT receive this category now (None = allowed). Shared by
+    emit and by delivery, so a consent withdrawn after queueing is honoured at send."""
+    if not getattr(prof, _TOGGLE_ATTR[channel], False):
+        return "channel_off"
+    if category == tmpl.MARKETING:
+        if not prof.marketing_opt_in:
+            return "no_marketing_optin"
+        purpose = _CONSENT_PURPOSE.get(channel)
+        # Fail closed: a marketing channel with no consent purpose is never sent.
+        if purpose is None or consents.get(purpose) != "granted":
+            return "no_consent"
+    return None
+
+
+async def _active_push_tokens(db: AsyncSession, user_id: int) -> str | None:
+    tokens = (
+        await db.execute(
+            select(DeviceToken.token).where(
+                DeviceToken.user_id == user_id, DeviceToken.active.is_(True)
+            )
+        )
+    ).scalars().all()
+    return ",".join(tokens) if tokens else None
 
 
 async def emit_event(
@@ -86,7 +115,12 @@ async def emit_event(
         log.warning("emit_event: unknown event_type %s", event_type)
         return []
     try:
-        return await _emit_event_inner(db, event_type, user, data, spec, account_id, dedupe_key)
+        # The WHOLE emit runs in a savepoint (the per-row ones nest inside): a failure in
+        # e.g. the profile get-or-create flush (concurrent first event for a new user) or a
+        # consent/device query used to leave the session in a failed transaction, so the
+        # CALLER's commit (payment / billing) then raised and its money write was lost.
+        async with db.begin_nested():
+            return await _emit_event_inner(db, event_type, user, data, spec, account_id, dedupe_key)
     except Exception:
         # Notifications are best-effort relative to the caller's (often money-critical)
         # transaction: a failure here must NEVER roll back the caller. Each row insert
@@ -115,32 +149,19 @@ async def _emit_event_inner(
 
     rows: list[Notification] = []
     for channel in channels:
-        toggle_on = getattr(prof, _TOGGLE_ATTR[channel], False)
         status, skip_reason, scheduled_for = "queued", None, None
-
-        if not toggle_on:
-            status, skip_reason = "skipped", "channel_off"
-        elif category == tmpl.MARKETING:
-            if not prof.marketing_opt_in:
-                status, skip_reason = "skipped", "no_marketing_optin"
-            else:
-                purpose = _CONSENT_PURPOSE.get(channel)
-                if purpose and consents.get(purpose) != "granted":
-                    status, skip_reason = "skipped", "no_consent"
-                elif _in_quiet_hours(prof, now):
-                    scheduled_for = _quiet_end(prof, now)
+        reason = _gate_reason(prof, consents, channel, category)
+        if reason is None:
+            reason = sender_mod.channel_unavailable(channel)
+        if reason is not None:
+            status, skip_reason = "skipped", reason
+        elif category == tmpl.MARKETING and _in_quiet_hours(prof, now):
+            scheduled_for = _quiet_end(prof, now)
 
         to_addr = _addr(channel, user)
         if channel == "push":
-            # Push "address" is the user's active device tokens, joined for the sender.
-            tokens = (
-                await db.execute(
-                    select(DeviceToken.token).where(
-                        DeviceToken.user_id == user.id, DeviceToken.active.is_(True)
-                    )
-                )
-            ).scalars().all()
-            to_addr = ",".join(tokens) if tokens else None
+            # Push "address" is the user's active device tokens (re-resolved at delivery).
+            to_addr = await _active_push_tokens(db, user.id)
         if status == "queued" and not to_addr:
             status, skip_reason = "skipped", "no_address"
 
@@ -183,6 +204,39 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
     """
     if notif.status != "queued":
         return notif.status == "sent"
+    # Re-check gating AT SEND TIME: a row may have waited (quiet hours, retry backoff,
+    # admin resend) while the user withdrew consent / turned the channel off / was erased.
+    # populate_existing: the drain's session lives across many rows — a user erased or a
+    # profile changed after an earlier row loaded them must be seen fresh here.
+    user = await db.get(User, notif.user_id, populate_existing=True)
+    if user is None or user.status == "erased":
+        notif.status, notif.skip_reason = "skipped", "user_erased"
+        await db.commit()
+        return False
+    if notif.category == tmpl.MARKETING or notif.channel in _TOGGLE_ATTR:
+        prof = await profile_svc.get_or_create_profile(db, user, fresh=True)
+        consents = (
+            await profile_svc.current_consents(db, user.id)
+            if notif.category == tmpl.MARKETING else {}
+        )
+        reason = _gate_reason(prof, consents, notif.channel, notif.category)
+        if reason is not None:
+            notif.status = "skipped"
+            notif.skip_reason = "consent_withdrawn" if reason == "no_consent" else reason
+            await db.commit()
+            return False
+    if notif.channel == "push":
+        # Tokens deactivated since emit (logout / reassigned) must not receive it.
+        notif.to_addr = await _active_push_tokens(db, notif.user_id)
+        if not notif.to_addr:
+            notif.status, notif.skip_reason = "skipped", "no_address"
+            await db.commit()
+            return False
+    unavailable = sender_mod.channel_unavailable(notif.channel)
+    if unavailable:
+        notif.status, notif.skip_reason = "skipped", unavailable
+        await db.commit()
+        return False
     sender = sender_mod.SENDERS.get(notif.channel)
     if sender is None:
         notif.status, notif.error = "failed", "no sender"

@@ -16,6 +16,10 @@ os.environ["DATABASE_URL"] = "postgresql+asyncpg://drs:drs@localhost:5432/drs_te
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["DB_POOL_MODE"] = "pgbouncer"  # NullPool for tests
 os.environ["RATE_LIMIT_ENABLED"] = "false"  # the suite's rapid calls must not self-throttle
+# No wall-clock dependence: with the real 23:00 cutoff, any test editing tomorrow /
+# a standing order would fail when the suite happens to run 23:00-24:00 IST. Tests that
+# exercise the cutoff freeze patch settings.CUTOFF_HOUR explicitly.
+os.environ["CUTOFF_HOUR"] = "24"
 
 import asyncpg
 import pytest
@@ -149,6 +153,11 @@ async def _redis_lifecycle():
     await redis_client.flushdb()
     yield
     await redis_client.aclose()
+    # The pool's asyncio.Lock binds to the loop that first CONTENDED it (any concurrent
+    # test); the next test's fresh loop then fails with "bound to a different event loop".
+    # Reset it so each test's loop gets an unbound lock (a test-harness artifact — prod
+    # runs one loop).
+    redis_client.connection_pool._lock = asyncio.Lock()
 
 
 @pytest_asyncio.fixture
@@ -167,8 +176,34 @@ async def login(client: AsyncClient, phone: str) -> str:
     return r.json()["access_token"]
 
 
+async def erase_confirm(client: AsyncClient, phone: str) -> dict:
+    """Body for POST /account/erase: a fresh OTP for the caller's phone (step-up)."""
+    r = await client.post("/api/v1/auth/otp/request", json={"phone": phone})
+    return {"otp": r.json()["dev_otp"]}
+
+
 def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def driver_today(monkeypatch, date: str) -> None:
+    """Let a DRIVER close stops dated `date` (drivers can't deliver/fail future stops;
+    tests use far-future dates for isolation)."""
+    import datetime as _dt
+
+    import app.api.v1.delivery as api_delivery
+    import app.services.delivery as svc_delivery
+
+    day = _dt.date.fromisoformat(date)
+    monkeypatch.setattr(svc_delivery, "today_ist", lambda: day)
+    monkeypatch.setattr(api_delivery, "today_ist", lambda: day)
+
+
+def ik(headers: dict) -> dict:
+    """Headers plus a fresh Idempotency-Key (required on money-moving admin writes)."""
+    import uuid
+
+    return {**headers, "Idempotency-Key": uuid.uuid4().hex}
 
 
 def idem(headers: dict) -> dict:

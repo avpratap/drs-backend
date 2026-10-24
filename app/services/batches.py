@@ -43,6 +43,9 @@ async def receive_batch(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "expiry_date cannot be before mfg_date"
         )
     location_id = await require_location(db, location_id)
+    # Lock order is ALWAYS stock_item -> batch (same as consume_fefo / expiry / transfer
+    # dispatch): taking the batch first here deadlocked against a concurrent delivery.
+    item = await _locked_item(db, product_id, location_id)
     # Batch identity is (product, location, batch_no, expiry) — the SAME physical lot
     # received twice (two GRNs, a re-stock, a transfer-in of an existing lot) must MERGE
     # into one row, not create a duplicate that fragments FEFO and blurs lot identity (#26).
@@ -89,7 +92,6 @@ async def receive_batch(
             batch = (await db.execute(dup_q)).scalars().one()
             _merge(batch)
             await db.flush()
-    item = await _locked_item(db, product_id, location_id)
     item.qty_on_hand = round(float(item.qty_on_hand) + qty, 3)
     db.add(
         StockMovement(
@@ -101,6 +103,53 @@ async def receive_batch(
     return batch
 
 
+class InsufficientStock(Exception):
+    def __init__(self, available: float):
+        super().__init__(f"only {available} available")
+        self.available = available
+
+
+async def _expire_unswept(
+    db: AsyncSession, item, product_id: int, location_id: int, as_of: dt.date,
+    created_by: int | None = None,
+) -> tuple[int, float]:
+    """Write off this (product, location)'s lots whose expiry is before `as_of`. Caller
+    holds the StockItem lock (stock_item -> batch order). Returns (lots, qty)."""
+    lots = (
+        await db.execute(
+            select(StockBatch)
+            .where(
+                StockBatch.product_id == product_id,
+                StockBatch.location_id == location_id,
+                StockBatch.status == "active",
+                StockBatch.qty > 0,
+                StockBatch.expiry_date.is_not(None),
+                StockBatch.expiry_date < as_of,
+            )
+            .order_by(StockBatch.id)
+            .with_for_update()
+        )
+    ).scalars().all()
+    total = 0.0
+    for b in lots:
+        qty = float(b.qty)
+        item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
+        b.qty = 0
+        b.status = "expired"
+        db.add(
+            StockMovement(
+                product_id=b.product_id, location_id=b.location_id, batch_id=b.id,
+                change=-qty, reason="wastage", ref_type="expiry", ref_id=b.id,
+                note="expired", created_by=created_by,
+            )
+        )
+        total = round(total + qty, 3)
+    return len(lots), total
+
+
+def _today() -> dt.date:
+    return dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+
 async def consume_fefo(
     db: AsyncSession,
     product_id: int,
@@ -111,15 +160,23 @@ async def consume_fefo(
     ref_type: str | None = None,
     ref_id: int | None = None,
     created_by: int | None = None,
+    note: str | None = None,
+    strict: bool = False,
 ) -> None:
     """Remove `qty` from stock, allocating across batches earliest-expiry-first.
 
-    Already-expired lots (expiry < today, pending the expiry sweep) are NOT allocated, so
-    FEFO never ships expired perishables; any shortfall of fresh stock falls to the
-    unbatched remainder (aggregate may go negative — a delivery is never blocked)."""
+    Lots already past expiry (pending the sweep) are WRITTEN OFF first, under the same
+    lock: previously they were skipped but kept their qty in on-hand, so the shortfall
+    was booked unbatched and the later sweep removed the same units again (negative
+    stock). Any remaining shortfall of fresh stock falls to the unbatched remainder
+    (a delivery is never blocked), unless `strict` — then InsufficientStock is raised
+    before anything changes (wastage / count corrections can't go below zero)."""
     location_id = await require_location(db, location_id)
-    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+    today = _today()
     item = await _locked_item(db, product_id, location_id)
+    await _expire_unswept(db, item, product_id, location_id, today, created_by)
+    if strict and float(item.qty_on_hand) < qty:
+        raise InsufficientStock(max(float(item.qty_on_hand), 0.0))
     item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
 
     batches = (
@@ -149,7 +206,8 @@ async def consume_fefo(
         db.add(
             StockMovement(
                 product_id=product_id, location_id=location_id, batch_id=b.id,
-                change=-take, reason=reason, ref_type=ref_type, ref_id=ref_id, created_by=created_by,
+                change=-take, reason=reason, ref_type=ref_type, ref_id=ref_id,
+                note=note, created_by=created_by,
             )
         )
     if remaining > 0:  # more demanded than batched stock — unbatched remainder
@@ -157,7 +215,7 @@ async def consume_fefo(
             StockMovement(
                 product_id=product_id, location_id=location_id, batch_id=None,
                 change=-remaining, reason=reason, ref_type=ref_type, ref_id=ref_id,
-                created_by=created_by,
+                note=note, created_by=created_by,
             )
         )
 
@@ -166,22 +224,19 @@ async def expire_batches(db: AsyncSession, as_of: dt.date, *, created_by: int | 
     """Write off batches whose expiry_date has passed: qty->0, wastage movement.
 
     Locks the StockItem row BEFORE its batches — the same stock_item->batch order used
-    by consume_fefo / transfers / production — so a concurrent delivery and this expiry
-    job can't deadlock by acquiring the two rows in opposite orders.
+    by consume_fefo / transfers / production / receive — so concurrent jobs can't
+    deadlock by acquiring the two rows in opposite orders.
     """
-    _expired = (
-        StockBatch.status == "active",
-        StockBatch.qty > 0,
-        StockBatch.expiry_date.is_not(None),
-        StockBatch.expiry_date < as_of,
-    )
     groups = (
         await db.execute(
             select(StockBatch.product_id, StockBatch.location_id)
-            .where(*_expired)
+            .where(
+                StockBatch.status == "active",
+                StockBatch.qty > 0,
+                StockBatch.expiry_date.is_not(None),
+                StockBatch.expiry_date < as_of,
+            )
             .distinct()
-            # Deterministic lock order (product, location) — matches the stock_item->batch
-            # lock order used elsewhere so concurrent jobs can't deadlock.
             .order_by(StockBatch.product_id, StockBatch.location_id)
         )
     ).all()
@@ -189,29 +244,7 @@ async def expire_batches(db: AsyncSession, as_of: dt.date, *, created_by: int | 
     total = 0.0
     for product_id, location_id in groups:
         item = await _locked_item(db, product_id, location_id)  # stock_item first
-        batches = (
-            await db.execute(
-                select(StockBatch)
-                .where(
-                    StockBatch.product_id == product_id,
-                    StockBatch.location_id == location_id,
-                    *_expired,
-                )
-                .with_for_update()
-            )
-        ).scalars().all()
-        for b in batches:
-            qty = float(b.qty)
-            item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
-            b.qty = 0
-            b.status = "expired"
-            db.add(
-                StockMovement(
-                    product_id=b.product_id, location_id=b.location_id, batch_id=b.id,
-                    change=-qty, reason="wastage", ref_type="expiry", ref_id=b.id,
-                    note="expired", created_by=created_by,
-                )
-            )
-            count += 1
-            total = round(total + qty, 3)
+        n, q = await _expire_unswept(db, item, product_id, location_id, as_of, created_by)
+        count += n
+        total = round(total + q, 3)
     return {"batches_expired": count, "qty_written_off": total}

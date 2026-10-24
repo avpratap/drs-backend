@@ -1,11 +1,21 @@
+import datetime as dt
+from types import SimpleNamespace
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import media
+from app.core.clientip import client_ip
+from app.core.config import settings
 from app.core.db import get_db
+from app.core.sendlimit import allow_send
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
+from app.models.payment import Payment
 from app.models.profile import Address, PaymentMandate, PaymentMethod
 from app.models.user import User
 from app.schemas.common import DataExportOut, EraseResultOut
@@ -17,20 +27,24 @@ from app.schemas.profile import (
     ConsentOut,
     MandateIn,
     MandateOut,
+    PaymentMethodFromPaymentIn,
     PaymentMethodIn,
     PaymentMethodOut,
     ProfileOut,
     ProfileUpdate,
 )
-from app.services import dpdp
+from app.services import dpdp, email_verify
+from app.services import otp as otp_service
+from app.services import payments as pay_service
 from app.services import profile as svc
+from app.services.notifications import senders
 
 router = APIRouter(tags=["account"])
 
 
 def _client(request: Request) -> dict:
     return {
-        "ip": request.client.host if request.client else None,
+        "ip": client_ip(request),
         "ua": request.headers.get("user-agent", "")[:512] or None,
     }
 
@@ -57,9 +71,10 @@ def _profile_out(user: User, prof) -> ProfileOut:
         user_id=user.id,
         phone=user.phone,
         email=user.email,
+        email_verified=user.email_verified_at is not None,
         full_name=user.full_name,
         display_name=prof.display_name,
-        avatar_url=prof.avatar_url,
+        avatar_url=media.resolve(prof.avatar_url),
         date_of_birth=prof.date_of_birth,
         gender=prof.gender,
         locale=prof.locale,
@@ -92,24 +107,108 @@ async def update_profile(
     prof = await svc.get_or_create_profile(db, user)
     patch = data.model_dump(exclude_unset=True)
 
+    if media.is_ref(patch.get("avatar_url")) and not media.ref_owned(
+        patch["avatar_url"], "uploads", user.id
+    ):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown avatar upload")
     if patch.get("date_of_birth") and patch["date_of_birth"] > svc.today_ist():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "date_of_birth is in the future")
 
     # Fields that live on the User row.
     if "email" in patch:
-        user.email = patch.pop("email")
+        new_email = (patch.pop("email") or "").strip().lower() or None
+        if new_email != user.email:
+            # Not unique while unverified: claiming an address proves nothing, so it must
+            # neither lock the real owner out nor reveal that the address is registered.
+            user.email = new_email
+            user.email_verified_at = None  # a changed address must be re-verified
     if "full_name" in patch:
         user.full_name = patch.pop("full_name")
+    if "notify_whatsapp" in patch and patch["notify_whatsapp"] != prof.notify_whatsapp:
+        # Turning WhatsApp on/off IS the user's opt-in/out (Meta policy): record it in the
+        # consent ledger so the toggle and the ledger can't disagree.
+        await svc.record_consent(
+            db, user.id, "whatsapp_optin",
+            "granted" if patch["notify_whatsapp"] else "withdrawn", ip=None, ua=None,
+        )
     for field, value in patch.items():
         setattr(prof, field, value)
 
+    await db.commit()
+    await db.refresh(user)
+    await db.refresh(prof)
+    return _profile_out(user, prof)
+
+
+# ---------- Email ownership verification ----------
+class EmailVerifyRequestOut(BaseModel):
+    detail: str
+    dev_token: str | None = None  # non-prod only (no real mail sent), like dev_otp
+
+
+class EmailVerifyIn(BaseModel):
+    token: str = Field(min_length=10, max_length=512)
+
+
+# Marketing consent per channel. WhatsApp MARKETING has its own purpose: the
+# whatsapp_optin above only enables the channel (order updates) — opting in to those must
+# never also opt the user in to promotions.
+_MARKETING_PURPOSES = ("marketing_sms", "marketing_email", "marketing_push", "marketing_whatsapp")
+
+
+@router.post("/account/email/verify-request", response_model=EmailVerifyRequestOut,
+             operation_id="request_email_verification")
+async def request_email_verification(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    if not user.email:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Set an email first")
+    if user.email_verified_at is not None:
+        return {"detail": "email already verified"}
+    if not await allow_send("email_verify", user.email, sender=f"user:{user.id}"):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "A code was sent recently; try again later"
+        )
+    token = email_verify.make_token(user.id, user.email)
+    sent, _msg_id, _err = await senders.send_email(
+        user.email, f"Confirm your DRS email with this code: {token}",
+        {"subject": "Confirm your email"},
+    )
+    if not sent and settings.ENV == "prod":
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email could not be sent")
+    return {
+        "detail": "verification sent",
+        "dev_token": token if settings.ENV != "prod" else None,
+    }
+
+
+@router.post("/account/email/verify", response_model=ProfileOut, operation_id="verify_email")
+async def verify_email(
+    data: EmailVerifyIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    if not email_verify.check_token(data.token, user.id, user.email):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired verification code")
+    # An address is unique only among VERIFIED owners (an unverified claim can't lock the
+    # real owner out); the partial unique index backstops this check.
+    taken = await db.scalar(
+        select(func.count()).select_from(User).where(
+            func.lower(User.email) == user.email.lower(),
+            User.email_verified_at.is_not(None),
+            User.id != user.id,
+        )
+    )
+    if taken:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This email is verified on another account")
+    user.email_verified_at = dt.datetime.now(dt.UTC)
+    prof = await svc.get_or_create_profile(db, user)
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already in use") from None
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This email is verified on another account"
+        ) from None
     await db.refresh(user)
-    await db.refresh(prof)
     return _profile_out(user, prof)
 
 
@@ -122,12 +221,30 @@ async def export_my_data(
     return await dpdp.export_user_data(db, user)
 
 
+class EraseConfirmIn(BaseModel):
+    # A FRESH OTP for the account's phone (POST /auth/otp/request first): a stolen or
+    # left-open session alone must not be able to irreversibly erase the account.
+    otp: str = Field(pattern=r"^\d{6}$")
+
+
 @router.post("/account/erase", operation_id="erase_my_account", response_model=EraseResultOut)
 async def erase_my_account(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    data: EraseConfirmIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Right to erasure — anonymizes PII; tax/financial records are retained by law."""
-    return await dpdp.erase_user(db, user)
+    """Right to erasure — anonymizes PII; tax/financial records are retained by law.
+    Irreversible, so it requires step-up confirmation with a fresh OTP."""
+    # Refuse BEFORE consuming the OTP, so a blocked user doesn't burn the code.
+    blocked = await dpdp.erasure_blocked(db, user)
+    if blocked:
+        raise HTTPException(status.HTTP_409_CONFLICT, blocked)
+    if not await otp_service.verify_otp(user.phone, data.otp):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid or expired OTP")
+    try:
+        return await dpdp.erase_user(db, user)
+    except dpdp.ErasureBlocked as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
 
 # ---------- Consent ----------
@@ -157,7 +274,6 @@ async def post_consent(
         # WhatsApp is different: the business may message the user on WhatsApp at all only
         # with an opt-in (Meta policy), so this toggle genuinely enables/disables the channel.
         prof.notify_whatsapp = granted
-    _MARKETING_PURPOSES = ("marketing_sms", "marketing_email", "whatsapp_optin")
     if data.purpose in _MARKETING_PURPOSES:
         # Derive the marketing master from ALL marketing consents (ON if ANY is granted),
         # not last-write-wins — otherwise revoking one marketing channel would silently
@@ -295,6 +411,74 @@ async def create_payment_method(
 
 
 @router.post(
+    "/payment-methods/from-payment",
+    response_model=PaymentMethodOut,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="save_payment_method_from_payment",
+)
+async def save_payment_method_from_payment(
+    data: PaymentMethodFromPaymentIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save the instrument of one of the caller's own SUCCESSFUL gateway payments. The
+    token, customer id, brand and last digits come from the gateway's record of that
+    payment — never from the client."""
+    payment = await db.get(Payment, data.payment_id)
+    if (
+        payment is None
+        or payment.account_id not in await svc.my_account_ids(db, user)
+        or payment.status != "success"
+        or payment.gateway != "razorpay"
+        or not payment.gateway_payment_id
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+    try:
+        gp = await pay_service.fetch_gateway_payment(payment.gateway_payment_id)
+    except httpx.HTTPError:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Payment gateway unavailable") from None
+    method = gp.get("method")
+    token = gp.get("token_id")
+    if method not in ("upi", "card", "netbanking") or not token:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "This payment's instrument can't be saved"
+        )
+    # Serialize with other saves on this account (same lock create_payment_method takes)
+    # so two concurrent saves of one instrument can't both insert.
+    await svc._lock_account(db, svc._PM_LOCK_NS, payment.account_id)
+    existing = await db.scalar(
+        select(PaymentMethod).where(
+            PaymentMethod.account_id == payment.account_id,
+            PaymentMethod.gateway_token == token,
+            PaymentMethod.status == "active",
+        )
+    )
+    if existing is not None:
+        return existing
+    card = gp.get("card") or {}
+    if method == "card":
+        display = f"•••• {card.get('last4', '')}".strip()
+    elif method == "upi":
+        display = gp.get("vpa")
+    else:
+        display = gp.get("bank")
+    fields = SimpleNamespace(
+        method_type=method,
+        gateway_customer_id=gp.get("customer_id"),
+        gateway_token=token,
+        display=(display or None) and str(display)[:64],
+        brand=(card.get("network") or None) and str(card["network"])[:32],
+        expiry_month=card.get("expiry_month"),
+        expiry_year=card.get("expiry_year"),
+        is_default=data.is_default,
+    )
+    pm = await svc.create_payment_method(db, payment.account_id, fields)
+    await db.commit()
+    await db.refresh(pm)
+    return pm
+
+
+@router.post(
     "/payment-methods/{pm_id}/default",
     response_model=PaymentMethodOut,
     operation_id="set_default_payment_method",
@@ -362,6 +546,8 @@ async def create_mandate(
         await _owned_method(db, user, data.payment_method_id)
     if data.valid_from and data.valid_to and data.valid_to < data.valid_from:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    if data.valid_to and data.valid_to < svc.today_ist():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to is in the past")
     # RBI caps a UPI AutoPay / e-NACH per-debit at ₹15,000 (above it needs pre-debit auth).
     if float(data.max_amount) > 15000:
         raise HTTPException(
@@ -381,3 +567,21 @@ async def create_mandate(
     await db.commit()
     await db.refresh(mandate)
     return mandate
+
+
+@router.post("/mandates/{mandate_id}/cancel", response_model=MandateOut, operation_id="cancel_mandate")
+async def cancel_mandate(
+    mandate_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The customer revokes an autopay mandate (they must always be able to)."""
+    mandate = await db.get(PaymentMandate, mandate_id)
+    if mandate is None or mandate.account_id not in await svc.my_account_ids(db, user):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mandate not found")
+    if mandate.status != "cancelled":
+        mandate.status = "cancelled"
+        await db.commit()
+        await db.refresh(mandate)
+    return mandate
+

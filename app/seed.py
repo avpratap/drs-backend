@@ -42,6 +42,12 @@ async def _upsert_user(db, data) -> User:
 
 
 async def main() -> None:
+    from app.core.config import settings
+
+    if settings.ENV == "prod":
+        # Creates a phone-verified ADMIN on a well-known number and re-roles existing
+        # users holding the seed phones: never against production.
+        raise SystemExit("refusing to seed a prod database (ENV=prod)")
     async with SessionLocal() as db:
         await _upsert_user(db, ADMIN)
         subscriber = await _upsert_user(db, SUBSCRIBER)

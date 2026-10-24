@@ -52,12 +52,27 @@ async def test_admin_account_detail_aggregate(client):
 
 
 async def test_admin_order_cancel_then_conflict(client):
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
     admin = await login(client, "9999900001")
     ah = auth(admin)
-    cust = await login(client, "9876543210")
-    oid = await _place_order(client, auth(cust))
+    cust = await login(client, "9100000972")  # own customer (coupon side effects below)
+    await client.post("/api/v1/admin/coupons", json={
+        "code": "ADMCANCEL972", "discount_type": "flat", "value": 5}, headers=ah)
+    pid = await _seeded_product_id(client, auth(cust))
+    oid = (await client.post("/api/v1/orders", json={
+        "items": [{"product_id": pid, "qty": 2}], "coupon_code": "ADMCANCEL972"}, headers=auth(cust))).json()["id"]
+
+    async def used():
+        async with engine.connect() as conn:
+            return (await conn.execute(sa.text("SELECT used_count FROM coupons WHERE code='ADMCANCEL972'"))).scalar()
+
+    assert await used() == 1
     c = await client.post(f"/api/v1/admin/orders/{oid}/cancel", headers=ah)
     assert c.status_code == 200 and c.json()["status"] == "cancelled"
+    assert await used() == 0  # the coupon reservation is released on cancel
     again = await client.post(f"/api/v1/admin/orders/{oid}/cancel", headers=ah)
     assert again.status_code == 409
 

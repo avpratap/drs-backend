@@ -17,6 +17,14 @@ class Settings(BaseSettings):
             raise ValueError("ENV must be one of: dev, test, prod")
         return v
 
+    @field_validator("INVOICE_PREFIX")
+    @classmethod
+    def _validate_invoice_prefix(cls, v: str) -> str:
+        # invoice_no is String(32): "{prefix}/CN/{fy:7}/{seq:06d}" leaves 11 chars for it.
+        if not v or len(v) > 10 or "/" in v:
+            raise ValueError("INVOICE_PREFIX must be 1-10 characters with no '/'")
+        return v
+
     DATABASE_URL: str = "postgresql+asyncpg://drs:drs@localhost:5432/drs"
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -42,6 +50,11 @@ class Settings(BaseSettings):
     # Global per-IP rate limit (fixed window). Fail-open if Redis is down.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_PER_MIN: int = 300
+    # Reverse proxies in front of the app that APPEND to X-Forwarded-For (Railway: 1).
+    # 0 = use the socket peer and ignore the header (dev / direct exposure).
+    TRUSTED_PROXY_HOPS: int = 0
+    # Bearer token the Prometheus scraper must send to /metrics ("" = open, dev only).
+    METRICS_TOKEN: str = ""
     JWT_SECRET: str = _DEV_JWT_SECRET
     JWT_ALG: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 15
@@ -78,6 +91,9 @@ class Settings(BaseSettings):
     R2_SECRET_KEY: str = ""
     R2_BUCKET: str = ""
     R2_PUBLIC_BASE: str = ""  # public CDN base URL for stored objects
+    # Bucket for private documents (invoice PDFs) — must have NO public/CDN binding;
+    # objects are only reachable via short-lived presigned URLs.
+    R2_PRIVATE_BUCKET: str = ""
     STORAGE_DIR: str = ".storage"  # dev-stub local directory
 
     # WhatsApp (Gupshup BSP). Empty key -> dev stub (messages logged, not sent).
@@ -139,6 +155,24 @@ class Settings(BaseSettings):
             )
         if "localhost" in self.CORS_ORIGINS:
             problems.append("CORS_ORIGINS must not include localhost in prod")
+        # (Moved here from main.py so the ARQ worker — which never imports main.py — is
+        # guarded too.)
+        if "*" in [o.strip() for o in self.CORS_ORIGINS.split(",")]:
+            problems.append("CORS_ORIGINS must be an explicit allow-list in prod")
+        if not (self.RAZORPAY_KEY_ID and self.RAZORPAY_KEY_SECRET):
+            problems.append("RAZORPAY_KEY_ID/SECRET required in prod (else the dev stub runs)")
+        if not self.SELLER_GSTIN:
+            problems.append("SELLER_GSTIN required in prod (GST tax invoices)")
+        if not self.SHIPROCKET_WEBHOOK_TOKEN:
+            problems.append("SHIPROCKET_WEBHOOK_TOKEN required in prod")
+        # Without R2 the local-disk stub would store uploads/invoices on ephemeral disk
+        # and serve them from /files; invoices need a bucket with NO public binding.
+        if not (self.R2_ENDPOINT and self.R2_ACCESS_KEY and self.R2_SECRET_KEY and self.R2_BUCKET):
+            problems.append("R2_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET required in prod")
+        if not self.R2_PRIVATE_BUCKET or self.R2_PRIVATE_BUCKET == self.R2_BUCKET:
+            problems.append(
+                "R2_PRIVATE_BUCKET required in prod, distinct from the public R2_BUCKET"
+            )
         if problems:
             raise ValueError("Insecure prod configuration: " + "; ".join(problems))
         return self

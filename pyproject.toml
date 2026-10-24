@@ -21,6 +21,7 @@ dependencies = [
     "arq>=0.25",
     "reportlab>=5.0.1",
     "anthropic>=1.13.0",
+    "pillow>=12.3",
 ]
 
 [dependency-groups]

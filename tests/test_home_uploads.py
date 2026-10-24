@@ -5,8 +5,14 @@ from conftest import auth, login
 async def test_upload_accepts_png_rejects_others(client):
     cust = await login(client, "9876543210")
     h = auth(cust)
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), "blue").save(buf, "PNG")  # a real (decodable) PNG
     ok = await client.post(
-        "/api/v1/uploads", files={"file": ("a.png", b"\x89PNG\r\n\x1a\n", "image/png")}, headers=h
+        "/api/v1/uploads", files={"file": ("a.png", buf.getvalue(), "image/png")}, headers=h
     )
     assert ok.status_code == 200 and ok.json()["url"]
 
@@ -25,7 +31,7 @@ async def test_upload_accepts_png_rejects_others(client):
 
 async def test_upload_requires_auth(client):
     r = await client.post("/api/v1/uploads", files={"file": ("a.png", b"\x89PNG", "image/png")})
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
 
 
 async def test_home_aggregate(client):

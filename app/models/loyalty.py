@@ -83,6 +83,9 @@ class ReferralRedemption(Base):
     referee_account_id: Mapped[int] = mapped_column(
         ForeignKey("customer_accounts.id"), nullable=False
     )
+    # The referrer's points are paid when the referee makes their first PAID order (a
+    # bare sign-up earned points, so fresh OTP accounts could farm them).
+    rewarded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

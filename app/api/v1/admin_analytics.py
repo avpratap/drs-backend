@@ -15,6 +15,7 @@ from app.models.inventory import StockItem
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.subscription import Subscription
+from app.services import refunds as refund_acct
 
 router = APIRouter(
     prefix="/admin/analytics", tags=["admin-analytics"],
@@ -48,7 +49,9 @@ class TopProductOut(BaseModel):
 @router.get("/overview", response_model=OverviewOut, operation_id="analytics_overview")
 async def overview(db: AsyncSession = Depends(get_db)):
     paid_revenue = await db.scalar(
-        select(func.coalesce(func.sum(Order.total), 0)).where(Order.payment_status == "paid")
+        select(func.coalesce(func.sum(refund_acct.net_order_value()), 0)).where(
+            Order.payment_status.in_(refund_acct.SETTLED_STATUSES)
+        )
     )
     orders = await db.scalar(select(func.count()).select_from(Order))
     active_subs = await db.scalar(
@@ -70,7 +73,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         .subquery()
     )
     outstanding = await db.scalar(
-        select(func.coalesce(func.sum(CreditLedger.balance_after), 0)).join(
+        select(func.coalesce(func.sum(func.greatest(CreditLedger.balance_after, 0)), 0)).join(
             latest, CreditLedger.id == latest.c.mx
         )
     )
@@ -97,10 +100,12 @@ async def revenue(
         await db.execute(
             select(
                 day.label("d"),
-                func.coalesce(func.sum(Order.total), 0).label("rev"),
+                func.coalesce(func.sum(refund_acct.net_order_value()), 0).label("rev"),
                 func.count().label("n"),
             )
-            .where(Order.payment_status == "paid", Order.created_at >= since)
+            .where(
+                Order.payment_status.in_(refund_acct.SETTLED_STATUSES), Order.created_at >= since
+            )
             .group_by(day)
             .order_by(day)
         )
@@ -126,7 +131,9 @@ async def top_products(
             )
             .join(Order, Order.id == OrderItem.order_id)
             .join(Product, Product.id == OrderItem.product_id)
-            .where(Order.payment_status == "paid", Order.created_at >= since)
+            .where(
+                Order.payment_status.in_(("paid", "partially_refunded")), Order.created_at >= since
+            )
             .group_by(OrderItem.product_id, Product.name)
             .order_by(rev.desc())
             .limit(limit)

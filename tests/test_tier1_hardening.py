@@ -1,5 +1,5 @@
 """Tests for the Tier-1 audit hardening fixes."""
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _setup_delivery(client, h, tag):
@@ -11,7 +11,7 @@ async def _setup_delivery(client, h, tag):
     await client.post(f"/api/v1/admin/shops/{shop_id}/tier", json={"price_tier_id": tid}, headers=h)
     sid = (await client.post("/api/v1/subscriptions", json={"shop_id": shop_id}, headers=h)).json()["id"]
     await client.put(f"/api/v1/subscriptions/{sid}/items", json=[{"product_id": pid, "default_qty": 5, "frequency": "daily"}], headers=h)
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "T1B", "qty": 100, "expiry_date": "2040-01-01"}, headers=h)
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "T1B", "qty": 100, "expiry_date": "2040-01-01"}, headers=idem(h))
     date = "2039-07-07"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=h)
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=h)).json()
@@ -60,6 +60,7 @@ async def test_qty_check_constraint_blocks_negative_order_item(client):
     """DB-level CHECK: a negative order-item qty is rejected by Postgres."""
     import pytest
     import sqlalchemy as sa
+    from sqlalchemy.exc import DBAPIError
 
     from app.core.db import engine
 
@@ -77,17 +78,18 @@ async def test_qty_check_constraint_blocks_negative_order_item(client):
         )
         oid = (await conn.execute(sa.text("SELECT id FROM orders WHERE order_no='T1CHK'"))).scalar()
 
-    # Bad insert runs in its own transaction so its failure rolls back cleanly.
-    with pytest.raises(Exception) as ei:
+    try:
+        # Bad insert runs in its own transaction so its failure rolls back cleanly.
+        with pytest.raises(DBAPIError) as ei:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO order_items (order_id, product_id, qty, unit_price, line_total) "
+                        "VALUES (:o, :p, -1, 0, 0)"
+                    ),
+                    {"o": oid, "p": pid},
+                )
+        assert "ck_order_items_qty_pos" in str(ei.value)
+    finally:  # cleanup even when an assert fails (no leaked test rows)
         async with engine.begin() as conn:
-            await conn.execute(
-                sa.text(
-                    "INSERT INTO order_items (order_id, product_id, qty, unit_price, line_total) "
-                    "VALUES (:o, :p, -1, 0, 0)"
-                ),
-                {"o": oid, "p": pid},
-            )
-    assert "ck_order_items_qty_pos" in str(ei.value) or "check" in str(ei.value).lower()
-
-    async with engine.begin() as conn:  # cleanup
-        await conn.execute(sa.text("DELETE FROM orders WHERE id = :o"), {"o": oid})
+            await conn.execute(sa.text("DELETE FROM orders WHERE id = :o"), {"o": oid})

@@ -5,10 +5,12 @@ per-user usage limits, computes the (capped) discount, and reserves one use by
 incrementing used_count. The caller records a CouponRedemption once the order exists.
 """
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.coupon import Coupon, CouponRedemption
+from app.models.order import Order
+from app.models.shipment import Shipment
 from app.services.subscription import today_ist
 
 
@@ -32,6 +34,31 @@ async def validate_and_reserve(
         )
     if coupon.usage_limit is not None and coupon.used_count >= coupon.usage_limit:
         raise HTTPException(status.HTTP_409_CONFLICT, "Coupon usage limit reached")
+    # Reservations are held by UNPAID orders until they're paid or cancelled. Allow at
+    # most one such outstanding reservation per account per coupon, so one user can't
+    # exhaust a global usage_limit with a pile of never-paid orders.
+    outstanding = await db.scalar(
+        select(func.count())
+        .select_from(CouponRedemption)
+        .join(Order, Order.id == CouponRedemption.order_id)
+        .where(
+            CouponRedemption.coupon_id == coupon.id,
+            CouponRedemption.account_id == account_id,
+            Order.payment_status == "pending",
+            Order.status.in_(("created", "pending")),
+            # A COD order already handed to the courier is a real purchase, not a hoarded
+            # reservation (it can't be cancelled any more, and is paid on delivery).
+            ~exists().where(
+                Shipment.order_id == Order.id,
+                Shipment.status.notin_(("cancelled", "failed", "rto")),
+            ),
+        )
+    )
+    if outstanding:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "You have an unpaid order using this coupon; pay or cancel it first",
+        )
     if coupon.per_user_limit is not None:
         used_by_user = await db.scalar(
             select(func.count())

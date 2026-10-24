@@ -58,7 +58,9 @@ async def test_order_invoice_idempotent(client):
     assert r1.status_code == 200, r1.text
     inv1 = r1.json()
     assert inv1["invoice_no"]
-    assert inv1["total"] > 0  # ghee is 12% GST, so total incl. tax > 0
+    # 2 x ₹500 ghee, GST-inclusive @12% intra-state: taxable 892.86, CGST = SGST = 53.57.
+    assert inv1["total"] == 1000.0 and inv1["taxable_value"] == 892.86
+    assert inv1["cgst"] == inv1["sgst"] == 53.57 and inv1["igst"] == 0.0
 
     # Second call returns the SAME invoice (idempotent), not a new number.
     r2 = await client.post(f"/api/v1/orders/{oid}/invoice", headers=auth(cust))

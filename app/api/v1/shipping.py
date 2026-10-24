@@ -15,7 +15,6 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
-from app.models.order import Order
 from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
@@ -108,19 +107,13 @@ async def serviceability(
 @router.post("/admin/shipments", response_model=ShipmentOut, operation_id="create_shipment",
              dependencies=[Depends(require_role("admin"))])
 async def create_shipment(data: ShipmentCreateIn, db: AsyncSession = Depends(get_db)):
-    # Lock the order so two concurrent creates can't both make a shipment for it.
-    order = (
-        await db.execute(select(Order).where(Order.id == data.order_id).with_for_update())
-    ).scalar_one_or_none()
-    if order is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    # The service manages its own locking/commits (draft -> courier call -> finalize) so
+    # no DB row lock is held across the courier HTTP call (S1).
     dest = {
         "name": data.name, "phone": data.phone, "address": data.address,
         "city": data.city, "state": data.state, "pincode": data.pincode,
     }
-    ship = await ship_svc.create_shipment(db, order, dest, data.weight_kg, data.cod)
-    await db.commit()
-    await db.refresh(ship)
+    ship = await ship_svc.create_shipment(db, data.order_id, dest, data.weight_kg, data.cod)
     return await _shipment_out(db, ship)
 
 
@@ -144,10 +137,27 @@ async def list_shipments(
     q = select(Shipment).order_by(Shipment.id.desc())
     if user.role != "admin":  # customers see only their own account's shipments
         q = q.where(Shipment.account_id.in_(await _my_account_ids(db, user)))
+        q = q.where(Shipment.status != "draft")  # not a parcel yet (create in flight/failed)
     if order_id is not None:
         q = q.where(Shipment.order_id == order_id)
     ships = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _shipment_out(db, s) for s in ships]
+    # ONE batched events query for the page (was one query per shipment — N+1).
+    by_ship: dict[int, list[TrackingEventOut]] = {}
+    if ships:
+        for e in (
+            await db.execute(
+                select(ShipmentTrackingEvent)
+                .where(ShipmentTrackingEvent.shipment_id.in_([s_.id for s_ in ships]))
+                .order_by(ShipmentTrackingEvent.shipment_id, ShipmentTrackingEvent.id)
+            )
+        ).scalars():
+            by_ship.setdefault(e.shipment_id, []).append(TrackingEventOut.model_validate(e))
+    outs = []
+    for s_ in ships:
+        out = ShipmentOut.model_validate(s_)
+        out.events = by_ship.get(s_.id, [])
+        outs.append(out)
+    return outs
 
 
 @router.get("/shipments/{shipment_id}", response_model=ShipmentOut, operation_id="get_shipment")
@@ -157,7 +167,8 @@ async def get_shipment(
     ship = await db.get(Shipment, shipment_id)
     # 404 (not 403) on cross-account access so IDs aren't enumerable.
     if ship is None or (
-        user.role != "admin" and ship.account_id not in await _my_account_ids(db, user)
+        user.role != "admin"
+        and (ship.status == "draft" or ship.account_id not in await _my_account_ids(db, user))
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Shipment not found")
     return await _shipment_out(db, ship)
@@ -187,6 +198,7 @@ async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db))
     raw_status = payload.get("current_status") or payload.get("shipment_status")
     if not awb or not raw_status:
         return {"status": "ignored"}
+    raw_status = str(raw_status)
 
     ship = (
         await db.execute(select(Shipment).where(Shipment.awb == awb).with_for_update())
@@ -200,8 +212,11 @@ async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     # Dedupe replays of the SAME event (incl. unmapped statuses, which don't change
     # ship.status) so a re-POST doesn't append a duplicate tracking row.
+    # External input: coerce to text (a number/object here used to TypeError on [:120]).
     loc = payload.get("location")
     act = payload.get("activity")
+    loc = str(loc) if loc is not None and not isinstance(loc, str) else loc
+    act = str(act) if act is not None and not isinstance(act, str) else act
     event_status = mapped or str(raw_status)[:32]
     last = await db.scalar(
         select(ShipmentTrackingEvent)

@@ -9,6 +9,15 @@ _GOOD = {
     "DB_SSL": True,
     "DB_POOL_MODE": "pgbouncer",
     "RAZORPAY_WEBHOOK_SECRET": "whsec",
+    "RAZORPAY_KEY_ID": "rzp_live_x",
+    "RAZORPAY_KEY_SECRET": "secret",
+    "SELLER_GSTIN": "08ABCDE1234F1Z5",
+    "SHIPROCKET_WEBHOOK_TOKEN": "srtoken",
+    "R2_ENDPOINT": "https://r2.example",
+    "R2_ACCESS_KEY": "ak",
+    "R2_SECRET_KEY": "sk",
+    "R2_BUCKET": "public-assets",
+    "R2_PRIVATE_BUCKET": "private-docs",
     "CORS_ORIGINS": "https://drs.co.in",
 }
 
@@ -26,6 +35,15 @@ def test_prod_config_ok_with_all_requirements():
         {"DB_SSL": False},
         {"RAZORPAY_WEBHOOK_SECRET": ""},
         {"CORS_ORIGINS": "http://localhost:3000"},
+        # I11: guards formerly only in main.py (worker never imported them) + storage.
+        {"CORS_ORIGINS": "*"},
+        {"RAZORPAY_KEY_ID": ""},
+        {"RAZORPAY_KEY_SECRET": ""},
+        {"SELLER_GSTIN": ""},
+        {"SHIPROCKET_WEBHOOK_TOKEN": ""},
+        {"R2_BUCKET": ""},
+        {"R2_PRIVATE_BUCKET": ""},
+        {"R2_PRIVATE_BUCKET": "public-assets"},  # same as the public bucket
     ],
 )
 def test_prod_config_rejects_insecure(override):

@@ -4,7 +4,7 @@ import datetime as dt
 import secrets
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.models.loyalty import (
     ReferralCode,
     ReferralRedemption,
 )
+from app.services import billing
 
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no ambiguous 0/O/1/I
 _MAX_POINTS = 1_000_000_000  # keep within int4; reject absurd balances cleanly
@@ -113,10 +114,20 @@ async def get_or_create_referral_code(db: AsyncSession, account_id: int) -> Refe
         code = _token(8)
         if await db.scalar(select(ReferralCode.id).where(ReferralCode.code == code)) is None:
             break
-    rc = ReferralCode(account_id=account_id, code=code)
-    db.add(rc)
-    await db.flush()
+    try:
+        # Race-safe: a concurrent first call inserts for the same (unique) account_id.
+        async with db.begin_nested():
+            rc = ReferralCode(account_id=account_id, code=code)
+            db.add(rc)
+            await db.flush()
+    except IntegrityError:
+        rc = await db.scalar(select(ReferralCode).where(ReferralCode.account_id == account_id))
+        if rc is None:  # the collision was on the random code itself — try once more
+            return await get_or_create_referral_code(db, account_id)
     return rc
+
+
+_REFERRAL_LOCK_NS = 556001
 
 
 async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) -> ReferralCode:
@@ -125,6 +136,18 @@ async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Referral code not found")
     if rc.account_id == referee_account_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot redeem your own referral code")
+    # A referee is referred ONCE, by one code: redeeming many different codes (sock-puppet
+    # farming of referral points) is refused. Serialized per referee.
+    await db.execute(
+        select(func.pg_advisory_xact_lock(_REFERRAL_LOCK_NS, referee_account_id & 0x7FFFFFFF))
+    )
+    prior = await db.scalar(
+        select(ReferralRedemption.id).where(
+            ReferralRedemption.referee_account_id == referee_account_id
+        ).limit(1)
+    )
+    if prior is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Referral already redeemed")
     dup = await db.scalar(
         select(ReferralRedemption.id).where(
             ReferralRedemption.code_id == rc.id,
@@ -140,8 +163,47 @@ async def redeem_referral(db: AsyncSession, code: str, referee_account_id: int) 
     except IntegrityError:
         # uq(code_id, referee_account_id) — the other request won; no double-award.
         raise HTTPException(status.HTTP_409_CONFLICT, "Referral already redeemed") from None
-    await earn_points(db, rc.account_id, rc.reward_points, "referral", "referral_code", rc.id)
+    # A referee who has already bought something qualifies right away; otherwise the
+    # reward waits for their first paid order (reward_referral_on_purchase).
+    await reward_referral_on_purchase(db, referee_account_id)
     return rc
+
+
+async def reward_referral_on_purchase(db: AsyncSession, referee_account_id: int) -> bool:
+    """Pay the referrer once the referee has a paid order. Idempotent (rewarded_at under
+    a row lock); called on redeem and whenever an order becomes paid. Flush-only."""
+    from app.models.order import Order
+
+    red = (
+        await db.execute(
+            select(ReferralRedemption)
+            .where(
+                ReferralRedemption.referee_account_id == referee_account_id,
+                ReferralRedemption.rewarded_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    if red is None:
+        return False
+    paid = await db.scalar(
+        select(func.count()).select_from(Order).where(
+            Order.account_id == referee_account_id,
+            # A real purchase: money changed hands (no ₹0 coupon order) and it wasn't
+            # refunded away again.
+            Order.payment_status.in_(("paid", "partially_refunded")),
+            Order.status != "cancelled",
+            Order.total > 0,
+        )
+    )
+    if not paid:
+        return False
+    rc = await db.get(ReferralCode, red.code_id)
+    if rc is None:
+        return False
+    red.rewarded_at = dt.datetime.now(dt.UTC)
+    await earn_points(db, rc.account_id, rc.reward_points, "referral", "referral_code", rc.id)
+    return True
 
 
 async def issue_gift_card(db: AsyncSession, amount: float, issued_to=None, expires_at: dt.date | None = None) -> GiftCard:
@@ -189,10 +251,31 @@ async def redeem_gift_card(db: AsyncSession, code: str, account_id: int, amount:
     gc.balance = new_balance
     if new_balance == 0:
         gc.status = "redeemed"
-    db.add(
-        GiftCardTransaction(
-            gift_card_id=gc.id, delta=-amount, reason="redeem",
-            ref_type="account", ref_id=account_id, balance_after=new_balance,
-        )
+    gct = GiftCardTransaction(
+        gift_card_id=gc.id, delta=-amount, reason="redeem",
+        ref_type="account", ref_id=account_id, balance_after=new_balance,
     )
+    db.add(gct)
+    await db.flush()
+    # The redeemed value goes to the customer's wallet (store credit) in the SAME
+    # transaction — previously the card was debited and the customer received nothing.
+    await billing.wallet_adjust(db, account_id, amount, "giftcard", "gift_card_txn", gct.id)
     return gc
+
+
+async def sweep_unrewarded_referrals(db: AsyncSession) -> int:
+    """Safety net for the redeem-vs-first-payment race (each transaction can miss the
+    other's uncommitted row): re-check every unrewarded redemption. Commits."""
+    referees = (
+        await db.execute(
+            select(ReferralRedemption.referee_account_id).where(
+                ReferralRedemption.rewarded_at.is_(None)
+            ).limit(5000)
+        )
+    ).scalars().all()
+    paid = 0
+    for aid in referees:
+        if await reward_referral_on_purchase(db, aid):
+            paid += 1
+        await db.commit()
+    return paid

@@ -29,20 +29,36 @@ async def _delivered_invoice(client, admin_h):
     return (await client.post(f"/api/v1/admin/invoices/generate?delivery_order_id={order['id']}", headers=admin_h)).json()["id"]
 
 
-async def test_invoice_pdf_generated_and_cached(client):
+async def test_invoice_pdf_is_private_signed_and_cached(client):
+    """G2: invoice PDFs (GSTIN, address, purchases) are never at a public, guessable URL.
+    The endpoint mints a short-lived signed link; the bare key is not servable."""
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
     admin = await login(client, "9999900001")
     h = auth(admin)
     inv_id = await _delivered_invoice(client, h)
     r1 = await client.get(f"/api/v1/invoices/{inv_id}/pdf", headers=h)
     assert r1.status_code == 200
     url = r1.json()["pdf_url"]
-    assert url and url.endswith(".pdf")
-    # Cached on second call -> same URL.
-    r2 = await client.get(f"/api/v1/invoices/{inv_id}/pdf", headers=h)
-    assert r2.json()["pdf_url"] == url
-    # Dev-stub file is retrievable.
+    path, _, query = url.partition("?")
+    assert path.startswith("/files/private/invoices/") and path.endswith(".pdf")
+    assert "sig=" in query and "exp=" in query
     served = await client.get(url)
-    assert served.status_code == 200
+    assert served.status_code == 200 and served.content.startswith(b"%PDF")
+    # Without (or with a tampered) signature the object is not reachable.
+    assert (await client.get(path)).status_code == 404
+    assert (await client.get(url[:-4] + "0000")).status_code == 404
+    # Stored once: the second request re-signs the SAME private key (no re-render).
+    async with engine.connect() as conn:
+        key = (await conn.execute(sa.text("SELECT pdf_url FROM invoices WHERE id=:i"), {"i": inv_id})).scalar()
+    assert key.startswith("private/invoices/") and len(key.rsplit("-", 1)[-1]) == len("0" * 32 + ".pdf")
+    r2 = await client.get(f"/api/v1/invoices/{inv_id}/pdf", headers=h)
+    assert r2.json()["pdf_url"].partition("?")[0] == path
+    # Another customer can't mint a link for it.
+    other = await login(client, "9191919191")
+    assert (await client.get(f"/api/v1/invoices/{inv_id}/pdf", headers=auth(other))).status_code == 404
 
 
 async def test_pod_upload(client):

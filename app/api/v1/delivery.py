@@ -7,9 +7,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import media
 from app.core.db import get_db
-from app.core.storage import put_object
-from app.core.uploads import precheck_upload_size, read_validated_image
+from app.core.ratelimit_quota import upload_quota_ok
+from app.core.redis import redis_client
+from app.core.storage import put_private_object
+from app.core.uploads import precheck_upload_size, read_validated_image, strip_metadata
 from app.deps.auth import get_current_user
 from app.deps.pagination import Page, pagination
 from app.deps.scope import ALL, allowed_shop_ids
@@ -22,10 +25,12 @@ from app.services import delivery as delivery_service
 from app.services.subscription import today_ist
 
 router = APIRouter(prefix="/delivery", tags=["delivery"])
+_PING_EVERY_S = 5
 
 
 class UploadOut(BaseModel):
-    url: str
+    url: str  # the reference to pass as pod.photo_url/signature_url (media:<key>)
+    preview_url: str
 
 
 @router.post("/uploads", operation_id="upload_pod_asset", response_model=UploadOut)
@@ -37,10 +42,16 @@ async def upload_pod_asset(
     if user.role not in ("delivery", "admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only delivery staff can upload POD assets")
     precheck_upload_size(request)
+    if not await upload_quota_ok(user.id, per_day=1000):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Upload limit reached; try tomorrow")
     data, ext, ctype = await read_validated_image(file)
-    key = f"pod/{user.id}/{secrets.token_hex(8)}.{ext}"
-    url = await asyncio.to_thread(put_object, key, data, ctype)
-    return {"url": url}
+    # Doorstep photos are personal data: private bucket, EXIF (GPS) stripped.
+    data = strip_metadata(data, ext)
+    key = await asyncio.to_thread(
+        put_private_object, f"pod/{user.id}/{secrets.token_hex(8)}.{ext}", data, ctype
+    )
+    ref = media.make_ref(key)
+    return {"url": ref, "preview_url": media.resolve(ref)}
 
 
 async def _attach_stop_details(db: AsyncSession, views: list[DeliveryOrderOut]) -> None:
@@ -206,8 +217,15 @@ async def post_driver_location(
 ):
     """Driver GPS ping (append-only; latest row is the driver's current position)."""
     _require_delivery(user)
-    db.add(DriverLocation(driver_id=user.id, lat=data.lat, lng=data.lng))
-    await db.commit()
+    # At most one stored ping per driver per few seconds: a misbehaving app (or script)
+    # can't grow the table without bound. Extra pings are acknowledged and dropped.
+    try:
+        fresh = await redis_client.set(f"drvloc:{user.id}", 1, nx=True, ex=_PING_EVERY_S)
+    except Exception:
+        fresh = True
+    if fresh:
+        db.add(DriverLocation(driver_id=user.id, lat=data.lat, lng=data.lng))
+        await db.commit()
     return {"ok": True}
 
 
@@ -298,6 +316,8 @@ async def fail_delivery_order(
     ids = await allowed_shop_ids(user, db)
     if ids is not ALL and order.shop_id not in ids:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if user.role != "admin" and order.delivery_date > today_ist():
+        raise HTTPException(status.HTTP_409_CONFLICT, "This stop is scheduled for a later date")
     if order.status not in ("generated", "frozen"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Order is {order.status}; cannot mark failed"

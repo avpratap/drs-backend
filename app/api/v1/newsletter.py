@@ -4,15 +4,18 @@ import hashlib
 import hmac
 import logging
 import secrets
+import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clientip import client_ip
 from app.core.config import settings
 from app.core.db import get_db
+from app.core.sendlimit import allow_send
 from app.deps.auth import require_role
 from app.deps.pagination import Page, pagination
 from app.models.newsletter import NewsletterSubscriber
@@ -59,12 +62,17 @@ class StatusOut(BaseModel):
 
 
 @router.post("/newsletter/subscribe", response_model=StatusOut, operation_id="newsletter_subscribe")
-async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
+async def subscribe(data: SubscribeIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Double opt-in: a subscribe creates/keeps a PENDING record with a confirm token
     and emails a confirmation link. Consent (consent_at) is recorded only when the real
     email owner confirms — so one can't subscribe or forge consent for someone else.
     Already-subscribed emails stay subscribed (idempotent)."""
     email = str(data.email).lower()
+    # Throttle per address BEFORE touching the row (rotating the token without mailing
+    # it would void the link already sent): an anonymous caller can't flood an inbox.
+    # The response is the same whatever the address's state, so it reveals nothing.
+    if not await allow_send("newsletter", email, sender=f"ip:{client_ip(request) or ''}"):
+        return StatusOut(email=email, status="pending")
     # Lock the existing row (if any) so a concurrent POST /newsletter/confirm serializes:
     # otherwise this request could hold a stale 'pending' snapshot and overwrite a status
     # the confirm just set to 'subscribed' (downgrading a just-confirmed user).
@@ -74,8 +82,8 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
         .with_for_update()
     )
     if row is not None and row.status == "subscribed":
-        return StatusOut(email=email, status="subscribed")  # already confirmed
-    token = secrets.token_urlsafe(24)
+        return StatusOut(email=email, status="pending")  # already confirmed: same answer
+    token = _new_confirm_token()
     if row is None:
         # Two concurrent first-subscribes for the same email would collide on
         # UNIQUE(email). Insert in a savepoint; on collision re-select UNDER LOCK and fall
@@ -95,7 +103,7 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
                 .with_for_update()
             )
             if row is not None and row.status == "subscribed":
-                return StatusOut(email=email, status="subscribed")  # lost race to a confirm
+                return StatusOut(email=email, status="pending")  # lost race to a confirm
     # Never downgrade a 'subscribed' row (defense-in-depth alongside the lock above).
     if row.status != "subscribed" and (row.status != "pending" or row.confirm_token != token):
         # Re-subscribe (was pending/unsubscribed, or lost the insert race) — issue a
@@ -112,11 +120,27 @@ async def subscribe(data: SubscribeIn, db: AsyncSession = Depends(get_db)):
             email, f"Confirm your DRS newsletter subscription: {link}", None
         )
     except Exception:
-        log.warning("newsletter confirmation email failed for %s", email)
+        # Never log the address itself (PII); the row id is enough to investigate.
+        log.warning("newsletter confirmation email failed (subscriber %s)", row.id)
     return StatusOut(
         email=email, status="pending",
         confirm_token=token if settings.ENV != "prod" else None,
     )
+
+
+CONFIRM_TTL_SECONDS = 7 * 24 * 3600  # an unclicked confirmation link dies after a week
+
+
+def _new_confirm_token() -> str:
+    # "<random>.<expiry epoch>": the expiry travels with the token (fits String(64)).
+    return f"{secrets.token_urlsafe(24)}.{int(time.time()) + CONFIRM_TTL_SECONDS}"
+
+
+def _token_expired(token: str) -> bool:
+    _, _, exp = token.rpartition(".")
+    # Legacy tokens (issued before expiry was added) carry no suffix; they're replaced
+    # on the next subscribe and pruned with the row, so they're accepted.
+    return exp.isdigit() and int(exp) < int(time.time())
 
 
 class ConfirmIn(BaseModel):
@@ -132,7 +156,7 @@ async def confirm_status(token: str, db: AsyncSession = Depends(get_db)):
     row = await db.scalar(
         select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == token)
     )
-    if row is None:
+    if row is None or _token_expired(token):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")
     return StatusOut(email=row.email, status=row.status)
 
@@ -144,7 +168,7 @@ async def confirm(data: ConfirmIn, db: AsyncSession = Depends(get_db)):
     row = await db.scalar(
         select(NewsletterSubscriber).where(NewsletterSubscriber.confirm_token == data.token)
     )
-    if row is None:
+    if row is None or _token_expired(data.token):
         # Idempotent: a token already consumed by a prior confirm is gone; if the caller
         # was already subscribed, surface that instead of a hard 404 on a double-submit.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid or expired confirmation token")

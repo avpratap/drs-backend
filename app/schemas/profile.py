@@ -1,7 +1,10 @@
 import datetime as dt
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.core.gst_states import validate_state
+from app.schemas.common import reject_nulls
 
 PHONE_RE = r"^\+?[0-9]{10,15}$"
 PINCODE_RE = r"^[1-9][0-9]{5}$"  # Indian PIN: 6 digits, not starting 0
@@ -11,20 +14,24 @@ GSTIN_RE = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
 # ---------- Profile ----------
 class ProfileUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=120)
-    avatar_url: str | None = Field(default=None, max_length=512)
+    avatar_url: str | None = Field(default=None, max_length=512, pattern=r"^(https://|media:)\S+$")
     date_of_birth: dt.date | None = None
     gender: Literal["male", "female", "other", "undisclosed"] | None = None
     locale: str | None = Field(default=None, max_length=12)
     alternate_phone: str | None = Field(default=None, pattern=PHONE_RE)
     gstin: str | None = Field(default=None, pattern=GSTIN_RE)
     legal_name: str | None = Field(default=None, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
+    # Format-validated (no email-validator dependency): one @, a dotted domain, no spaces.
+    email: str | None = Field(
+        default=None, max_length=255, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    )
     full_name: str | None = Field(default=None, max_length=255)
     notify_whatsapp: bool | None = None
     notify_sms: bool | None = None
     notify_push: bool | None = None
     notify_email: bool | None = None
-    marketing_opt_in: bool | None = None
+    # marketing_opt_in is NOT settable here: it is derived from the consent ledger
+    # (POST /consents), so it can never be on without a recorded consent.
     quiet_hours_start: int | None = Field(default=None, ge=0, le=23)
     quiet_hours_end: int | None = Field(default=None, ge=0, le=23)
 
@@ -36,12 +43,15 @@ class ProfileUpdate(BaseModel):
             raise ValueError("invalid date_of_birth")
         return v
 
+    _v_nulls = reject_nulls("locale", "notify_whatsapp", "notify_sms", "notify_push", "notify_email")
+
 
 class ProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     user_id: int
     phone: str
     email: str | None = None
+    email_verified: bool = False
     full_name: str | None = None
     display_name: str | None = None
     avatar_url: str | None = None
@@ -51,7 +61,7 @@ class ProfileOut(BaseModel):
     alternate_phone: str | None = None
     gstin: str | None = None
     legal_name: str | None = None
-    notify_whatsapp: bool = True
+    notify_whatsapp: bool = False
     notify_sms: bool = True
     notify_push: bool = True
     notify_email: bool = False
@@ -76,6 +86,8 @@ class AddressIn(BaseModel):
     lng: float | None = Field(default=None, ge=-180, le=180)
     is_default: bool = False
 
+    _v_state = field_validator("state")(lambda v: validate_state(v))
+
 
 class AddressUpdate(BaseModel):
     label: str | None = Field(default=None, max_length=40)
@@ -91,6 +103,10 @@ class AddressUpdate(BaseModel):
     lat: float | None = Field(default=None, ge=-90, le=90)
     lng: float | None = Field(default=None, ge=-180, le=180)
     is_default: bool | None = None
+
+    _v_nulls = reject_nulls("line1", "city", "state", "pincode", "country", "is_default")
+
+    _v_state = field_validator("state")(lambda v: validate_state(v))
 
 
 class AddressOut(BaseModel):
@@ -114,12 +130,29 @@ class AddressOut(BaseModel):
 # ---------- Payment method ----------
 class PaymentMethodIn(BaseModel):
     method_type: Literal["upi", "card", "netbanking"]
+    # Gateway tokens are NEVER taken from the client (anyone could attach someone else's
+    # token): a chargeable method is saved server-side from a verified payment via
+    # POST /payment-methods/from-payment. These fields only exist to reject old clients.
     gateway_customer_id: str | None = Field(default=None, max_length=64)
     gateway_token: str | None = Field(default=None, max_length=128)
     display: str | None = Field(default=None, max_length=64)
     brand: str | None = Field(default=None, max_length=32)
     expiry_month: int | None = Field(default=None, ge=1, le=12)
     expiry_year: int | None = Field(default=None, ge=2024, le=2099)
+    is_default: bool = False
+
+    @model_validator(mode="after")
+    def _no_client_tokens(self):
+        if self.gateway_token or self.gateway_customer_id:
+            raise ValueError(
+                "gateway tokens are set server-side; save the method from a completed "
+                "payment with POST /payment-methods/from-payment"
+            )
+        return self
+
+
+class PaymentMethodFromPaymentIn(BaseModel):
+    payment_id: int
     is_default: bool = False
 
 
@@ -163,7 +196,8 @@ class MandateOut(BaseModel):
 # ---------- Consent ----------
 class ConsentIn(BaseModel):
     purpose: Literal[
-        "whatsapp_optin", "marketing_sms", "marketing_email", "data_processing"
+        "whatsapp_optin", "marketing_sms", "marketing_email", "marketing_push",
+        "marketing_whatsapp", "data_processing",
     ]
     action: Literal["granted", "withdrawn"]
 

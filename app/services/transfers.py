@@ -5,7 +5,7 @@ are in transit they must be received at the destination.
 from uuid import uuid4
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.batch import StockBatch
@@ -36,9 +36,7 @@ async def _loc_or_404(db: AsyncSession, location_id: int) -> int:
 
 
 async def create_transfer(db: AsyncSession, from_loc, to_loc, items, note, user_id) -> StockTransfer:
-    if from_loc is None:
-        from_loc = await inventory.default_location_id(db)
-    await _loc_or_404(db, from_loc)
+    from_loc = await inventory.require_location(db, from_loc)  # 409 if none configured
     await _loc_or_404(db, to_loc)
     if from_loc == to_loc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Source and destination must differ")
@@ -79,6 +77,12 @@ async def dispatch_transfer(db: AsyncSession, tr: StockTransfer, user_id) -> Sto
     for it in items:
         qty = float(it.qty)
         item_row = await inventory._locked_item(db, it.product_id, tr.from_location_id)
+        # Write off lots already past expiry first (same lock): they must never ship to
+        # another location, and their qty must not count as available.
+        today = batch_svc._today()
+        await batch_svc._expire_unswept(
+            db, item_row, it.product_id, tr.from_location_id, today, user_id
+        )
         if float(item_row.qty_on_hand) < qty:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -94,6 +98,7 @@ async def dispatch_transfer(db: AsyncSession, tr: StockTransfer, user_id) -> Sto
                     StockBatch.location_id == tr.from_location_id,
                     StockBatch.status == "active",
                     StockBatch.qty > 0,
+                    or_(StockBatch.expiry_date.is_(None), StockBatch.expiry_date >= today),
                 )
                 .order_by(StockBatch.expiry_date.asc().nulls_last(), StockBatch.id.asc())
                 .with_for_update()

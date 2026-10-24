@@ -9,9 +9,16 @@ async def _sub_id(client, token) -> int:
     return subs[0]["id"]
 
 
+async def _fresh_sub(client, token, name) -> int:
+    """A subscription on its OWN shop, so writes here never leak into the seeded
+    subscription that other test files (cutoff, forecasting, billing) depend on."""
+    shop = (await client.post("/api/v1/shops", json={"name": name}, headers=auth(token))).json()["id"]
+    return (await client.post("/api/v1/subscriptions", json={"shop_id": shop}, headers=auth(token))).json()["id"]
+
+
 async def test_set_items_and_plan(client):
     admin = await login(client, "9999900001")
-    sid = await _sub_id(client, admin)
+    sid = await _fresh_sub(client, admin, "Sub items shop")
     r = await client.put(
         f"/api/v1/subscriptions/{sid}/items",
         json=[{"product_id": 1, "default_qty": 4, "frequency": "daily"}],
@@ -27,7 +34,7 @@ async def test_set_items_and_plan(client):
 
 async def test_override_skip_removes_line(client):
     admin = await login(client, "9999900001")
-    sid = await _sub_id(client, admin)
+    sid = await _fresh_sub(client, admin, "Sub override shop")
     await client.put(
         f"/api/v1/subscriptions/{sid}/items",
         json=[{"product_id": 1, "default_qty": 5, "frequency": "daily"}],

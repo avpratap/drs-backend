@@ -1,10 +1,12 @@
 """Retention / housekeeping: prune rows that only need short-term retention so
 idempotency_keys, webhook_events and notifications don't grow unbounded."""
 import datetime as dt
+import logging
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.driver import DriverLocation
 from app.models.idempotency import IdempotencyKey
 from app.models.notification import Notification
 from app.models.refund import WebhookEvent
@@ -19,6 +21,25 @@ IDEMPOTENCY_INPROGRESS_TTL_MIN = 15
 WEBHOOK_TTL_DAYS = 30
 NOTIFICATION_DONE_TTL_DAYS = 30
 NOTIFICATION_FAILED_TTL_DAYS = 90
+DRIVER_LOCATION_TTL_DAYS = 90  # GPS pings (personal data): only recent ones are useful
+_BATCH = 5000
+
+
+log = logging.getLogger("drs.maintenance")
+
+
+async def _delete_batched(db: AsyncSession, model, *where) -> int:
+    """Delete in id-bounded batches, committing between them: one giant DELETE held its
+    locks (and bloated WAL) for the whole purge of a large table."""
+    total = 0
+    while True:
+        ids = select(model.id).where(*where).order_by(model.id).limit(_BATCH).scalar_subquery()
+        r = await db.execute(delete(model).where(model.id.in_(ids)))
+        n = r.rowcount or 0
+        total += n
+        await db.commit()
+        if n < _BATCH:
+            return total
 
 
 async def prune(db: AsyncSession) -> dict:
@@ -50,22 +71,35 @@ async def prune(db: AsyncSession) -> dict:
     )
     counts["webhook_events"] = r.rowcount or 0
 
-    r = await db.execute(
-        delete(Notification).where(
-            Notification.status.in_(("sent", "skipped")),
-            Notification.created_at < now - dt.timedelta(days=NOTIFICATION_DONE_TTL_DAYS),
+    counts["notifications_done"] = await _delete_batched(
+        db, Notification,
+        Notification.status.in_(("sent", "skipped")),
+        Notification.created_at < now - dt.timedelta(days=NOTIFICATION_DONE_TTL_DAYS),
+    )
+    counts["driver_locations"] = await _delete_batched(
+        db, DriverLocation,
+        DriverLocation.created_at < now - dt.timedelta(days=DRIVER_LOCATION_TTL_DAYS),
+    )
+
+    # Surface rows stuck in 'sending' (crash between the provider call and the result
+    # commit). They are deliberately NOT auto-retried (at-most-once for paid sends), so
+    # make them visible for an operator to check + resend.
+    stuck = await db.scalar(
+        select(func.count()).select_from(Notification).where(
+            Notification.status == "sending",
+            Notification.last_attempt_at < now - dt.timedelta(minutes=15),
         )
     )
-    counts["notifications_done"] = r.rowcount or 0
+    counts["notifications_stuck_sending"] = int(stuck or 0)
+    if stuck:
+        log.error("%s notification(s) stuck in 'sending' >15min — check provider + resend", stuck)
 
     # Keep failed (DLQ) rows longer for inspection, but not forever.
-    r = await db.execute(
-        delete(Notification).where(
-            Notification.status == "failed",
-            Notification.created_at < now - dt.timedelta(days=NOTIFICATION_FAILED_TTL_DAYS),
-        )
+    counts["notifications_failed"] = await _delete_batched(
+        db, Notification,
+        Notification.status == "failed",
+        Notification.created_at < now - dt.timedelta(days=NOTIFICATION_FAILED_TTL_DAYS),
     )
-    counts["notifications_failed"] = r.rowcount or 0
 
     await db.commit()
     return counts

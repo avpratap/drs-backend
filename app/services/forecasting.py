@@ -16,10 +16,11 @@ import statistics
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.order import Order, OrderItem
 from app.models.product import Product
-from app.models.subscription import Subscription
-from app.services.subscription import compute_plan
+from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
+from app.services.subscription import plan_from, today_ist
 
 # ~90% cycle service level (one-sided normal quantile) for the safety buffer.
 Z_SERVICE = 1.28
@@ -82,11 +83,11 @@ async def _variable_history(
     db: AsyncSession, since: dt.date
 ) -> dict[int, dict[dt.date, float]]:
     """One-time order quantities per product per day (the variable demand)."""
-    day = func.date(Order.created_at)
+    day = func.date(func.timezone(settings.TIMEZONE, Order.created_at))
     rows = await db.execute(
         select(day, OrderItem.product_id, func.sum(OrderItem.qty))
         .join(OrderItem, OrderItem.order_id == Order.id)
-        .where(Order.order_type == "one_time", func.date(Order.created_at) >= since)
+        .where(Order.order_type == "one_time", func.date(func.timezone(settings.TIMEZONE, Order.created_at)) >= since)
         .group_by(day, OrderItem.product_id)
     )
     hist: dict[int, dict[dt.date, float]] = {}
@@ -98,12 +99,42 @@ async def _variable_history(
 
 async def _committed(db: AsyncSession, for_date: dt.date) -> dict[int, float]:
     """Known standing-order demand for the date, summed per product."""
+    # Batched: 3 queries total (subs, their active items, that date's overrides) instead
+    # of 2 per subscription.
     subs = (
         await db.execute(select(Subscription).where(Subscription.status == "active"))
     ).scalars().all()
+    if not subs:
+        return {}
+    items_by_sub: dict[int, list[SubscriptionItem]] = {}
+    for it in (
+        await db.execute(
+            select(SubscriptionItem).where(
+                SubscriptionItem.subscription_id.in_([s.id for s in subs]),
+                SubscriptionItem.active.is_(True),
+            )
+        )
+    ).scalars():
+        items_by_sub.setdefault(it.subscription_id, []).append(it)
+    item_ids = [i.id for lst in items_by_sub.values() for i in lst]
+    overrides = (
+        {
+            o.subscription_item_id: o
+            for o in (
+                await db.execute(
+                    select(SubscriptionOverride).where(
+                        SubscriptionOverride.subscription_item_id.in_(item_ids),
+                        SubscriptionOverride.for_date == for_date,
+                    )
+                )
+            ).scalars()
+        }
+        if item_ids
+        else {}
+    )
     committed: dict[int, float] = {}
     for sub in subs:
-        for line in await compute_plan(db, sub, for_date):
+        for line in plan_from(sub, items_by_sub.get(sub.id, []), overrides, for_date):
             committed[line["product_id"]] = committed.get(line["product_id"], 0.0) + float(
                 line["qty"]
             )
@@ -114,7 +145,7 @@ async def production_plan(
     db: AsyncSession, for_date: dt.date, history_days: int = DEFAULT_HISTORY_DAYS
 ) -> list[dict]:
     """Per-product production recommendation = committed + forecast(variable) + safety."""
-    today = dt.datetime.now(dt.UTC).date()
+    today = today_ist()  # IST business date (UTC lagged by 5h30 around midnight)
     since = today - dt.timedelta(days=history_days)
     committed = await _committed(db, for_date)
     history = await _variable_history(db, since)
@@ -130,12 +161,13 @@ async def production_plan(
     # Build a dense daily series (missing days = 0 demand) per product.
     dates = [since + dt.timedelta(days=i) for i in range((today - since).days + 1)]
 
+    pids = sorted(product_ids)
+    series_all = [[history.get(pid, {}).get(d, 0.0) for d in dates] for pid in pids]
+    # forecast_variable may invoke statsforecast (CPU-bound) when the optional lib is
+    # installed — run ALL products in ONE worker thread call (not one per product).
+    forecasts = await asyncio.to_thread(lambda: [forecast_variable(s) for s in series_all])
     plan = []
-    for pid in sorted(product_ids):
-        series = [history.get(pid, {}).get(d, 0.0) for d in dates]
-        # forecast_variable may invoke statsforecast (CPU-bound) when the optional lib
-        # is installed — run it off the event loop (golden rule #2).
-        fc = await asyncio.to_thread(forecast_variable, series)
+    for pid, fc in zip(pids, forecasts, strict=True):
         committed_qty = round(committed.get(pid, 0.0), 2)
         variable = fc["point"] + fc["safety"]
         plan.append(

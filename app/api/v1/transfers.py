@@ -24,7 +24,7 @@ class TransferIn(BaseModel):
     from_location_id: int | None = None
     to_location_id: int
     note: str | None = Field(default=None, max_length=255)
-    items: list[TransferItemIn] = Field(min_length=1)
+    items: list[TransferItemIn] = Field(min_length=1, max_length=200)
 
 
 class TransferItemOut(BaseModel):

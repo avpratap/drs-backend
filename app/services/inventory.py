@@ -16,6 +16,45 @@ async def default_location_id(db: AsyncSession) -> int | None:
     return lid
 
 
+async def delivery_location_id(
+    db: AsyncSession, shop_id: int, actor_id: int | None, *, actor_is_admin: bool = False
+) -> int | None:
+    """Where a delivery's stock comes from: the delivering driver's vehicle; else, ONLY
+    when an admin completes it, the vehicle of the driver assigned to the shop; else the
+    default location. (A substitute driver without a van must not draw down another
+    driver's van.)"""
+    from app.models.shop import DeliveryAssignment
+
+    candidates = [actor_id] if actor_id is not None else []
+    if actor_is_admin:
+        candidates += list(
+            (
+                await db.execute(
+                    select(DeliveryAssignment.delivery_id)
+                    .where(
+                        DeliveryAssignment.shop_id == shop_id,
+                        DeliveryAssignment.active.is_(True),
+                    )
+                    .order_by(DeliveryAssignment.id)
+                )
+            ).scalars()
+        )
+    for uid in candidates:
+        lid = await db.scalar(
+            select(Location.id)
+            .where(
+                Location.driver_user_id == uid,
+                Location.kind == "vehicle",
+                Location.status == "active",
+            )
+            .order_by(Location.id)
+            .limit(1)
+        )
+        if lid is not None:
+            return lid
+    return await default_location_id(db)
+
+
 async def require_location(db: AsyncSession, location_id: int | None) -> int:
     """Resolve the location (given or default); 409 if none is configured — so a
     missing location fails cleanly instead of a NOT-NULL IntegrityError 500 later."""

@@ -34,18 +34,20 @@ async def test_mandates_crud(client):
 
 async def test_products_cache_and_create(client):
     admin = await login(client, "9999900001")
-    a = await client.get("/api/v1/products")  # miss -> populates cache
-    b = await client.get("/api/v1/products")  # hit
+    a = await client.get("/api/v1/products?limit=200")  # miss -> populates cache
+    b = await client.get("/api/v1/products?limit=200")  # hit
     assert a.status_code == b.status_code == 200
-    n = len(a.json())
+    before = {p["id"] for p in a.json()}
     created = await client.post(
         "/api/v1/products",
         json={"sku": "COV-GAP-1", "name": "Paneer 200g", "uom": "piece", "gst_rate": 5},
         headers=auth(admin),
     )
     assert created.status_code == 200
-    after = await client.get("/api/v1/products")  # cache invalidated on create
-    assert len(after.json()) == n + 1
+    # Cache invalidated on create: exactly the new product appears (set difference — a
+    # count against the default 50-row page broke once the suite created >50 products).
+    after = {p["id"] for p in (await client.get("/api/v1/products?limit=200")).json()}
+    assert after - before == {created.json()["id"]}
 
 
 async def test_shops_list_and_scoping(client):

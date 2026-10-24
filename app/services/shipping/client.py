@@ -118,33 +118,48 @@ async def check_serviceability(
         return {"serviceable": False, "etd_days": None, "courier": None, "rate": None}
 
 
-async def create_shipment(payload: dict) -> dict:
-    """Create a Shiprocket order + assign an AWB.
+async def create_order(local_id: int, order: dict) -> dict:
+    """Create the Shiprocket order (step 1 of 2). Returns {gateway_order_id, gateway_shipment_id}.
 
-    Returns {gateway_order_id, gateway_shipment_id, awb, courier, label_url, tracking_url}.
-    Dev-stub synthesizes a deterministic AWB from the local shipment id.
+    Split from AWB assignment so the caller can persist the courier ids BEFORE the second
+    call: a failure in assign_awb then resumes there instead of re-creating the order.
+    Dev-stub synthesizes deterministic ids from the local shipment id.
     """
-    local_id = payload["shipment_id"]
     if not enabled():
-        awb = f"DEVAWB{int(local_id):08d}"
         return {
             "gateway_order_id": f"DEVORD{int(local_id):08d}",
             "gateway_shipment_id": f"DEVSHP{int(local_id):08d}",
+        }
+    r = await _authed("POST", "/orders/create/adhoc", json=order)
+    r.raise_for_status()
+    oj = r.json()
+    if not oj.get("shipment_id"):
+        raise ShippingError(f"courier order create returned no shipment_id: {oj}")
+    return {
+        "gateway_order_id": str(oj.get("order_id")),
+        "gateway_shipment_id": str(oj["shipment_id"]),
+    }
+
+
+async def assign_awb(local_id: int, gateway_shipment_id: str) -> dict:
+    """Assign an AWB to a courier shipment (step 2 of 2).
+
+    Returns {awb, courier, label_url, tracking_url}.
+    """
+    if not enabled():
+        awb = f"DEVAWB{int(local_id):08d}"
+        return {
             "awb": awb,
             "courier": "DEV-Courier",
             "label_url": None,
             "tracking_url": f"https://shiprocket.co/tracking/{awb}",
         }
-    order = await _authed("POST", "/orders/create/adhoc", json=payload["order"])
-    order.raise_for_status()
-    oj = order.json()
-    gsid = oj.get("shipment_id")
-    awb_resp = await _authed("POST", "/courier/assign/awb", json={"shipment_id": gsid})
-    awb_resp.raise_for_status()
-    ad = awb_resp.json().get("response", {}).get("data", {})
+    r = await _authed("POST", "/courier/assign/awb", json={"shipment_id": gateway_shipment_id})
+    r.raise_for_status()
+    ad = r.json().get("response", {}).get("data", {})
+    if not ad.get("awb_code"):
+        raise ShippingError(f"courier AWB assignment returned no awb_code: {ad}")
     return {
-        "gateway_order_id": str(oj.get("order_id")),
-        "gateway_shipment_id": str(gsid),
         "awb": ad.get("awb_code"),
         "courier": ad.get("courier_name"),
         "label_url": ad.get("label_url"),

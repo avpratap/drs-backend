@@ -26,4 +26,6 @@ def downgrade() -> None:
     op.alter_column(
         "notifications", "to_addr",
         existing_type=sa.Text(), type_=sa.String(255), existing_nullable=True,
+        # Multi-token push addresses can exceed 255 chars: truncate instead of failing.
+        postgresql_using="left(to_addr, 255)",
     )

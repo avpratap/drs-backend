@@ -40,6 +40,8 @@ class CutoffResult(BaseModel):
     delivery_date: dt.date
     orders_generated: int
     skipped: str | None = None
+    orders_removed: int = 0  # stale generated orders dropped (skip/pause since a run)
+    failed: int = 0  # subscriptions that errored (run status "partial")
 
 
 class DeliverItem(BaseModel):
@@ -51,8 +53,9 @@ class PODIn(BaseModel):
     # Bounded to the proof_of_delivery column widths so an over-long value is a clean
     # 422, never a DataError 500 mid-delivery.
     recipient_name: str | None = Field(default=None, max_length=255)
-    photo_url: str | None = Field(default=None, max_length=512)
-    signature_url: str | None = Field(default=None, max_length=512)
+    # A POD upload reference (media:...) or an https URL — never javascript:/data: etc.
+    photo_url: str | None = Field(default=None, max_length=512, pattern=r"^(https://|media:)\S+$")
+    signature_url: str | None = Field(default=None, max_length=512, pattern=r"^(https://|media:)\S+$")
     # Range-bounded so an out-of-range value is a clean 422, not a Numeric(9,6) 500.
     lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
     lng: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
@@ -71,5 +74,5 @@ class DeliverRequest(BaseModel):
     pod: PODIn | None = None
     returns: list[ReturnIn] = Field(default=[], max_length=200)
     cash_collected: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
-    cash_method: str | None = Field(default=None, max_length=16)  # cash|upi|cheque
+    cash_method: str | None = Field(default=None, pattern="^(cash|upi|cheque)$")
     cash_reference: str | None = Field(default=None, max_length=64)

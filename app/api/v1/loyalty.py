@@ -4,15 +4,18 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.loyalty import GiftCard, LoyaltyAccount
 from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.services import loyalty
+from app.services import profile as profile_svc
 
 router = APIRouter(tags=["loyalty"])
 
@@ -93,11 +96,20 @@ async def _my_account(db: AsyncSession, user: User) -> CustomerAccount:
     """Resolve the caller's account, auto-creating a retail one (mirrors orders)."""
     acct = await db.scalar(select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id))
     if acct is None:
-        acct = CustomerAccount(
-            owner_user_id=user.id, account_type="retail", billing_mode="prepaid_wallet"
-        )
-        db.add(acct)
-        await db.flush()
+        # Race-safe create (a concurrent first call may win uq_customer_accounts_owner).
+        try:
+            async with db.begin_nested():
+                acct = CustomerAccount(
+                    owner_user_id=user.id, account_type=profile_svc.account_type_for(user), billing_mode="prepaid_wallet"
+                )
+                db.add(acct)
+                await db.flush()
+        except IntegrityError:
+            acct = (
+                await db.execute(
+                    select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+                )
+            ).scalar_one()
     return acct
 
 
@@ -132,7 +144,10 @@ async def redeem_referral(
     acct = await _my_account(db, user)
     rc = await loyalty.redeem_referral(db, data.code, acct.id)
     await db.commit()
-    return ReferralRedeemedOut(detail="Referral redeemed", code=rc.code)
+    return ReferralRedeemedOut(
+        detail="Referral redeemed; the referrer is rewarded on your first paid order",
+        code=rc.code,
+    )
 
 
 # ---------- Customer: gift cards ----------
@@ -158,7 +173,13 @@ async def gift_card_balance(
 ):
     """Check a gift card's remaining balance/status by its code (before redeeming)."""
     gc = await db.scalar(select(GiftCard).where(GiftCard.code == code))
-    if gc is None:
+    # A card issued to a specific account is visible only to that account (404 — same
+    # non-enumeration rule as redeem).
+    if gc is None or (
+        gc.issued_to_account_id is not None
+        and user.role != "admin"
+        and gc.issued_to_account_id != (await _my_account(db, user)).id
+    ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
     return gc
 
@@ -179,7 +200,7 @@ async def redeem_gift_card(
     "/admin/loyalty/{account_id}/adjust",
     response_model=LoyaltyOut,
     operation_id="admin_adjust_points",
-    dependencies=[Depends(require_role("admin"))],
+    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
 )
 async def admin_adjust_points(account_id: int, data: AdjustPointsIn, db: AsyncSession = Depends(get_db)):
     if await db.get(CustomerAccount, account_id) is None:
@@ -198,7 +219,7 @@ async def admin_adjust_points(account_id: int, data: AdjustPointsIn, db: AsyncSe
     "/admin/gift-cards",
     response_model=GiftCardOut,
     operation_id="admin_issue_gift_card",
-    dependencies=[Depends(require_role("admin"))],
+    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
 )
 async def admin_issue_gift_card(data: IssueGiftIn, db: AsyncSession = Depends(get_db)):
     if data.issued_to_account_id is not None and await db.get(CustomerAccount, data.issued_to_account_id) is None:

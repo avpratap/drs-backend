@@ -12,18 +12,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.invoice import Invoice
 from app.models.order import Order, OrderItem
 from app.models.rma import ReturnRequest, ReturnRequestItem
+from app.models.shipment import Shipment
 from app.services import billing, invoicing
+from app.services import refunds as refund_acct
 
 
 async def create_request(db: AsyncSession, user, order: Order, items, reason) -> ReturnRequest:
     """Each requested line must be on the order and not exceed the (un-returned) ordered qty.
-    Only a paid, non-cancelled order can be returned."""
-    if order.payment_status != "paid":
+    Only a paid (or partly refunded — the shared refund cap still bounds it), non-cancelled
+    order can be returned."""
+    if order.payment_status not in ("paid", "partially_refunded"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Only a paid order can be returned"
         )
     if order.status == "cancelled":
         raise HTTPException(status.HTTP_409_CONFLICT, "Order is cancelled; nothing to return")
+    # Goods still on their way can't be "returned" (refunding them as store credit while
+    # the courier still delivers them pays out twice) — cancel/refund instead.
+    in_transit = await db.scalar(
+        select(func.count()).select_from(Shipment).where(
+            Shipment.order_id == order.id,
+            Shipment.status.in_(("draft", "created", "in_transit", "out_for_delivery")),
+        )
+    )
+    if in_transit:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Order is still in transit; it can be returned after delivery"
+        )
     ordered = {
         i.product_id: float(i.qty)
         for i in (
@@ -139,6 +154,17 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"Refund {amount} exceeds returned value {cap}",
         )
+    # One cap across BOTH refund paths (RMA store credit + refund to source), taken under
+    # the order lock: a full refund-to-source followed by an RMA refund (or vice versa)
+    # must never pay out more than the customer paid.
+    order = await refund_acct.lock_order(db, rr.order_id)
+    if order is not None:
+        headroom = await refund_acct.order_refund_headroom(db, order)
+        if round(float(amount), 2) > headroom:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Refund {amount} exceeds what is still refundable on the order ({headroom})",
+            )
     await billing.wallet_adjust(db, rr.account_id, round(float(amount), 2), "refund", "rma", rr.id)
     rr.refund_amount = round(float(amount), 2)
     rr.status = "refunded"
@@ -150,19 +176,37 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
         )
     )
     if inv is not None:
-        returned = {
-            li.product_id: float(li.qty)
-            for li in (
-                await db.execute(
-                    select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
-                )
-            ).scalars().all()
-        }
+        # SUM per product: two RMA lines for the same product must both be reversed (a
+        # dict comprehension kept only the last one, under-reversing GST).
+        returned: dict[int, float] = {}
+        for li in (
+            await db.execute(
+                select(ReturnRequestItem).where(ReturnRequestItem.return_request_id == rr.id)
+            )
+        ).scalars().all():
+            returned[li.product_id] = returned.get(li.product_id, 0.0) + float(li.qty)
         # Prorate the credit note to the amount actually refunded (goodwill partials
         # must not over-reverse output GST).
-        await invoicing.generate_credit_note_for_lines(
-            db, inv, returned, reason=f"Return {rr.rma_no}", amount=round(float(amount), 2)
-        )
+        amt = round(float(amount), 2)
+        reason = f"Return {rr.rma_no}"
+        before = await invoicing.credited_value(db, inv)
+        await invoicing.generate_credit_note_for_lines(db, inv, returned, reason=reason, amount=amt)
+        # A value-only credit note from an earlier partial refund to source may already
+        # have reversed part of the returned products' value: reverse the shortfall from
+        # the other products so the credit note still matches the money handed back.
+        short = round(amt - (await invoicing.credited_value(db, inv) - before), 2)
+        if short > 0:
+            await invoicing.generate_credit_note_for_lines(db, inv, None, reason=reason, amount=short)
+    if order is not None and order.payment_status in ("paid", "partially_refunded"):
+        # Everything the customer paid is (definitely) handed back -> refunded + full
+        # reversal; otherwise the order is now partially refunded (so a later invoice
+        # catches the credit up).
+        if await refund_acct.refunded_settled(db, order.id) >= round(float(order.total), 2):
+            order.payment_status = "refunded"
+            if inv is not None:
+                await invoicing.build_full_credit_note(db, inv, reason=f"Return {rr.rma_no}")
+        else:
+            order.payment_status = "partially_refunded"
     return rr
 
 

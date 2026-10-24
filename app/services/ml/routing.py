@@ -7,8 +7,11 @@ intra-city routing; swap for a real travel matrix when the Routes API is wired).
 """
 import asyncio
 import math
+import time
 
 _EARTH_KM = 6371.0
+MAX_STOPS = 500  # per optimisation call; larger days must be split per driver
+_TWO_OPT_BUDGET_S = 2.0  # hard wall-clock cap on the pure-Python local search
 
 
 def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -36,18 +39,38 @@ def _nearest_neighbour(coords: list[tuple[float, float]], start: int = 0) -> lis
     return order
 
 
-def _two_opt(order: list[int], coords: list[tuple[float, float]]) -> list[int]:
-    """Deterministic 2-opt local search — keeps the first node (start) fixed."""
-    improved = True
+def _two_opt(
+    order: list[int], coords: list[tuple[float, float]], budget_s: float = _TWO_OPT_BUDGET_S
+) -> list[int]:
+    """Deterministic 2-opt local search on an OPEN path, first node (start) fixed.
+
+    Distances are precomputed once and each candidate move is scored by its O(1) edge
+    delta (was a full O(n) route re-sum per candidate → O(n^4); 200 stops took ~28s).
+    A wall-clock budget bounds the worst case; the best route so far is returned."""
+    n = len(order)
+    if n < 4:
+        return order[:]
+    d = [[haversine_km(coords[a], coords[b]) for b in range(len(coords))] for a in range(len(coords))]
     best = order[:]
-    while improved:
+    deadline = time.monotonic() + budget_s
+    improved = True
+    while improved and time.monotonic() < deadline:
         improved = False
-        for i in range(1, len(best) - 1):
-            for k in range(i + 1, len(best)):
-                candidate = best[:i] + best[i : k + 1][::-1] + best[k + 1 :]
-                if _route_length(candidate, coords) + 1e-9 < _route_length(best, coords):
-                    best = candidate
+        for i in range(1, n - 1):
+            a, b = best[i - 1], best[i]
+            for k in range(i + 1, n):
+                c = best[k]
+                if k == n - 1:  # reversing the tail: only edge (a,b) -> (a,c) changes
+                    delta = d[a][c] - d[a][b]
+                else:
+                    e = best[k + 1]
+                    delta = d[a][c] + d[b][e] - d[a][b] - d[c][e]
+                if delta < -1e-9:
+                    best[i : k + 1] = best[i : k + 1][::-1]
                     improved = True
+                    a, b = best[i - 1], best[i]
+            if time.monotonic() >= deadline:
+                break
     return best
 
 
@@ -92,6 +115,8 @@ async def optimize_route(points: list[dict], start: dict | None = None) -> dict:
     Points without usable coords keep their input order (appended after the routed
     ones). Returns {ordered: [{id, seq}], total_distance_km}.
     """
+    if len(points) > MAX_STOPS:
+        raise ValueError(f"too many stops ({len(points)} > {MAX_STOPS}); optimise per driver")
     routable = [p for p in points if p.get("lat") is not None and p.get("lng") is not None]
     unroutable = [p for p in points if p.get("lat") is None or p.get("lng") is None]
     if len(routable) <= 2:

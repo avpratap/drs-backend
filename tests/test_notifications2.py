@@ -4,6 +4,8 @@ from conftest import auth, login
 
 
 async def _customer_id(client, h) -> int:
+    # WhatsApp is opt-in: turning it on records the whatsapp_optin consent.
+    await client.patch("/api/v1/profile", json={"notify_whatsapp": True}, headers=h)
     return (await client.get("/api/v1/auth/me", headers=h)).json()["id"]
 
 
@@ -60,19 +62,21 @@ async def test_admin_resend_requeues(client):
 
 
 async def test_subscription_lifecycle_emits(client):
-    """Pausing then resuming the seeded subscription emits lifecycle notifications."""
+    """Pausing then resuming a subscription emits lifecycle notifications to its owner.
+    Uses the subscriber's OWN new subscription — pausing the seeded one leaked into every
+    cutoff test whenever an assert failed before the resume."""
     sub = await login(client, "9999900002")
     sh = auth(sub)
     sid_me = (await client.get("/api/v1/auth/me", headers=sh)).json()["id"]
-    subs = (await client.get("/api/v1/subscriptions", headers=sh)).json()
-    sub_id = subs[0]["id"]
+    shop = (await client.post("/api/v1/shops", json={"name": "Lifecycle shop"}, headers=sh)).json()["id"]
+    sub_id = (await client.post("/api/v1/subscriptions", json={"shop_id": shop}, headers=sh)).json()["id"]
     admin = auth(await login(client, "9999900001"))
 
-    await client.post(f"/api/v1/subscriptions/{sub_id}/pause", headers=sh)
-    paused = (await client.get(f"/api/v1/admin/notifications?user_id={sid_me}&status_filter=queued", headers=admin)).json()
-    assert any(n["event_type"] == "subscription.paused" for n in paused)
-    # Restore to active (also emits subscription.resumed) so other tests are unaffected.
-    await client.post(f"/api/v1/subscriptions/{sub_id}/resume", headers=sh)
+    assert (await client.post(f"/api/v1/subscriptions/{sub_id}/pause", headers=sh)).status_code == 200
+    q = f"/api/v1/admin/notifications?user_id={sid_me}&limit=200"
+    assert any(n["event_type"] == "subscription.paused" for n in (await client.get(q, headers=admin)).json())
+    assert (await client.post(f"/api/v1/subscriptions/{sub_id}/resume", headers=sh)).status_code == 200
+    assert any(n["event_type"] == "subscription.resumed" for n in (await client.get(q, headers=admin)).json())
 
 
 async def test_retry_backoff_defers_next_attempt(client, monkeypatch):
@@ -89,6 +93,10 @@ async def test_retry_backoff_defers_next_attempt(client, monkeypatch):
         import sqlalchemy as sa
 
         uid = (await db.execute(sa.text("SELECT id FROM users LIMIT 1"))).scalar()
+        from app.models.user import User
+        from app.services import profile as profile_svc
+
+        (await profile_svc.get_or_create_profile(db, await db.get(User, uid))).notify_whatsapp = True
         notif = Notification(
             user_id=uid, event_type="payment.success", channel="whatsapp",
             category="transactional", to_addr="9876543210", body="hi", status="queued",

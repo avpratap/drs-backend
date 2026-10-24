@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.admin_tools import (
     AdminAuditLog,
     FeatureFlag,
@@ -66,56 +67,91 @@ async def enqueue_outbound(db: AsyncSession, event_type: str, payload: dict) -> 
     return len(hooks)
 
 
-def _is_public_url(url: str) -> bool:
-    """SSRF guard: only http(s), and every resolved IP must be public. Blocks loopback,
-    private, link-local (incl. the 169.254.169.254 cloud-metadata endpoint), reserved,
-    multicast and unspecified addresses. Best-effort (DNS is resolved once here)."""
+_DEV_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _resolve_public(url: str) -> tuple[str, int, str] | None:
+    """SSRF guard: only http(s), and EVERY resolved IP must be globally routable
+    (`is_global` also rejects CGNAT 100.64/10 — e.g. Alibaba metadata 100.100.100.200 —
+    and other special ranges that is_private misses). Returns (hostname, port, ip) to
+    CONNECT TO, so the request can't be re-resolved to an internal address afterwards
+    (DNS rebinding); None if blocked."""
     try:
         parsed = urlparse(url)
     except Exception:
-        return False
+        return None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return False
+        return None
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         infos = socket.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
     except Exception:
-        return False
+        return None
+    ips = []
     for *_, sockaddr in infos:
         try:
             ip = ipaddress.ip_address(sockaddr[0])
         except ValueError:
-            return False
-        if (
-            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified
-        ):
-            return False
-    return True
+            return None
+        if not ip.is_global or ip.is_multicast:
+            return None
+        ips.append(str(ip))
+    if not ips:
+        return None
+    return parsed.hostname, port, ips[0]
+
+
+def _is_public_url(url: str) -> bool:
+    return _resolve_public(url) is not None
+
+
+def _is_dev_url(url: str) -> bool:
+    """Dev/local sink (no network call) — never in prod, and only EXACT local hosts (the
+    old prefix match 'http://dev' also caught real hosts like developer.partner.com)."""
+    if settings.ENV == "prod":
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in _DEV_HOSTS or host.endswith(".localhost")
 
 
 async def _attempt_delivery(hook: OutboundWebhook, delivery: OutboundWebhookDelivery, payload: dict) -> None:
     delivery.attempts += 1
     body = json.dumps(payload, default=str).encode()
     # No real URL (dev/local) -> mark sent without a network call.
-    if not hook.url or hook.url.startswith(("http://localhost", "https://localhost", "http://dev", "https://dev")):
+    if not hook.url or _is_dev_url(hook.url):
         delivery.status = "sent"
         delivery.response_code = 200
         return
     # SSRF guard: never let an admin-configured URL reach an internal/metadata address.
-    if not await asyncio.to_thread(_is_public_url, hook.url):
-        log.warning("outbound webhook blocked (non-public host): %s", hook.url)
+    target = await asyncio.to_thread(_resolve_public, hook.url)
+    if target is None:
+        log.warning("outbound webhook blocked (non-public host) for hook %s", hook.id)
         delivery.status = "failed"
         delivery.response_code = 0
         return
+    hostname, port, ip = target
+    default_port = 443 if hook.url.lower().startswith("https") else 80
+    host_header = f"[{hostname}]" if ":" in hostname else hostname  # IPv6 literal
+    if port != default_port:
+        host_header = f"{host_header}:{port}"  # the vhost must see the real port too
     try:
         import httpx
 
-        headers = {"Content-Type": "application/json", "X-DRS-Event": hook.event_type}
+        headers = {"Content-Type": "application/json", "X-DRS-Event": hook.event_type,
+                   "Host": host_header}
         if hook.secret:
             headers["X-DRS-Signature"] = hmac.new(hook.secret.encode(), body, hashlib.sha256).hexdigest()
-        async with httpx.AsyncClient(timeout=10) as c:
-            resp = await c.post(hook.url, content=body, headers=headers)
+        # Connect to the IP we just validated (TLS still verifies the real hostname via
+        # SNI), and never follow redirects (a 30x could point at an internal address).
+        pinned = httpx.URL(hook.url).copy_with(host=ip)
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as c:
+            resp = await c.post(
+                pinned, content=body, headers=headers,
+                extensions={"sni_hostname": hostname},
+            )
         delivery.response_code = resp.status_code
         delivery.status = "sent" if resp.status_code < 300 else "failed"
     except Exception as exc:
@@ -144,10 +180,12 @@ def _rows_to_csv(header: list[str], rows: list[list]) -> str:
     return buf.getvalue()
 
 
-async def export_csv(db: AsyncSession, kind: str) -> str:
+async def export_csv(db: AsyncSession, kind: str) -> tuple[str, bool]:
+    """Newest rows first (a capped ascending export silently dropped the NEWEST rows).
+    Returns (csv, truncated) — truncated when more than _EXPORT_MAX_ROWS rows exist."""
     if kind == "orders":
         rows = (
-            await db.execute(select(Order).order_by(Order.id).limit(_EXPORT_MAX_ROWS))
+            await db.execute(select(Order).order_by(Order.id.desc()).limit(_EXPORT_MAX_ROWS + 1))
         ).scalars().all()
         header = ["id", "order_no", "account_id", "status", "payment_status",
                   "subtotal", "discount", "total"]
@@ -155,20 +193,20 @@ async def export_csv(db: AsyncSession, kind: str) -> str:
                  float(o.subtotal), float(o.discount), float(o.total)] for o in rows]
     elif kind == "payments":
         rows = (
-            await db.execute(select(Payment).order_by(Payment.id).limit(_EXPORT_MAX_ROWS))
+            await db.execute(select(Payment).order_by(Payment.id.desc()).limit(_EXPORT_MAX_ROWS + 1))
         ).scalars().all()
         header = ["id", "account_id", "payment_type", "gateway", "status", "amount", "created_at"]
         data = [[p.id, p.account_id, p.payment_type, p.gateway, p.status,
                  float(p.amount), p.created_at] for p in rows]
     elif kind == "users":
         rows = (
-            await db.execute(select(User).order_by(User.id).limit(_EXPORT_MAX_ROWS))
+            await db.execute(select(User).order_by(User.id.desc()).limit(_EXPORT_MAX_ROWS + 1))
         ).scalars().all()
         header = ["id", "phone", "email", "role", "status", "created_at"]
         data = [[u.id, u.phone, u.email, u.role, u.status, u.created_at] for u in rows]
     elif kind == "invoices":
         rows = (
-            await db.execute(select(Invoice).order_by(Invoice.id).limit(_EXPORT_MAX_ROWS))
+            await db.execute(select(Invoice).order_by(Invoice.id.desc()).limit(_EXPORT_MAX_ROWS + 1))
         ).scalars().all()
         header = ["id", "invoice_no", "fy", "account_id", "invoice_date", "taxable_value",
                   "cgst", "sgst", "igst", "total", "is_credit_note"]
@@ -177,6 +215,8 @@ async def export_csv(db: AsyncSession, kind: str) -> str:
                 for i in rows]
     else:
         raise ValueError(f"unknown export kind: {kind}")
+    truncated = len(data) > _EXPORT_MAX_ROWS
+    data = data[:_EXPORT_MAX_ROWS]
     # The CSV string-build is CPU-bound — keep it off the event loop so a large export
     # doesn't stall every other request on the worker.
-    return await asyncio.to_thread(_rows_to_csv, header, data)
+    return await asyncio.to_thread(_rows_to_csv, header, data), truncated

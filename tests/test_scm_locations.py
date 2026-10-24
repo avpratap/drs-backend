@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def test_location_crud_single_default(client):
@@ -18,17 +18,19 @@ async def test_reorder_point_and_low_stock(client):
     h = auth(admin)
     # Set reorder point 50 for product 1, stock it to 40 -> appears in low list.
     await client.post("/api/v1/admin/stock/reorder", json={"product_id": 1, "reorder_point": 50}, headers=h)
-    await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 40, "reason": "receipt"}, headers=h)
+    await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 40, "reason": "receipt"}, headers=idem(h))
     low = (await client.get("/api/v1/admin/stock/low", headers=h)).json()
     assert any(s["product_id"] == 1 for s in low)
     # Receive more -> above reorder -> drops off the low list.
-    await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 100, "reason": "receipt"}, headers=h)
+    await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 100, "reason": "receipt"}, headers=idem(h))
     low2 = (await client.get("/api/v1/admin/stock/low", headers=h)).json()
     assert all(s["product_id"] != 1 for s in low2)
 
 
 async def _stock(client, h, pid) -> float:
-    rows = (await client.get("/api/v1/admin/stock", headers=h)).json()
+    # Filter server-side: the unfiltered list is paginated (50 rows), so a product created
+    # late in the suite fell off the page and this silently returned 0.0.
+    rows = (await client.get(f"/api/v1/admin/stock?product_id={pid}", headers=h)).json()
     return next((s["qty_on_hand"] for s in rows if s["product_id"] == pid), 0.0)
 
 
@@ -46,7 +48,7 @@ async def test_delivery_decrements_stock_idempotently(client):
     await client.post(f"/api/v1/admin/shops/{shop_id}/tier", json={"price_tier_id": tid}, headers=h)
     sid = (await client.post("/api/v1/subscriptions", json={"shop_id": shop_id}, headers=h)).json()["id"]
     await client.put(f"/api/v1/subscriptions/{sid}/items", json=[{"product_id": pid, "default_qty": 7, "frequency": "daily"}], headers=h)
-    await client.post("/api/v1/admin/stock/adjust", json={"product_id": pid, "change": 100, "reason": "receipt"}, headers=h)
+    await client.post("/api/v1/admin/stock/adjust", json={"product_id": pid, "change": 100, "reason": "receipt"}, headers=idem(h))
 
     before = await _stock(client, h, pid)
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=h)

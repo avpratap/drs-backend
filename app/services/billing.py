@@ -44,6 +44,32 @@ async def get_or_create_wallet(db: AsyncSession, account_id: int, *, lock: bool 
     return wallet
 
 
+# Ledger entries that move CASH in or out of the wallet. Gift-card redemptions, RMA store
+# credit and admin goodwill are wallet credit too, but were never paid in as money, so
+# they can be spent on deliveries but never paid out as cash. Spending is assumed to use
+# cash FIRST (debit_order counts against it; a door cash_collection that pays a delivery
+# offsets its own debit), so credit can't be laundered into cash by spending the cash.
+_CASH_TXN_TYPES = (
+    "topup", "refund_reversal", "refund_release", "withdrawal", "debit_order", "cash_collection",
+)
+
+
+async def withdrawable_cash(db: AsyncSession, account_id: int, balance: float) -> float:
+    """Cash the account may withdraw: its net cash paid in, never above the balance."""
+    cash = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(WalletTransaction.amount), 0))
+            .join(Wallet, Wallet.id == WalletTransaction.wallet_id)
+            .where(
+                Wallet.account_id == account_id,
+                WalletTransaction.txn_type.in_(_CASH_TXN_TYPES),
+            )
+        )
+        or 0
+    )
+    return max(round(min(cash, float(balance)), 2), 0.0)
+
+
 async def wallet_adjust(
     db: AsyncSession,
     account_id: int,
@@ -54,6 +80,9 @@ async def wallet_adjust(
     *,
     allow_negative: bool = False,
 ) -> Wallet:
+    # Quantize ONCE so the stored txn amount and the balance move are the same paisa
+    # value (Numeric(12,2) would otherwise round 0.125 -> 0.13 while balance moved 0.12).
+    amount = round(float(amount), 2)
     wallet = await get_or_create_wallet(db, account_id, lock=True)  # row-locked
     new_balance = round(float(wallet.balance) + amount, 2)
     if amount < 0 and new_balance < 0 and not allow_negative:

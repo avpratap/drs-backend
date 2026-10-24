@@ -17,6 +17,14 @@ without the required ones (see `app/main.py`):
   (managed Postgres requires TLS)
 - Integration keys as they come online: `MSG91_*`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,
   `R2_*`, `SENTRY_DSN`.
+- **PostgreSQL 15 or newer** (migration 0051 uses `NULLS NOT DISTINCT`); CI/compose run 16.
+- `TRUSTED_PROXY_HOPS`: the Dockerfile sets `1` (one platform proxy). Do **not** set it
+  to `0` in the platform variables, or every user shares the proxy IP's rate limits.
+- `METRICS_TOKEN`: set it, and configure the scraper with `Authorization: Bearer <token>`
+  (unset leaves `/metrics` open).
+- One-off ops after upgrading past the review hardening: invoice PDFs rendered before
+  private storage lived in the PUBLIC bucket (`invoices/...`); they are re-rendered
+  privately on next access, but delete the old public objects from the bucket.
 
 ## Health probes
 - **Liveness**: `GET /healthz` — always 200 if the process is up. Used by the

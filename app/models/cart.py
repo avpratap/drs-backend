@@ -3,7 +3,7 @@
 At most one 'active' cart per account (partial unique index in the migration).
 Checkout converts the active cart into an Order and marks the cart 'converted'.
 """
-from sqlalchemy import BigInteger, ForeignKey, Numeric, String
+from sqlalchemy import BigInteger, ForeignKey, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -23,6 +23,7 @@ class Cart(Base, TimestampMixin):
 
 class CartItem(Base):
     __tablename__ = "cart_items"
+    __table_args__ = (UniqueConstraint("cart_id", "product_id", name="uq_cart_items_cart_product"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     cart_id: Mapped[int] = mapped_column(

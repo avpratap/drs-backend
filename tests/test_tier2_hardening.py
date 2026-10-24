@@ -2,6 +2,7 @@
 import pytest
 import sqlalchemy as sa
 from conftest import auth, login
+from sqlalchemy.exc import DBAPIError
 
 from app.core.phone import normalize_phone
 
@@ -45,12 +46,12 @@ async def test_webhook_events_immutable(client):
                 "VALUES ('evt_t2', 'payment.captured', '{}', now())"
             )
         )
-    with pytest.raises(Exception) as ei:
+    with pytest.raises(DBAPIError) as ei:
         async with engine.begin() as conn:
             await conn.execute(
                 sa.text("UPDATE webhook_events SET event_type='x' WHERE event_id='evt_t2'")
             )
-    assert "immutable" in str(ei.value).lower() or "no update" in str(ei.value).lower()
+    assert "row is immutable" in str(ei.value)
     # DELETE is still allowed (housekeeping prunes old events).
     async with engine.begin() as conn:
         await conn.execute(sa.text("DELETE FROM webhook_events WHERE event_id='evt_t2'"))
@@ -63,7 +64,7 @@ async def test_stock_floor_check(client):
     async with engine.begin() as conn:
         pid = (await conn.execute(sa.text("SELECT id FROM products LIMIT 1"))).scalar()
         loc = (await conn.execute(sa.text("SELECT id FROM locations LIMIT 1"))).scalar()
-    with pytest.raises(Exception) as ei:
+    with pytest.raises(DBAPIError) as ei:
         async with engine.begin() as conn:
             await conn.execute(
                 sa.text(
@@ -72,7 +73,7 @@ async def test_stock_floor_check(client):
                 ),
                 {"p": pid, "l": loc},
             )
-    assert "ck_stock_qty_floor" in str(ei.value) or "check" in str(ei.value).lower()
+    assert "ck_stock_qty_floor" in str(ei.value)
 
 
 async def test_negative_balance_blocked(client):
@@ -93,7 +94,7 @@ async def test_negative_balance_blocked(client):
         db.add(acct)
         await db.flush()
         await billing.wallet_adjust(db, acct.id, 50, "topup", "test", 1)
-        with pytest.raises(Exception):  # noqa: B017 - overdraw must be refused
+        with pytest.raises(billing.InsufficientBalance):  # overdraw must be refused
             await billing.wallet_adjust(db, acct.id, -100, "debit", "test", 2)
         await db.rollback()  # never commit test rows
 
@@ -121,15 +122,17 @@ async def test_money_check_blocks_negative_unit_price(client):
             {"a": acct, "s": shop},
         )
         oid = (await conn.execute(sa.text("SELECT id FROM orders WHERE order_no='T2CHK'"))).scalar()
-    with pytest.raises(Exception) as ei:
+    try:
+        with pytest.raises(DBAPIError) as ei:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO order_items (order_id, product_id, qty, unit_price, line_total) "
+                        "VALUES (:o, :p, 1, -5, 0)"
+                    ),
+                    {"o": oid, "p": pid},
+                )
+        assert "ck_order_items_price_nonneg" in str(ei.value)
+    finally:  # cleanup even when an assert fails (no leaked test rows)
         async with engine.begin() as conn:
-            await conn.execute(
-                sa.text(
-                    "INSERT INTO order_items (order_id, product_id, qty, unit_price, line_total) "
-                    "VALUES (:o, :p, 1, -5, 0)"
-                ),
-                {"o": oid, "p": pid},
-            )
-    assert "ck_order_items_price_nonneg" in str(ei.value) or "check" in str(ei.value).lower()
-    async with engine.begin() as conn:
-        await conn.execute(sa.text("DELETE FROM orders WHERE id = :o"), {"o": oid})
+            await conn.execute(sa.text("DELETE FROM orders WHERE id = :o"), {"o": oid})

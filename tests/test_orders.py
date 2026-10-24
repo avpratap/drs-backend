@@ -79,13 +79,29 @@ async def test_no_double_open_order_payment(client):
         headers=auth(cust),
     )
     assert first.status_code == 200
-    # A second open payment for the same order is blocked (no double gateway charge).
+    # M3: a second create RESUMES the open checkout (same payment + gateway order) — it
+    # never opens a second gateway order (no double charge) and never wedges the order.
     second = await client.post(
         "/api/v1/payments/create",
         json={"purpose": "order_payment", "order_id": order["id"]},
         headers=auth(cust),
     )
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.json()["payment_id"] == first.json()["payment_id"]
+    assert second.json()["gateway_order_id"] == first.json()["gateway_order_id"]
+    # Once paid, creating another payment is refused.
+    await client.post(
+        "/api/v1/payments/verify",
+        json={"gateway_order_id": first.json()["gateway_order_id"], "gateway_payment_id": "p",
+              "signature": "dev"},
+        headers=auth(cust),
+    )
+    third = await client.post(
+        "/api/v1/payments/create",
+        json={"purpose": "order_payment", "order_id": order["id"]},
+        headers=auth(cust),
+    )
+    assert third.status_code == 409
 
 
 async def test_interstate_d2c_order_invoice_uses_igst(client):
@@ -120,7 +136,9 @@ async def test_interstate_d2c_order_invoice_uses_igst(client):
     )
     inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=ch)).json()
     assert inv["is_interstate"] is True
-    assert inv["igst"] > 0 and inv["cgst"] == 0.0 and inv["sgst"] == 0.0
+    # ₹500 GST-inclusive @12%: taxable 500/1.12 = 446.43, IGST = 53.57, total unchanged.
+    assert inv["total"] == 500.0 and inv["taxable_value"] == 446.43
+    assert inv["igst"] == 53.57 and inv["cgst"] == 0.0 and inv["sgst"] == 0.0
 
 
 async def test_duplicate_product_lines_merged(client):

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache_get_json, cache_set_json
 from app.core.config import settings
 from app.models.content import Article, Banner, StaticPage
 
@@ -46,28 +47,32 @@ async def active_banners(db: AsyncSession) -> list[Banner]:
     return rows
 
 
+SITEMAP_MAX_URLS = 50_000  # the sitemap protocol's per-file limit
+SITEMAP_CACHE_KEY = "sitemap:v1"
+
+
 async def build_sitemap(db: AsyncSession) -> list[dict]:
+    """Public + unauthenticated: select only slug/dates (never the up-to-100 KB bodies),
+    cap the rows, and cache the result briefly so repeated hits don't hammer the DB."""
+    cached = await cache_get_json(SITEMAP_CACHE_KEY)
+    if cached is not None:
+        return cached
     entries: list[dict] = [{"loc": f"{SITE_BASE_URL}{r}", "lastmod": None} for r in _STATIC_ROUTES]
-    arts = (
-        await db.execute(
-            select(Article).where(Article.status == "published").order_by(Article.id)
-        )
-    ).scalars().all()
-    for a in arts:
-        lastmod = (a.published_at or a.updated_at)
-        entries.append({
-            "loc": f"{SITE_BASE_URL}/blog/{a.slug}",
-            "lastmod": lastmod.date().isoformat() if lastmod else None,
-        })
-    pages = (
-        await db.execute(
-            select(StaticPage).where(StaticPage.status == "published").order_by(StaticPage.id)
-        )
-    ).scalars().all()
-    for p in pages:
-        lastmod = (p.published_at or p.updated_at)
-        entries.append({
-            "loc": f"{SITE_BASE_URL}/{p.slug}",
-            "lastmod": lastmod.date().isoformat() if lastmod else None,
-        })
+    for model, prefix in ((Article, "/blog/"), (StaticPage, "/")):
+        rows = (
+            await db.execute(
+                select(model.slug, model.published_at, model.updated_at)
+                .where(model.status == "published")
+                .order_by(model.id)
+                .limit(SITEMAP_MAX_URLS)
+            )
+        ).all()
+        for slug, published_at, updated_at in rows:
+            lastmod = published_at or updated_at
+            entries.append({
+                "loc": f"{SITE_BASE_URL}{prefix}{slug}",
+                "lastmod": lastmod.date().isoformat() if lastmod else None,
+            })
+    entries = entries[:SITEMAP_MAX_URLS]
+    await cache_set_json(SITEMAP_CACHE_KEY, entries, ttl=300)
     return entries

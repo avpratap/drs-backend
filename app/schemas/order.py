@@ -1,4 +1,7 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.gst_states import validate_state
+from app.schemas.profile import PINCODE_RE
 
 
 class OrderItemIn(BaseModel):
@@ -12,8 +15,10 @@ class OrderCreate(BaseModel):
     # Delivery state/pincode — captured onto the D2C home shop so GST place-of-supply
     # (CGST+SGST vs IGST) is correct for interstate orders (#M12).
     state: str | None = Field(default=None, max_length=120)
-    pincode: str | None = Field(default=None, max_length=10)
+    pincode: str | None = Field(default=None, pattern=PINCODE_RE)
     coupon_code: str | None = Field(default=None, max_length=32)
+
+    _v_state = field_validator("state")(lambda v: validate_state(v))
 
 
 class OrderItemOut(BaseModel):

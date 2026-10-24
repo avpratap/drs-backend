@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _product(client, h, sku) -> int:
@@ -16,7 +16,7 @@ async def test_reorder_suggestion_tops_up_to_2x(client):
     loc = await _location(client, h, "Reorder WH A")
     # reorder point 20, bring on-hand to 5 (below point) -> suggest 2*20 - 5 = 35.
     await client.post("/api/v1/admin/stock/reorder", json={"product_id": pid, "reorder_point": 20, "location_id": loc}, headers=h)
-    await client.post("/api/v1/admin/stock/adjust", json={"product_id": pid, "change": 5, "reason": "receipt", "location_id": loc}, headers=h)
+    await client.post("/api/v1/admin/stock/adjust", json={"product_id": pid, "change": 5, "reason": "receipt", "location_id": loc}, headers=idem(h))
 
     rows = (await client.get("/api/v1/admin/stock/reorder-suggestions", headers=h)).json()
     mine = next(r for r in rows if r["product_id"] == pid and r["location_id"] == loc)
@@ -31,7 +31,7 @@ async def test_reorder_suggestion_excludes_well_stocked(client):
     pid = await _product(client, h, "REORD-B")
     loc = await _location(client, h, "Reorder WH B")
     await client.post("/api/v1/admin/stock/reorder", json={"product_id": pid, "reorder_point": 5, "location_id": loc}, headers=h)
-    await client.post("/api/v1/admin/stock/adjust", json={"product_id": pid, "change": 100, "reason": "receipt", "location_id": loc}, headers=h)
+    await client.post("/api/v1/admin/stock/adjust", json={"product_id": pid, "change": 100, "reason": "receipt", "location_id": loc}, headers=idem(h))
     rows = (await client.get("/api/v1/admin/stock/reorder-suggestions", headers=h)).json()
     assert all(not (r["product_id"] == pid and r["location_id"] == loc) for r in rows)
 

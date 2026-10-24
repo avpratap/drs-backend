@@ -1,6 +1,8 @@
+
 """Admin management CRUD: delivery-staff assignment, price tiers/prices, tier
 assignment, account finance, shop mgmt, coupons, users, withdrawals. All admin-gated."""
 import datetime as dt
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -9,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_delete
 from app.core.db import get_db
+from app.core.phone import is_indian_mobile, normalize_phone
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
@@ -45,6 +48,7 @@ from app.schemas.shop import ShopOut
 from app.services import admin_tools as audit_svc
 from app.services import billing as billing_svc
 from app.services import dpdp
+from app.services import refunds as refund_acct
 
 router = APIRouter(
     prefix="/admin", tags=["management"], dependencies=[Depends(require_role("admin"))]
@@ -319,6 +323,47 @@ async def set_account_tier(account_id: int, data: TierAssignIn, db: AsyncSession
     return {"detail": "tier set", "account_id": account_id, "price_tier_id": data.price_tier_id}
 
 
+class AccountTypeIn(BaseModel):
+    account_type: Literal["retail", "b2b"] | None = None
+    billing_mode: Literal["prepaid_wallet", "postpaid_credit"] | None = None
+
+
+class AccountTypeOut(BaseModel):
+    account_id: int
+    account_type: str
+    billing_mode: str
+
+
+@router.patch(
+    "/accounts/{account_id}/type", operation_id="set_account_type", response_model=AccountTypeOut
+)
+async def set_account_type(account_id: int, data: AccountTypeIn, db: AsyncSession = Depends(get_db)):
+    """Correct an account's type / billing mode (accounts were typed by whichever endpoint
+    first created them, and nothing else could change it)."""
+    account = (
+        await db.execute(
+            select(CustomerAccount).where(CustomerAccount.id == account_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    if (
+        data.billing_mode == "prepaid_wallet"
+        and account.billing_mode == "postpaid_credit"
+        and await billing_svc.credit_outstanding(db, account_id) > 0
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Settle the outstanding credit before switching to prepaid"
+        )
+    if data.account_type is not None:
+        account.account_type = data.account_type
+    if data.billing_mode is not None:
+        account.billing_mode = data.billing_mode
+    await db.commit()
+    return {"account_id": account.id, "account_type": account.account_type,
+            "billing_mode": account.billing_mode}
+
+
 # ---------- User management ----------
 _VALID_ROLES = {"admin", "customer", "subscriber", "delivery"}
 # Roles an admin may PROVISION directly (phone-verified, no OTP). Retail "customer"
@@ -343,10 +388,15 @@ async def admin_create_user(data: StaffUserIn, db: AsyncSession = Depends(get_db
             f"role must be one of: {', '.join(sorted(_STAFF_CREATABLE_ROLES))} "
             "(retail customers self-register via OTP)",
         )
-    if await db.scalar(select(User).where(User.phone == data.phone)):
+    # Canonicalize exactly like OTP login does, or "919811122233" is stored as typed and
+    # the person's OTP login (normalized to 9811122233) silently creates a new customer.
+    phone = normalize_phone(data.phone)
+    if not is_indian_mobile(phone):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid Indian mobile number")
+    if await db.scalar(select(User).where(User.phone == phone)):
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with this phone already exists")
     user = User(
-        phone=data.phone,
+        phone=phone,
         role=data.role,
         full_name=data.full_name,
         status="active",
@@ -394,6 +444,9 @@ async def update_user(
         changed["role"] = {"from": user.role, "to": patch["role"]}
         user.role = patch["role"]
         user.token_version += 1  # force re-auth so the new role takes effect
+    if user.status == "erased" and patch:
+        # Erasure is final (DPDP): an erased identity can't be reactivated or re-roled.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Erased accounts can't be modified")
     if "status" in patch:
         changed["status"] = {"from": user.status, "to": patch["status"]}
         user.status = patch["status"]
@@ -420,7 +473,10 @@ async def admin_erase_user(
     # Record the audit BEFORE erasure so the actor/target are captured even though
     # erase_user commits internally (the audit row is flushed into that same txn).
     await audit_svc.record_audit(db, actor.id, "user_erase", "user", user_id)
-    return await dpdp.erase_user(db, user)
+    try:
+        return await dpdp.erase_user(db, user)
+    except dpdp.ErasureBlocked as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
 
 # ---------- Coupons ----------
@@ -471,6 +527,11 @@ async def update_coupon(coupon_id: int, data: CouponPatch, db: AsyncSession = De
         setattr(coupon, field, value)
     if coupon.valid_to and coupon.valid_from and coupon.valid_to < coupon.valid_from:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    if coupon.usage_limit is not None and coupon.usage_limit < coupon.used_count:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"usage_limit can't be below the {coupon.used_count} uses already made",
+        )
     await db.commit()
     await db.refresh(coupon)
     return coupon
@@ -525,12 +586,14 @@ async def admin_wallet_adjust(
     if await db.get(CustomerAccount, account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     wallet = await billing_svc.wallet_adjust(
-        db, account_id, data.amount, f"admin_{data.reason}"[:20], "admin", None,
+        # Fixed ledger type (the free-text reason was cut to 20 chars into txn_type); the
+        # full reason and note live in the audit record written below.
+        db, account_id, data.amount, "adjustment", "admin", None,
         allow_negative=True,
     )
     await audit_svc.record_audit(
         db, actor.id, "wallet_adjust", "customer_account", account_id,
-        detail={"amount": float(data.amount), "reason": data.reason},
+        detail={"amount": float(data.amount), "reason": data.reason, "note": data.note},
     )
     await db.commit()
     return {"account_id": account_id, "wallet_balance": float(wallet.balance)}
@@ -636,6 +699,11 @@ async def approve_withdrawal(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Withdrawal not found")
     if wd.status != "requested":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Withdrawal is {wd.status}")
+    wallet = await billing_svc.get_or_create_wallet(db, wd.account_id, lock=True)
+    if float(wd.amount) > await billing_svc.withdrawable_cash(db, wd.account_id, float(wallet.balance)):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Withdrawal exceeds the cash withdrawable from the wallet"
+        )
     try:
         await billing_svc.wallet_adjust(
             db, wd.account_id, -float(wd.amount), "withdrawal", "withdrawal", wd.id
@@ -686,7 +754,9 @@ async def reject_withdrawal(
 async def reports_summary(db: AsyncSession = Depends(get_db)):
     """At-a-glance operational + financial counters for the admin dashboard."""
     paid_revenue = await db.scalar(
-        select(func.coalesce(func.sum(Order.total), 0)).where(Order.payment_status == "paid")
+        select(func.coalesce(func.sum(refund_acct.net_order_value()), 0)).where(
+            Order.payment_status.in_(refund_acct.SETTLED_STATUSES)
+        )
     )
     wallet_float = await db.scalar(select(func.coalesce(func.sum(Wallet.balance), 0)))
     # Outstanding postpaid credit = latest balance per account, summed.
