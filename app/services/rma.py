@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.invoice import Invoice
 from app.models.order import Order, OrderItem
 from app.models.rma import ReturnRequest, ReturnRequestItem
+from app.models.shipment import Shipment
 from app.services import billing, invoicing
 from app.services import refunds as refund_acct
 
@@ -25,6 +26,18 @@ async def create_request(db: AsyncSession, user, order: Order, items, reason) ->
         )
     if order.status == "cancelled":
         raise HTTPException(status.HTTP_409_CONFLICT, "Order is cancelled; nothing to return")
+    # Goods still on their way can't be "returned" (refunding them as store credit while
+    # the courier still delivers them pays out twice) — cancel/refund instead.
+    in_transit = await db.scalar(
+        select(func.count()).select_from(Shipment).where(
+            Shipment.order_id == order.id,
+            Shipment.status.in_(("draft", "created", "in_transit", "out_for_delivery")),
+        )
+    )
+    if in_transit:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Order is still in transit; it can be returned after delivery"
+        )
     ordered = {
         i.product_id: float(i.qty)
         for i in (

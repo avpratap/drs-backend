@@ -35,6 +35,16 @@ async def scheduled_cutoff(ctx: dict) -> dict:
         attempt = ctx.get("job_try", 1)
         log.warning("scheduled_cutoff attempt %s failed: %s", attempt, exc)
         raise Retry(defer=min(60 * attempt, 300)) from exc
+    if result.get("failed"):
+        # Some subscriptions failed (logged per sub) — the run is 'partial'. Rerun is
+        # idempotent, so retry rather than silently leaving those shops undelivered.
+        attempt = ctx.get("job_try", 1)
+        log.error(
+            "scheduled_cutoff attempt %s: %s subscription(s) failed for %s",
+            attempt, result["failed"], delivery_date,
+        )
+        if attempt < 4:
+            raise Retry(defer=min(60 * attempt, 300))
     result["delivery_date"] = str(result["delivery_date"])
     return result
 
@@ -64,7 +74,10 @@ class WorkerSettings:
     # settings (and default to max_tries=1, keep_result=0), so they must be set here or
     # the "retry + 1h result retention" below would NOT apply to these scheduled jobs.
     cron_jobs = [
-        cron(scheduled_cutoff, hour=17, minute=35, max_tries=4, keep_result=3600),  # 23:05 IST
+        # Per-job timeout sized for the batch (the worker default below is for short jobs).
+        cron(
+            scheduled_cutoff, hour=17, minute=35, max_tries=4, keep_result=3600, timeout=3000
+        ),  # 23:05 IST
         cron(drain_outbox, max_tries=2, keep_result=300),  # every minute
         cron(housekeeping, hour=1, minute=0, max_tries=3, keep_result=3600),  # daily prune
         cron(score_churn, hour=2, minute=0, max_tries=3, keep_result=3600),  # nightly churn

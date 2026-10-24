@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _fresh_product(client, h, sku) -> int:
@@ -16,13 +16,13 @@ async def test_stock_receipt_wastage_and_movements(client):
     r1 = await client.post(
         "/api/v1/admin/stock/adjust",
         json={"product_id": pid, "change": 100, "reason": "receipt"},
-        headers=h,
+        headers=idem(h),
     )
     assert r1.status_code == 200 and r1.json()["qty_on_hand"] == 100.0
     r2 = await client.post(
         "/api/v1/admin/stock/wastage",
         json={"product_id": pid, "qty": 15, "note": "spoilage"},
-        headers=h,
+        headers=idem(h),
     )
     assert r2.json()["qty_on_hand"] == 85.0
 
@@ -38,13 +38,13 @@ async def test_stock_adjust_validation(client):
     admin = await login(client, "9999900001")
     h = auth(admin)
     # zero change rejected
-    assert (await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 0, "reason": "receipt"}, headers=h)).status_code == 422
+    assert (await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 0, "reason": "receipt"}, headers=idem(h))).status_code == 422
     # bad reason rejected
-    assert (await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 5, "reason": "magic"}, headers=h)).status_code == 422
+    assert (await client.post("/api/v1/admin/stock/adjust", json={"product_id": 1, "change": 5, "reason": "magic"}, headers=idem(h))).status_code == 422
     # unknown product
-    assert (await client.post("/api/v1/admin/stock/adjust", json={"product_id": 999999, "change": 5, "reason": "receipt"}, headers=h)).status_code == 404
+    assert (await client.post("/api/v1/admin/stock/adjust", json={"product_id": 999999, "change": 5, "reason": "receipt"}, headers=idem(h))).status_code == 404
     # negative wastage qty rejected
-    assert (await client.post("/api/v1/admin/stock/wastage", json={"product_id": 1, "qty": -3}, headers=h)).status_code == 422
+    assert (await client.post("/api/v1/admin/stock/wastage", json={"product_id": 1, "qty": -3}, headers=idem(h))).status_code == 422
 
 
 async def test_stock_requires_admin(client):

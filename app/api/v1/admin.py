@@ -20,9 +20,18 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(requir
 
 
 @router.post("/cutoff/run", response_model=CutoffResult, operation_id="run_cutoff")
-async def run_cutoff_endpoint(date: dt.date | None = None, db: AsyncSession = Depends(get_db)):
-    """Materialize active subscriptions into delivery_orders for a date (default tomorrow)."""
+async def run_cutoff_endpoint(
+    date: dt.date | None = None, force: bool = False, db: AsyncSession = Depends(get_db)
+):
+    """Materialize active subscriptions into delivery_orders for a date (default tomorrow).
+    Today/past dates are refused unless force=true: a rerun on delivery day rebuilds open
+    orders mid-route, and a past date would create orders that then get billed."""
     delivery_date = date or (today_ist() + dt.timedelta(days=1))
+    if delivery_date <= today_ist() and not force:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Cutoff can only run for tomorrow or later (pass force=true to override)",
+        )
     return await run_cutoff(db, delivery_date)
 
 

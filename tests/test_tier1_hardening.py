@@ -1,5 +1,5 @@
 """Tests for the Tier-1 audit hardening fixes."""
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _setup_delivery(client, h, tag):
@@ -11,7 +11,7 @@ async def _setup_delivery(client, h, tag):
     await client.post(f"/api/v1/admin/shops/{shop_id}/tier", json={"price_tier_id": tid}, headers=h)
     sid = (await client.post("/api/v1/subscriptions", json={"shop_id": shop_id}, headers=h)).json()["id"]
     await client.put(f"/api/v1/subscriptions/{sid}/items", json=[{"product_id": pid, "default_qty": 5, "frequency": "daily"}], headers=h)
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "T1B", "qty": 100, "expiry_date": "2040-01-01"}, headers=h)
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "T1B", "qty": 100, "expiry_date": "2040-01-01"}, headers=idem(h))
     date = "2039-07-07"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=h)
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=h)).json()

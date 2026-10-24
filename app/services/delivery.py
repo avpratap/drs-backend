@@ -24,7 +24,9 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     res = await db.execute(
         select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
     )
-    items = {i.product_id: i for i in res.scalars().all()}
+    # Ordered by product_id: the stock loop below locks stock items in this order (the
+    # same global order as transfers/production/GRN), so two deliveries can't deadlock.
+    items = {i.product_id: i for i in sorted(res.scalars().all(), key=lambda i: i.product_id)}
 
     # The submission must account for EVERY planned line (qty_delivered=0 means
     # not-delivered). Otherwise an omitted item would stay stuck 'planned' and billed
@@ -179,7 +181,7 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
         .where(StockMovement.ref_type == "delivery_order", StockMovement.ref_id == order.id)
     )
     if not already_stocked:
-        loc = await inventory.default_location_id(db)
+        loc = await inventory.delivery_location_id(db, order.shop_id, user.id)
         # returned_qty is validated above as <= qty_delivered per product, so out_qty
         # is always >= 0 — we only ever deplete what the customer kept; returned units
         # were never dispatched out of stock, so nothing is added back.

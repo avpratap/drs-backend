@@ -4,7 +4,7 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from geoalchemy2 import Geometry
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -13,7 +13,7 @@ from app.deps.pagination import Page, pagination
 from app.models.churn import ChurnScore
 from app.models.delivery import DeliveryOrder
 from app.models.product import Product
-from app.models.shop import CustomerAccount, Shop
+from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.user import User
 from app.services.ml import churn as churn_svc
 from app.services.ml import recommendations as rec_svc
@@ -90,21 +90,38 @@ async def run_churn(db: AsyncSession = Depends(get_db)):
 # ---------- Route optimization (admin) ----------
 @router.get("/admin/ml/route/optimize", response_model=RouteOut, operation_id="optimize_delivery_route",
             dependencies=[Depends(require_role("admin"))])
-async def optimize_route(date: dt.date, db: AsyncSession = Depends(get_db)):
+async def optimize_route(
+    date: dt.date, delivery_id: int | None = None, db: AsyncSession = Depends(get_db)
+):
     """Order a date's delivery stops into a short route using shop geo (stops without
-    coordinates keep their input order)."""
+    coordinates keep their input order). Pass delivery_id to route one driver's stops
+    (their assigned shops); a single call is capped at routing.MAX_STOPS stops."""
     lat = func.ST_Y(func.cast(Shop.geo, Geometry))
     lng = func.ST_X(func.cast(Shop.geo, Geometry))
     rows = (
         await db.execute(
             select(DeliveryOrder.id, lat, lng)
             .join(Shop, Shop.id == DeliveryOrder.shop_id)
-            .where(DeliveryOrder.delivery_date == date)
+            .where(
+                DeliveryOrder.delivery_date == date,
+                DeliveryOrder.shop_id.in_(
+                    select(DeliveryAssignment.shop_id).where(
+                        DeliveryAssignment.delivery_id == delivery_id,
+                        DeliveryAssignment.active.is_(True),
+                    )
+                )
+                if delivery_id is not None
+                else true(),
+            )
             .order_by(DeliveryOrder.id)
+            .limit(routing_svc.MAX_STOPS + 1)
         )
     ).all()
     points = [{"id": oid, "lat": la, "lng": ln} for oid, la, ln in rows]
-    result = await routing_svc.optimize_route(points)
+    try:
+        result = await routing_svc.optimize_route(points)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
     return RouteOut(
         date=date,
         stops=[RouteStopOut(**s) for s in result["ordered"]],

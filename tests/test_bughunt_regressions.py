@@ -1,5 +1,5 @@
 """Regression tests for bugs found in the deep bug-hunt (keep them fixed)."""
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _product(client, h, sku, price=None, tier_code=None):
@@ -52,7 +52,7 @@ async def _delivery_order(client, h, tag):
     await client.post(f"/api/v1/admin/shops/{shop_id}/tier", json={"price_tier_id": tid}, headers=h)
     sid = (await client.post("/api/v1/subscriptions", json={"shop_id": shop_id}, headers=h)).json()["id"]
     await client.put(f"/api/v1/subscriptions/{sid}/items", json=[{"product_id": pid, "default_qty": 5, "frequency": "daily"}], headers=h)
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": f"BB{tag}", "qty": 100, "expiry_date": "2041-01-01"}, headers=h)
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": f"BB{tag}", "qty": 100, "expiry_date": "2041-01-01"}, headers=idem(h))
     date = "2039-08-08"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=h)
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=h)).json()

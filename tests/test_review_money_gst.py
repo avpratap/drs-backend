@@ -395,7 +395,7 @@ async def test_delivery_billing_equals_invoice_total_to_the_paisa(client):
     h = auth(admin)
     milk = await _pid(client, admin, "MILK-1L")
     ghee = await _pid(client, admin, "GHEE-1KG")
-    oid = await _delivered_order(client, h, [(milk, 1.555), (ghee, 0.007)], "2038-03-03")
+    oid = await _delivered_order(client, h, [(milk, 1.555), (ghee, 1.001)], "2038-03-03")
     billed = (await _q("SELECT total FROM delivery_orders WHERE id=:i", i=oid))[0][0]
     inv = (await client.post(f"/api/v1/admin/invoices/generate?delivery_order_id={oid}", headers=h)).json()
     assert float(billed) == inv["total"]

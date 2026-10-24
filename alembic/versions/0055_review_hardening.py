@@ -1,5 +1,7 @@
 """Full-backend review hardening: integrity constraints + refund ledger marker.
 
+- locations.driver_user_id: a vehicle location bound to its driver; deliveries deduct
+  stock from the van instead of always the default warehouse.
 - refunds.ledger_applied_at: the refund's wallet/order/credit-note effect is applied
   exactly once (re-applied idempotently by admin reconciliation after a failure).
 - cart_items UNIQUE(cart_id, product_id): concurrent adds can't create duplicate lines.
@@ -29,6 +31,11 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_payments_amount_pos", "payments", "amount > 0 OR (gateway = 'none' AND amount = 0)"
     )
+    op.add_column(
+        "locations",
+        sa.Column("driver_user_id", sa.BigInteger(), sa.ForeignKey("users.id"), nullable=True),
+    )
+    op.create_index("ix_locations_driver_user_id", "locations", ["driver_user_id"])
     op.add_column(
         "refunds", sa.Column("ledger_applied_at", sa.DateTime(timezone=True), nullable=True)
     )
@@ -94,3 +101,5 @@ def downgrade() -> None:
     op.drop_constraint("uq_subscription_items_sub_product", "subscription_items", type_="unique")
     op.drop_constraint("uq_cart_items_cart_product", "cart_items", type_="unique")
     op.drop_column("refunds", "ledger_applied_at")
+    op.drop_index("ix_locations_driver_user_id", table_name="locations")
+    op.drop_column("locations", "driver_user_id")

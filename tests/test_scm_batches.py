@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _product(client, h, sku) -> int:
@@ -17,7 +17,7 @@ async def test_receive_batch_increments_stock(client):
     r = await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": "B1", "qty": 40, "expiry_date": "2040-01-01"},
-        headers=h,
+        headers=idem(h),
     )
     assert r.status_code == 200 and r.json()["qty"] == 40.0
     assert await _stock(client, h, pid) == 40.0
@@ -25,7 +25,7 @@ async def test_receive_batch_increments_stock(client):
     bad = await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": "B2", "qty": 1, "mfg_date": "2040-01-02", "expiry_date": "2040-01-01"},
-        headers=h,
+        headers=idem(h),
     )
     assert bad.status_code == 422
 
@@ -42,8 +42,8 @@ async def test_fefo_consumption_on_delivery(client):
     await client.put(f"/api/v1/subscriptions/{sid}/items", json=[{"product_id": pid, "default_qty": 5, "frequency": "daily"}], headers=h)
 
     # Two batches: earlier expiry (3) should be consumed first, then the later (10).
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "EARLY", "qty": 3, "expiry_date": "2040-02-01"}, headers=h)
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "LATE", "qty": 10, "expiry_date": "2040-09-01"}, headers=h)
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "EARLY", "qty": 3, "expiry_date": "2040-02-01"}, headers=idem(h))
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "LATE", "qty": 10, "expiry_date": "2040-09-01"}, headers=idem(h))
 
     date = "2039-05-05"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=h)
@@ -65,8 +65,8 @@ async def test_expire_batches_writeoff(client):
     admin = await login(client, "9999900001")
     h = auth(admin)
     pid = await _product(client, h, "BATCH-EXP-1")
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "OLD", "qty": 6, "expiry_date": "2020-01-01"}, headers=h)
-    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "FRESH", "qty": 4, "expiry_date": "2040-01-01"}, headers=h)
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "OLD", "qty": 6, "expiry_date": "2020-01-01"}, headers=idem(h))
+    await client.post("/api/v1/admin/stock/batches", json={"product_id": pid, "batch_no": "FRESH", "qty": 4, "expiry_date": "2040-01-01"}, headers=idem(h))
     assert await _stock(client, h, pid) == 10.0
 
     res = await client.post("/api/v1/admin/stock/expire", headers=h)
@@ -78,7 +78,7 @@ async def test_expire_batches_writeoff(client):
 
 async def test_batches_require_admin(client):
     cust = await login(client, "9876543210")
-    assert (await client.get("/api/v1/admin/stock/batches", headers=auth(cust))).status_code == 403
+    assert (await client.get("/api/v1/admin/stock/batches", headers=idem(auth(cust)))).status_code == 403
 
 
 async def test_receive_same_batch_merges_not_duplicates(client):
@@ -87,10 +87,10 @@ async def test_receive_same_batch_merges_not_duplicates(client):
     h = auth(await login(client, "9999900001"))
     pid = await _product(client, h, "BATCH-MERGE-1")
     body = {"product_id": pid, "batch_no": "LOT-X", "qty": 10, "expiry_date": "2041-05-05"}
-    r1 = await client.post("/api/v1/admin/stock/batches", json=body, headers=h)
+    r1 = await client.post("/api/v1/admin/stock/batches", json=body, headers=idem(h))
     assert r1.status_code == 200
     first_id = r1.json()["id"]
-    r2 = await client.post("/api/v1/admin/stock/batches", json={**body, "qty": 15}, headers=h)
+    r2 = await client.post("/api/v1/admin/stock/batches", json={**body, "qty": 15}, headers=idem(h))
     assert r2.status_code == 200
     # Same lot row reused, qty merged to 25; stock reflects the full 25.
     assert r2.json()["id"] == first_id

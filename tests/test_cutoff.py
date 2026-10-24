@@ -32,14 +32,18 @@ async def test_cutoff_generates_then_no_clobber(client):
     assert deliver.json()["status"] == "delivered"
 
     # Re-running cutoff must NOT clobber the delivered order.
+    # (Assert on THIS order, not global counts: other tests' subscriptions share the DB.)
     run2 = await client.post(
         f"/api/v1/admin/cutoff/run?date={DATE}", json={}, headers=auth(admin)
     )
-    assert run2.json()["orders_generated"] == 0
+    assert run2.status_code == 200
     after = (
         await client.get(f"/api/v1/delivery/orders?date={DATE}", headers=auth(delivery))
     ).json()
-    assert after[0]["status"] == "delivered"
+    mine = [o for o in after if o["shop_id"] == order["shop_id"]]
+    assert len(mine) == 1 and mine[0]["id"] == order["id"]
+    assert mine[0]["status"] == "delivered"
+    assert mine[0]["items"][0]["qty_delivered"] == item["qty_planned"]
 
 
 async def test_cutoff_emits_order_generated(client):

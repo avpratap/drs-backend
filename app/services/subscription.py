@@ -50,33 +50,20 @@ def _matches(item: SubscriptionItem, sub: Subscription, d: dt.date) -> bool:
     return True
 
 
-async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -> list[dict]:
+def plan_from(
+    sub: Subscription,
+    items: list[SubscriptionItem],
+    overrides: dict[int, SubscriptionOverride],
+    for_date: dt.date,
+) -> list[dict]:
+    """Pure plan computation over preloaded ACTIVE items + that date's overrides (by
+    item id). Shared by the per-sub API and the batched cutoff (no per-sub queries)."""
     if sub.status != "active":
         return []
     if sub.end_date and for_date > sub.end_date:
         return []
     if for_date < sub.start_date:
         return []
-
-    res = await db.execute(
-        select(SubscriptionItem).where(
-            SubscriptionItem.subscription_id == sub.id,
-            SubscriptionItem.active.is_(True),
-        )
-    )
-    items = res.scalars().all()
-    item_ids = [i.id for i in items]
-
-    overrides: dict[int, SubscriptionOverride] = {}
-    if item_ids:
-        res = await db.execute(
-            select(SubscriptionOverride).where(
-                SubscriptionOverride.subscription_item_id.in_(item_ids),
-                SubscriptionOverride.for_date == for_date,
-            )
-        )
-        overrides = {o.subscription_item_id: o for o in res.scalars().all()}
-
     # Aggregate by product_id so a product covered by >1 subscription item produces ONE
     # line (delivery/invoice key by product_id; duplicate lines would be mis-handled).
     by_product: dict[int, float] = {}
@@ -93,3 +80,41 @@ async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -
         if qty > 0:
             by_product[it.product_id] = by_product.get(it.product_id, 0.0) + qty
     return [{"product_id": pid, "qty": qty} for pid, qty in by_product.items()]
+
+
+async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -> list[dict]:
+    if sub.status != "active":
+        return []
+    res = await db.execute(
+        select(SubscriptionItem).where(
+            SubscriptionItem.subscription_id == sub.id,
+            SubscriptionItem.active.is_(True),
+        )
+    )
+    items = list(res.scalars().all())
+    item_ids = [i.id for i in items]
+    overrides: dict[int, SubscriptionOverride] = {}
+    if item_ids:
+        res = await db.execute(
+            select(SubscriptionOverride).where(
+                SubscriptionOverride.subscription_item_id.in_(item_ids),
+                SubscriptionOverride.for_date == for_date,
+            )
+        )
+        overrides = {o.subscription_item_id: o for o in res.scalars().all()}
+    return plan_from(sub, items, overrides, for_date)
+
+
+def assert_standing_change_allowed(user_role: str) -> None:
+    """Standing-order changes (items, pause/resume/cancel) are frozen from the cutoff
+    hour until midnight IST: tomorrow's order is fixed by then, so a change made in that
+    window would either be silently ignored (job already ran) or applied to the frozen
+    day. After midnight they apply from the next undelivered day. Admins may override."""
+    if user_role == "admin":
+        return
+    if dt.datetime.now(IST).hour >= settings.CUTOFF_HOUR:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Changes are frozen after the {settings.CUTOFF_HOUR}:00 cutoff until midnight "
+            "(tomorrow's order is fixed); try again after 00:00",
+        )

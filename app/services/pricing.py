@@ -79,6 +79,14 @@ class PriceBook:
 
 async def load_price_book(db: AsyncSession, today: dt.date | None = None) -> PriceBook:
     today = today or dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
-    prices = (await db.execute(select(ProductPrice))).scalars().all()
+    # Only rows valid on `today` (not the whole price history) are needed.
+    prices = (
+        await db.execute(
+            select(ProductPrice).where(
+                ProductPrice.valid_from <= today,
+                or_(ProductPrice.valid_to.is_(None), ProductPrice.valid_to >= today),
+            )
+        )
+    ).scalars().all()
     retail = await db.scalar(select(PriceTier.id).where(PriceTier.code == "RETAIL"))
     return PriceBook(today, list(prices), retail)

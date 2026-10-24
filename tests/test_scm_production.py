@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, idem, login
 
 
 async def _product(client, h, sku) -> int:
@@ -14,7 +14,7 @@ async def _seed_batch(client, h, pid, qty, batch_no):
     await client.post(
         "/api/v1/admin/stock/batches",
         json={"product_id": pid, "batch_no": batch_no, "qty": qty, "expiry_date": "2041-01-01"},
-        headers=h,
+        headers=idem(h),
     )
 
 

@@ -6,14 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.procurement import PurchaseOrder, PurchaseOrderItem
-from app.models.warehouse import Location
 from app.services import batches as batch_svc
-from app.services.inventory import default_location_id
+from app.services.inventory import require_location
 
 
 async def create_po(db: AsyncSession, supplier_id: int, location_id, items, expected_date, user_id):
-    if location_id is None:
-        location_id = await default_location_id(db)
+    location_id = await require_location(db, location_id)  # 404 / 409, not an FK 500
     po = PurchaseOrder(
         po_no=f"PENDING-{uuid4().hex[:20]}",
         supplier_id=supplier_id,
@@ -78,7 +76,9 @@ async def receive_po(db: AsyncSession, po: PurchaseOrder, lines, user_id) -> Pur
             )
         ).scalars().all()
     }
-    for ln in lines:
+    # Product-id order: stock-item locks taken in the same global order as every other
+    # path (request order could deadlock against a concurrent delivery/transfer).
+    for ln in sorted(lines, key=lambda x: x.product_id):
         item = po_items.get(ln.product_id)
         if item is None:
             raise HTTPException(
@@ -104,9 +104,6 @@ async def receive_po(db: AsyncSession, po: PurchaseOrder, lines, user_id) -> Pur
     return po
 
 
-async def resolve_location(db: AsyncSession, location_id: int | None) -> int | None:
-    if location_id is None:
-        return await default_location_id(db)
-    if await db.get(Location, location_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
-    return location_id
+async def resolve_location(db: AsyncSession, location_id: int | None) -> int:
+    # 409 when no location is configured at all (was None -> NOT NULL IntegrityError 500).
+    return await require_location(db, location_id)

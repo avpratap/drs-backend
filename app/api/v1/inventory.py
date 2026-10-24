@@ -1,12 +1,15 @@
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
+from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.batch import StockBatch
 from app.models.inventory import StockItem, StockMovement
@@ -27,6 +30,7 @@ class LocationIn(BaseModel):
     kind: str = Field(default="warehouse", pattern="^(plant|hub|cold_storage|vehicle|store|warehouse)$")
     state: str | None = Field(default=None, max_length=120)
     is_default: bool = False
+    driver_user_id: int | None = None  # vehicle locations: the driver carrying the stock
 
 
 class LocationOut(BaseModel):
@@ -36,6 +40,7 @@ class LocationOut(BaseModel):
     kind: str
     state: str | None = None
     is_default: bool
+    driver_user_id: int | None = None
     status: str
 
 
@@ -87,6 +92,13 @@ async def create_location(data: LocationIn, db: AsyncSession = Depends(get_db)):
         await db.execute(select(func.pg_advisory_xact_lock(0x10C0DEF)))
         for loc in (await db.execute(select(Location).where(Location.is_default))).scalars():
             loc.is_default = False
+    if data.driver_user_id is not None:
+        driver = await db.get(User, data.driver_user_id)
+        if data.kind != "vehicle" or driver is None or driver.role != "delivery":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "driver_user_id is only valid on a vehicle location, for a delivery user",
+            )
     loc = Location(**data.model_dump())
     db.add(loc)
     await db.commit()
@@ -174,31 +186,56 @@ async def list_reorder_suggestions(
     return out
 
 
-@router.post("/stock/adjust", response_model=StockItemOut, operation_id="adjust_stock")
+@router.post("/stock/adjust", response_model=StockItemOut, operation_id="adjust_stock", dependencies=[Depends(require_idempotency_key)])
 async def adjust(
     data: StockAdjustIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     if data.change == 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "change must be non-zero")
     await _require_product(db, data.product_id)
-    item = await inventory.adjust_stock(
-        db, data.product_id, data.change, data.reason,
-        location_id=data.location_id, note=data.note, created_by=user.id,
-    )
+    if data.change < 0:
+        # A downward correction must come out of the LOTS too (FEFO), or lot qty drifts
+        # from on-hand and FEFO later hands out phantom units; never below zero.
+        loc = await inventory.require_location(db, data.location_id)
+        try:
+            await batch_svc.consume_fefo(
+                db, data.product_id, -data.change, data.reason, location_id=loc,
+                ref_type="adjustment", note=data.note, created_by=user.id, strict=True,
+            )
+        except batch_svc.InsufficientStock as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Adjustment exceeds stock on hand ({exc.available})",
+            ) from None
+        item = await inventory._locked_item(db, data.product_id, loc)
+    else:
+        item = await inventory.adjust_stock(
+            db, data.product_id, data.change, data.reason,
+            location_id=data.location_id, note=data.note, created_by=user.id,
+        )
     await db.commit()
     await db.refresh(item)
     return item
 
 
-@router.post("/stock/wastage", response_model=StockItemOut, operation_id="record_wastage")
+@router.post("/stock/wastage", response_model=StockItemOut, operation_id="record_wastage", dependencies=[Depends(require_idempotency_key)])
 async def wastage(
     data: WastageIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     await _require_product(db, data.product_id)
-    item = await inventory.adjust_stock(
-        db, data.product_id, -data.qty, "wastage",
-        location_id=data.location_id, note=data.note, created_by=user.id,
-    )
+    loc = await inventory.require_location(db, data.location_id)
+    try:
+        # Wastage comes out of the lots FEFO (keeps lot qty == on-hand) and can never
+        # exceed what is actually on hand.
+        await batch_svc.consume_fefo(
+            db, data.product_id, data.qty, "wastage", location_id=loc,
+            ref_type="wastage", note=data.note, created_by=user.id, strict=True,
+        )
+    except batch_svc.InsufficientStock as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Wastage exceeds stock on hand ({exc.available})"
+        ) from None
+    item = await inventory._locked_item(db, data.product_id, loc)
     await db.commit()
     await db.refresh(item)
     return item
@@ -238,7 +275,7 @@ class BatchOut(BaseModel):
     status: str
 
 
-@router.post("/stock/batches", response_model=BatchOut, operation_id="receive_batch")
+@router.post("/stock/batches", response_model=BatchOut, operation_id="receive_batch", dependencies=[Depends(require_idempotency_key)])
 async def receive_batch(
     data: BatchIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
@@ -293,7 +330,8 @@ async def expire_batches(
 ):
     """Write off batches past their expiry date (as_of defaults to today)."""
     result = await batch_svc.expire_batches(
-        db, as_of or dt.datetime.now(dt.UTC).date(), created_by=user.id
+        # Default to the IST business date (consume_fefo's notion of "today"), not UTC.
+        db, as_of or dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date(), created_by=user.id
     )
     await db.commit()
     return result

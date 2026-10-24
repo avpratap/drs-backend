@@ -40,6 +40,8 @@ class CutoffResult(BaseModel):
     delivery_date: dt.date
     orders_generated: int
     skipped: str | None = None
+    orders_removed: int = 0  # stale generated orders dropped (skip/pause since a run)
+    failed: int = 0  # subscriptions that errored (run status "partial")
 
 
 class DeliverItem(BaseModel):

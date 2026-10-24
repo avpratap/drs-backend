@@ -78,6 +78,27 @@ async def _out(db: AsyncSession, rr: ReturnRequest) -> RMAOut:
     return out
 
 
+async def _outs(db: AsyncSession, rows: list[ReturnRequest]) -> list[RMAOut]:
+    """List views with ONE batched item query (was one query per return — N+1)."""
+    if not rows:
+        return []
+    by_rr: dict[int, list[RMAItemOut]] = {}
+    for it in (
+        await db.execute(
+            select(ReturnRequestItem).where(
+                ReturnRequestItem.return_request_id.in_([r.id for r in rows])
+            )
+        )
+    ).scalars():
+        by_rr.setdefault(it.return_request_id, []).append(RMAItemOut.model_validate(it))
+    outs = []
+    for rr in rows:
+        o = RMAOut.model_validate(rr)
+        o.items = by_rr.get(rr.id, [])
+        outs.append(o)
+    return outs
+
+
 async def _owned_or_404(db: AsyncSession, rr_id: int, user: User, *, lock: bool = False) -> ReturnRequest:
     q = select(ReturnRequest).where(ReturnRequest.id == rr_id)
     if lock:
@@ -126,7 +147,7 @@ async def list_my_returns(
             .offset(page.offset)
         )
     ).scalars().all()
-    return [await _out(db, rr) for rr in rows]
+    return await _outs(db, list(rows))
 
 
 @router.get("/returns/{rr_id}", response_model=RMAOut, operation_id="get_return")
@@ -156,7 +177,7 @@ async def admin_list_returns(
     if status_filter:
         q = q.where(ReturnRequest.status == status_filter)
     rows = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _out(db, rr) for rr in rows]
+    return await _outs(db, list(rows))
 
 
 async def _locked_admin(db: AsyncSession, rr_id: int) -> ReturnRequest:
