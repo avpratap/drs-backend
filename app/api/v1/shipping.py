@@ -15,7 +15,6 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
-from app.models.order import Order
 from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
 from app.models.user import User
@@ -108,19 +107,13 @@ async def serviceability(
 @router.post("/admin/shipments", response_model=ShipmentOut, operation_id="create_shipment",
              dependencies=[Depends(require_role("admin"))])
 async def create_shipment(data: ShipmentCreateIn, db: AsyncSession = Depends(get_db)):
-    # Lock the order so two concurrent creates can't both make a shipment for it.
-    order = (
-        await db.execute(select(Order).where(Order.id == data.order_id).with_for_update())
-    ).scalar_one_or_none()
-    if order is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    # The service manages its own locking/commits (draft -> courier call -> finalize) so
+    # no DB row lock is held across the courier HTTP call (S1).
     dest = {
         "name": data.name, "phone": data.phone, "address": data.address,
         "city": data.city, "state": data.state, "pincode": data.pincode,
     }
-    ship = await ship_svc.create_shipment(db, order, dest, data.weight_kg, data.cod)
-    await db.commit()
-    await db.refresh(ship)
+    ship = await ship_svc.create_shipment(db, data.order_id, dest, data.weight_kg, data.cod)
     return await _shipment_out(db, ship)
 
 

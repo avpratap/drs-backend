@@ -53,6 +53,11 @@ class Shipment(Base, TimestampMixin):
     to_pincode: Mapped[str] = mapped_column(String(10), nullable=False)
     gateway_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     gateway_shipment_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    # While a draft's courier create call is in flight, a concurrent/retried create must
+    # not fire a second courier order; past this instant (or NULL) the draft is resumable.
+    create_lease_until: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ShipmentTrackingEvent(Base):
