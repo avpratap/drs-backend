@@ -180,6 +180,19 @@ def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def driver_today(monkeypatch, date: str) -> None:
+    """Let a DRIVER close stops dated `date` (drivers can't deliver/fail future stops;
+    tests use far-future dates for isolation)."""
+    import datetime as _dt
+
+    import app.api.v1.delivery as api_delivery
+    import app.services.delivery as svc_delivery
+
+    day = _dt.date.fromisoformat(date)
+    monkeypatch.setattr(svc_delivery, "today_ist", lambda: day)
+    monkeypatch.setattr(api_delivery, "today_ist", lambda: day)
+
+
 def ik(headers: dict) -> dict:
     """Headers plus a fresh Idempotency-Key (required on money-moving admin writes)."""
     import uuid

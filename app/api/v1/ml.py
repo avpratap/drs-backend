@@ -104,6 +104,8 @@ async def optimize_route(
             .join(Shop, Shop.id == DeliveryOrder.shop_id)
             .where(
                 DeliveryOrder.delivery_date == date,
+                # Only stops still to be driven count toward (and get) a route.
+                DeliveryOrder.status.in_(("generated", "frozen")),
                 DeliveryOrder.shop_id.in_(
                     select(DeliveryAssignment.shop_id).where(
                         DeliveryAssignment.delivery_id == delivery_id,

@@ -16,6 +16,7 @@ import statistics
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
@@ -82,11 +83,11 @@ async def _variable_history(
     db: AsyncSession, since: dt.date
 ) -> dict[int, dict[dt.date, float]]:
     """One-time order quantities per product per day (the variable demand)."""
-    day = func.date(Order.created_at)
+    day = func.date(func.timezone(settings.TIMEZONE, Order.created_at))
     rows = await db.execute(
         select(day, OrderItem.product_id, func.sum(OrderItem.qty))
         .join(OrderItem, OrderItem.order_id == Order.id)
-        .where(Order.order_type == "one_time", func.date(Order.created_at) >= since)
+        .where(Order.order_type == "one_time", func.date(func.timezone(settings.TIMEZONE, Order.created_at)) >= since)
         .group_by(day, OrderItem.product_id)
     )
     hist: dict[int, dict[dt.date, float]] = {}

@@ -1,7 +1,7 @@
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +58,12 @@ class CompleteIn(BaseModel):
     output_batch_no: str = Field(min_length=1, max_length=64)
     mfg_date: dt.date | None = None
     expiry_date: dt.date | None = None
+
+    @model_validator(mode="after")
+    def _dates(self):
+        if self.mfg_date and self.expiry_date and self.expiry_date < self.mfg_date:
+            raise ValueError("expiry_date before mfg_date")  # same rule as receive_batch
+        return self
 
 
 class ProductionOut(BaseModel):

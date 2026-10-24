@@ -53,6 +53,9 @@ async def _owned_shop_or_404(user: User, db: AsyncSession, shop_id: int) -> Shop
     shop = await db.get(Shop, shop_id)
     if shop is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Shop not found")
+    if shop.status != "active":
+        # A deactivated shop must not get new standing orders (the cutoff skips it).
+        raise HTTPException(status.HTTP_409_CONFLICT, "Shop is not active")
     return shop
 
 
@@ -197,7 +200,9 @@ async def create_subscription(
         await db.refresh(sub)
     elif sub.status == "cancelled":
         # Re-subscribing to a shop whose subscription was cancelled reactivates it
-        # (rather than silently returning the stale 'cancelled' template).
+        # (rather than silently returning the stale 'cancelled' template) — under the
+        # same cutoff freeze as resume.
+        await sub_service.assert_standing_change_allowed(db, user.role)
         sub.status = "active"
         sub.start_date = sub_service.today_ist()
         await db.commit()
@@ -242,7 +247,7 @@ async def set_items(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Too many items (max 200)"
         )
     sub = await _mutable_sub_or_404(user, db, sub_id)
-    sub_service.assert_standing_change_allowed(user.role)
+    await sub_service.assert_standing_change_allowed(db, user.role)
     # Serialize concurrent edits of this standing order (two inserts of the same new
     # product would otherwise collide on uq_subscription_items_sub_product -> 409/500).
     await db.execute(select(Subscription.id).where(Subscription.id == sub.id).with_for_update())
@@ -384,7 +389,7 @@ async def _set_status(user, db, sub_id, new_status, allowed_from):
     sub = await _mutable_sub_or_404(user, db, sub_id)
     if sub.status == new_status:
         return sub
-    sub_service.assert_standing_change_allowed(user.role)
+    await sub_service.assert_standing_change_allowed(db, user.role)
     if sub.status not in allowed_from:
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Cannot {new_status} a {sub.status} subscription"

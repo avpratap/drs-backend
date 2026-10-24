@@ -8,7 +8,7 @@ import uuid
 
 import pytest
 import sqlalchemy as sa
-from conftest import auth, idem, login
+from conftest import auth, driver_today, idem, login
 
 from app.core.db import SessionLocal, engine
 
@@ -157,7 +157,7 @@ async def test_stock_writes_require_idempotency_key(client):
 
 
 # ---------- D6: a driver's delivery deducts from their vehicle ----------
-async def test_driver_delivery_deducts_vehicle_stock(client):
+async def test_driver_delivery_deducts_vehicle_stock(client, monkeypatch):
     ah = await _admin(client)
     driver = await login(client, "9999900003")
     did = (await _q("SELECT id FROM users WHERE phone='9999900003'"))[0][0]
@@ -165,6 +165,7 @@ async def test_driver_delivery_deducts_vehicle_stock(client):
     milk = (await _q("SELECT id FROM products WHERE sku='MILK-1L'"))[0][0]
     await _receive(client, ah, milk, 50, NEXT_MONTH, van)
     d = "2040-01-05"
+    driver_today(monkeypatch, d)
     await client.post(f"/api/v1/admin/cutoff/run?date={d}", json={}, headers=ah)
     orders = (await client.get(f"/api/v1/delivery/orders?date={d}", headers=auth(driver))).json()
     order = next(o for o in orders if o["status"] == "generated")

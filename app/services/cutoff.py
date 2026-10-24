@@ -19,7 +19,8 @@ import logging
 import secrets
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, select, true
+from sqlalchemy import BigInteger, any_, bindparam, delete, exists, func, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis import redis_client
@@ -54,20 +55,26 @@ class _Ctx:
     removed: int = 0  # stale generated orders dropped this run
 
 
+def _any(col, ids):
+    """`col = ANY(:array)` — ONE bind parameter however many ids (an expanding IN emits
+    one per id, and asyncpg refuses more than 32,767 at this scale)."""
+    return col == any_(bindparam(None, list(ids), type_=ARRAY(BigInteger)))
+
+
 async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]) -> _Ctx:
     # Built from the SAME subscription ids the run iterates (taken first), so a sub
     # activated between the two queries can't end up with no shop/tier in the context.
     rows = (
         await db.execute(
             select(Subscription.shop_id, Subscription.account_id).where(
-                Subscription.id.in_(sub_ids)
+                _any(Subscription.id, sub_ids)
             )
         )
     ).all() if sub_ids else []
     shop_ids = {r[0] for r in rows}
     account_ids = {r[1] for r in rows}
     shops = (
-        {s.id: s for s in (await db.execute(select(Shop).where(Shop.id.in_(shop_ids)))).scalars()}
+        {s.id: s for s in (await db.execute(select(Shop).where(_any(Shop.id, shop_ids)))).scalars()}
         if shop_ids
         else {}
     )
@@ -76,7 +83,7 @@ async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]
             a.id: a
             for a in (
                 await db.execute(
-                    select(CustomerAccount).where(CustomerAccount.id.in_(account_ids))
+                    select(CustomerAccount).where(_any(CustomerAccount.id, account_ids))
                 )
             ).scalars()
         }
@@ -85,7 +92,7 @@ async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]
     )
     owner_ids = {a.owner_user_id for a in accounts.values()}
     users = (
-        {u.id: u for u in (await db.execute(select(User).where(User.id.in_(owner_ids)))).scalars()}
+        {u.id: u for u in (await db.execute(select(User).where(_any(User.id, owner_ids)))).scalars()}
         if owner_ids
         else {}
     )
@@ -101,7 +108,7 @@ async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]
     if prepaid_ids:
         wrows = (
             await db.execute(
-                select(Wallet.account_id, Wallet.balance).where(Wallet.account_id.in_(prepaid_ids))
+                select(Wallet.account_id, Wallet.balance).where(_any(Wallet.account_id, prepaid_ids))
             )
         ).all()
         wallets = {aid: float(bal) for aid, bal in wrows}
@@ -112,7 +119,7 @@ async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]
             await db.execute(
                 select(DeliveryOrder.account_id, func.coalesce(func.sum(DeliveryOrder.total), 0))
                 .where(
-                    DeliveryOrder.account_id.in_(prepaid_ids),
+                    _any(DeliveryOrder.account_id, prepaid_ids),
                     DeliveryOrder.delivery_date != delivery_date,
                     DeliveryOrder.delivery_date >= today_ist(),
                     DeliveryOrder.status.in_(("generated", "frozen")),
@@ -125,6 +132,21 @@ async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]
     # Price AS OF the delivery date (not "now") so a price scheduled to take effect on the
     # delivery day is applied and an expiring price isn't used past its date.
     return _Ctx(shops, accounts, owners, wallets, await load_price_book(db, today=delivery_date))
+
+
+def _deliverable_sub():
+    """An active subscription whose shop is active and whose account owner is active:
+    a deactivated shop or a suspended/erased user must stop generating (and billing)
+    deliveries even though the subscription row itself is still 'active'."""
+    return (
+        (Subscription.status == "active")
+        & exists().where(Shop.id == Subscription.shop_id, Shop.status == "active")
+        & exists().where(
+            CustomerAccount.id == Subscription.account_id,
+            User.id == CustomerAccount.owner_user_id,
+            User.status == "active",
+        )
+    )
 
 
 async def _drop_if_stale(db: AsyncSession, order: DeliveryOrder | None) -> bool:
@@ -293,7 +315,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
         ids = (
             await db.execute(
                 select(Subscription.id)
-                .where(Subscription.status == "active")
+                .where(_deliverable_sub())
                 .order_by(Subscription.id)
             )
         ).scalars().all()
@@ -301,7 +323,6 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
 
         count = 0
         failed = 0
-        active_shops: set[int] = set()
         for start in range(0, len(ids), CHUNK):
             chunk_ids = ids[start : start + CHUNK]
             subs = (
@@ -341,7 +362,6 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
                 else {}
             )
             shop_ids = [s_.shop_id for s_ in subs]
-            active_shops.update(shop_ids)
             orders = {
                 o.shop_id: o
                 for o in (
@@ -381,7 +401,11 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
                     DeliveryOrder.delivery_date == delivery_date,
                     DeliveryOrder.origin == "subscription",
                     DeliveryOrder.status.in_(("generated", "frozen")),
-                    DeliveryOrder.shop_id.notin_(active_shops) if active_shops else true(),
+                    # Decided NOW (not from the run's starting snapshot): a sub resumed
+                    # mid-run keeps its valid earlier order. Also no N-param NOT IN.
+                    ~exists().where(
+                        Subscription.shop_id == DeliveryOrder.shop_id, _deliverable_sub()
+                    ),
                 )
                 .order_by(DeliveryOrder.id)
                 .with_for_update()

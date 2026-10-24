@@ -108,16 +108,35 @@ async def compute_plan(db: AsyncSession, sub: Subscription, for_date: dt.date) -
     return plan_from(sub, items, overrides, for_date)
 
 
-def assert_standing_change_allowed(user_role: str) -> None:
-    """Standing-order changes (items, pause/resume/cancel) are frozen from the cutoff
-    hour until midnight IST: tomorrow's order is fixed by then, so a change made in that
-    window would either be silently ignored (job already ran) or applied to the frozen
-    day. After midnight they apply from the next undelivered day. Admins may override."""
+async def assert_standing_change_allowed(db, user_role: str) -> None:
+    """Standing-order changes (items, pause/resume/cancel/re-subscribe) are frozen from the
+    cutoff hour until TOMORROW'S RUN HAS FINISHED: while it runs, a change could be read
+    half-way. Once tomorrow's order is frozen, a change applies from the next undelivered
+    day, so it's allowed again (the freeze used to last until midnight). Admins may
+    override."""
     if user_role == "admin":
         return
-    if dt.datetime.now(IST).hour >= settings.CUTOFF_HOUR:
+    now = dt.datetime.now(IST)
+    if now.hour < settings.CUTOFF_HOUR:
+        return
+    from sqlalchemy import select
+
+    from app.models.delivery import ScheduleRun
+
+    tomorrow = now.date() + dt.timedelta(days=1)
+    cutoff_at = now.replace(hour=settings.CUTOFF_HOUR, minute=0, second=0, microsecond=0)
+    # Tonight's run (started after the cutoff) has finished and frozen tomorrow.
+    done = await db.scalar(
+        select(ScheduleRun.id).where(
+            ScheduleRun.for_delivery_date == tomorrow,
+            ScheduleRun.status == "frozen",
+            ScheduleRun.started_at >= cutoff_at,
+            ScheduleRun.finished_at.is_not(None),
+        ).limit(1)
+    )
+    if done is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"Changes are frozen after the {settings.CUTOFF_HOUR}:00 cutoff until midnight "
-            "(tomorrow's order is fixed); try again after 00:00",
+            f"Changes are frozen after the {settings.CUTOFF_HOUR}:00 cutoff until tomorrow's "
+            "orders are fixed; try again shortly",
         )

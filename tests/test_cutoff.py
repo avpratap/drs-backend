@@ -1,4 +1,4 @@
-from conftest import auth, login
+from conftest import auth, driver_today, login
 
 DATE = "2030-06-01"  # far future: safely after any cutoff edit window
 
@@ -13,7 +13,8 @@ async def _corner_store_id() -> int:
         return (await conn.execute(sa.text("SELECT id FROM shops WHERE name='Corner Store'"))).scalar()
 
 
-async def test_cutoff_generates_then_no_clobber(client):
+async def test_cutoff_generates_then_no_clobber(client, monkeypatch):
+    driver_today(monkeypatch, DATE)
     admin = await login(client, "9999900001")
     delivery = await login(client, "9999900003")
 

@@ -8,6 +8,7 @@ ARQ cron times are UTC; adjust if CUTOFF_HOUR changes.
 """
 import datetime as dt
 import logging
+from zoneinfo import ZoneInfo
 
 from arq import Retry, cron
 from arq.connections import RedisSettings
@@ -23,8 +24,19 @@ from app.services.subscription import today_ist
 log = logging.getLogger("drs.worker")
 
 
+def _scheduled_day(ctx: dict) -> dt.date:
+    """The IST day this job was SCHEDULED for (arq's enqueue_time), not "now": a retry
+    that lands after midnight must still build the same delivery date, not skip a day."""
+    enq = ctx.get("enqueue_time")
+    if isinstance(enq, dt.datetime):
+        if enq.tzinfo is None:
+            enq = enq.replace(tzinfo=dt.UTC)
+        return enq.astimezone(ZoneInfo(settings.TIMEZONE)).date()
+    return today_ist()
+
+
 async def scheduled_cutoff(ctx: dict) -> dict:
-    delivery_date = today_ist() + dt.timedelta(days=1)
+    delivery_date = _scheduled_day(ctx) + dt.timedelta(days=1)
     try:
         async with SessionLocal() as db:
             result = await run_cutoff(db, delivery_date)

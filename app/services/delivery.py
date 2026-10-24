@@ -3,6 +3,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import media
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.inventory import StockMovement
@@ -10,7 +11,8 @@ from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.services import batches, inventory
 from app.services import notifications as notify
-from app.services.billing import bill_delivery
+from app.services.billing import bill_delivery, credit_entry, wallet_adjust
+from app.services.subscription import today_ist
 
 
 async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, data) -> None:
@@ -21,6 +23,15 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             status.HTTP_409_CONFLICT,
             f"Order is {order.status}; only generated/frozen orders can be delivered",
         )
+    if user.role != "admin" and order.delivery_date > today_ist():
+        # A future stop delivered (and billed) now would survive a later skip/cutoff.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This stop is scheduled for a later date"
+        )
+    if data.pod is not None:
+        for ref in (data.pod.photo_url, data.pod.signature_url):
+            if media.is_ref(ref) and user.role != "admin" and not media.ref_owned(ref, "pod", user.id):
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown POD upload")
     res = await db.execute(
         select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
     )
@@ -133,17 +144,6 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             )
         )
 
-    if data.cash_collected is not None:
-        db.add(
-            CashCollection(
-                delivery_order_id=order.id,
-                amount_collected=data.cash_collected,
-                method=data.cash_method or "cash",
-                reference=data.cash_reference,
-                collected_by=user.id,
-            )
-        )
-
     # Net chargeable = per-line (delivered - returned) value, floored at 0 per product
     # so a return can never reduce the charge for a *different* delivered product.
     # bill_delivery is idempotent per delivery_order, so a corrected re-submit never
@@ -172,6 +172,30 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     order.total = net
     order.amount_due = net
     await bill_delivery(db, order, net)
+    if data.cash_collected:
+        # Cash/UPI taken at the door PAYS this delivery: post it against the bill (else a
+        # COD customer was charged again on their wallet/credit) — and never more than
+        # what is due (a typo'd ₹1,000,000 on a ₹60 stop would inflate the books).
+        cash = round(float(data.cash_collected), 2)
+        if cash > net:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Cash collected ({cash}) exceeds the amount due ({net})",
+            )
+        cc = CashCollection(
+            delivery_order_id=order.id,
+            amount_collected=cash,
+            method=data.cash_method or "cash",
+            reference=data.cash_reference,
+            collected_by=user.id,
+        )
+        db.add(cc)
+        await db.flush()
+        account = await db.get(CustomerAccount, order.account_id)
+        if account is not None and account.billing_mode == "postpaid_credit":
+            await credit_entry(db, account.id, -cash, "payment", "cash_collection", cc.id)
+        else:
+            await wallet_adjust(db, order.account_id, cash, "cash_collection", "cash_collection", cc.id)
 
     # Decrement stock for what actually went out (delivered - returned), once per
     # delivery_order so a corrected re-submit never double-depletes inventory.
@@ -181,7 +205,9 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
         .where(StockMovement.ref_type == "delivery_order", StockMovement.ref_id == order.id)
     )
     if not already_stocked:
-        loc = await inventory.delivery_location_id(db, order.shop_id, user.id)
+        loc = await inventory.delivery_location_id(
+            db, order.shop_id, user.id, actor_is_admin=user.role == "admin"
+        )
         # returned_qty is validated above as <= qty_delivered per product, so out_qty
         # is always >= 0 — we only ever deplete what the customer kept; returned units
         # were never dispatched out of stock, so nothing is added back.

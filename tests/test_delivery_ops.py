@@ -1,13 +1,14 @@
 """Tier-4 #38 delivery-app APIs: location, route, summary, failed-delivery."""
-from conftest import auth, login
+from conftest import auth, driver_today, login
 
 
 async def _materialize(client, admin_h, date):
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=admin_h)
 
 
-async def test_location_route_summary_fail(client):
+async def test_location_route_summary_fail(client, monkeypatch):
     date = "2039-08-08"
+    driver_today(monkeypatch, date)
     admin = await login(client, "9999900001")
     ah = auth(admin)
     deliver = await login(client, "9999900003")

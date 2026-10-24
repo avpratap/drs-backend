@@ -1,4 +1,4 @@
-from conftest import auth, idem, login
+from conftest import auth, driver_today, idem, login
 
 
 async def _corner_store_id() -> int:
@@ -48,13 +48,14 @@ async def test_admin_wallet_adjust_signed(client):
     assert (await client.post(f"/api/v1/admin/accounts/{acct}/wallet/adjust", json={"amount": 0, "reason": "x"}, headers=idem(auth(admin)))).status_code == 422
 
 
-async def test_admin_credit_settlement_reduces_outstanding(client):
+async def test_admin_credit_settlement_reduces_outstanding(client, monkeypatch):
     """Deliver on a postpaid account to accrue credit, then settle part of it."""
     admin = await login(client, "9999900001")
     sub = await login(client, "9999900002")
     delivery = await login(client, "9999900003")
     acct = await _subscriber_account(client, auth(admin), auth(sub))
     date = "2036-04-04"
+    driver_today(monkeypatch, date)
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(delivery))).json()
     # The seeded Corner Store order specifically (the driver may be assigned other shops

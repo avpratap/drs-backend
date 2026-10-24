@@ -307,6 +307,8 @@ async def fail_delivery_order(
     ids = await allowed_shop_ids(user, db)
     if ids is not ALL and order.shop_id not in ids:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if user.role != "admin" and order.delivery_date > today_ist():
+        raise HTTPException(status.HTTP_409_CONFLICT, "This stop is scheduled for a later date")
     if order.status not in ("generated", "frozen"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Order is {order.status}; cannot mark failed"

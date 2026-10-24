@@ -106,6 +106,36 @@ async def create_location(data: LocationIn, db: AsyncSession = Depends(get_db)):
     return loc
 
 
+class LocationPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    status: str | None = Field(default=None, pattern="^(active|inactive)$")
+    # Bind (or with null, unbind) an existing vehicle to its driver.
+    driver_user_id: int | None = None
+
+
+@router.patch("/locations/{location_id}", response_model=LocationOut, operation_id="update_location")
+async def update_location(location_id: int, data: LocationPatch, db: AsyncSession = Depends(get_db)):
+    loc = await db.get(Location, location_id)
+    if loc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+    patch = data.model_dump(exclude_unset=True)
+    if patch.get("driver_user_id") is not None:
+        driver = await db.get(User, patch["driver_user_id"])
+        if loc.kind != "vehicle" or driver is None or driver.role != "delivery":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "driver_user_id is only valid on a vehicle location, for a delivery user",
+            )
+    for field in ("name", "status"):
+        if patch.get(field) is not None:
+            setattr(loc, field, patch[field])
+    if "driver_user_id" in patch:
+        loc.driver_user_id = patch["driver_user_id"]
+    await db.commit()
+    await db.refresh(loc)
+    return loc
+
+
 @router.get("/locations", response_model=list[LocationOut], operation_id="list_locations")
 async def list_locations(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
     return (
@@ -332,10 +362,12 @@ async def expire_batches(
     db: AsyncSession = Depends(get_db),
 ):
     """Write off batches past their expiry date (as_of defaults to today)."""
-    result = await batch_svc.expire_batches(
-        # Default to the IST business date (consume_fefo's notion of "today"), not UTC.
-        db, as_of or dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date(), created_by=user.id
-    )
+    # IST business date (consume_fefo's notion of "today"), not UTC.
+    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+    if as_of is not None and as_of > today:
+        # A future as_of would write off every still-good perishable batch in one call.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "as_of cannot be in the future")
+    result = await batch_svc.expire_batches(db, as_of or today, created_by=user.id)
     await db.commit()
     return result
 

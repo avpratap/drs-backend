@@ -9,7 +9,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -149,34 +149,6 @@ async def _expire_unswept(
 
 def _today() -> dt.date:
     return dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
-
-
-async def usable_qty(db: AsyncSession, product_id: int, location_id: int) -> float:
-    """On-hand minus lots already past expiry (not yet swept): what can really be used."""
-    from app.models.inventory import StockItem
-
-    on_hand = float(
-        await db.scalar(
-            select(StockItem.qty_on_hand).where(
-                StockItem.product_id == product_id, StockItem.location_id == location_id
-            )
-        )
-        or 0
-    )
-    expired = float(
-        await db.scalar(
-            select(func.coalesce(func.sum(StockBatch.qty), 0)).where(
-                StockBatch.product_id == product_id,
-                StockBatch.location_id == location_id,
-                StockBatch.status == "active",
-                StockBatch.expiry_date.is_not(None),
-                StockBatch.expiry_date < _today(),
-            )
-        )
-        or 0
-    )
-    return round(on_hand - expired, 3)
-
 
 async def consume_fefo(
     db: AsyncSession,
