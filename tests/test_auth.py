@@ -12,9 +12,13 @@ async def test_otp_login_returns_tokens(client):
 
 
 async def test_bad_otp_rejected(client):
-    await client.post("/api/v1/auth/otp/request", json={"phone": "9876543210"})
-    r = await client.post("/api/v1/auth/otp/verify", json={"phone": "9876543210", "otp": "000000"})
+    real = (await client.post("/api/v1/auth/otp/request", json={"phone": "9876543210"})).json()["dev_otp"]
+    wrong = f"{(int(real) + 1) % 10**6:06d}"  # guaranteed != the real OTP (a fixed guess wasn't)
+    r = await client.post("/api/v1/auth/otp/verify", json={"phone": "9876543210", "otp": wrong})
     assert r.status_code == 401
+    # The real code still works afterwards (a wrong guess only costs one attempt).
+    ok = await client.post("/api/v1/auth/otp/verify", json={"phone": "9876543210", "otp": real})
+    assert ok.status_code == 200
 
 
 async def test_role_from_db(client):

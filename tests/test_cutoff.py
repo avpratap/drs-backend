@@ -3,6 +3,16 @@ from conftest import auth, login
 DATE = "2030-06-01"  # far future: safely after any cutoff edit window
 
 
+
+async def _corner_store_id() -> int:
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    async with engine.connect() as conn:
+        return (await conn.execute(sa.text("SELECT id FROM shops WHERE name='Corner Store'"))).scalar()
+
+
 async def test_cutoff_generates_then_no_clobber(client):
     admin = await login(client, "9999900001")
     delivery = await login(client, "9999900003")
@@ -17,7 +27,10 @@ async def test_cutoff_generates_then_no_clobber(client):
         await client.get(f"/api/v1/delivery/orders?date={DATE}", headers=auth(delivery))
     ).json()
     assert orders, "delivery user should see the generated order"
-    order = orders[0]
+    # The seeded Corner Store order specifically (the driver may be assigned other shops
+    # by other tests, so orders[0] could be anyone's).
+    corner = await _corner_store_id()
+    order = next(o for o in orders if o["shop_id"] == corner)
     item = order["items"][0]
 
     deliver = await client.post(
@@ -50,12 +63,19 @@ async def test_cutoff_emits_order_generated(client):
     admin = await login(client, "9999900001")
     date = "2032-02-02"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
-    # The seeded subscription owner (subscriber) should get an order.generated notice.
+    # The seeded subscription owner (subscriber) should get an order.generated notice —
+    # filtered to THAT user (other tests' runs also emit order.generated).
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    async with engine.connect() as conn:
+        owner = (await conn.execute(sa.text("SELECT id FROM users WHERE phone='9999900002'"))).scalar()
     notes = (
-        await client.get("/api/v1/admin/notifications", headers=auth(admin))
+        await client.get(f"/api/v1/admin/notifications?user_id={owner}&limit=200", headers=auth(admin))
     ).json()
     gen = [n for n in notes if n["event_type"] == "order.generated"]
-    assert gen, "cutoff should emit order.generated"
+    assert gen, "cutoff should emit order.generated to the subscription owner"
     assert any(n["channel"] == "whatsapp" for n in gen)
 
 
@@ -81,3 +101,5 @@ async def test_concurrent_cutoff_runs_no_duplicate_orders(client):
     ).json()
     shop_ids = [o["shop_id"] for o in orders]
     assert len(shop_ids) == len(set(shop_ids)), "no duplicate delivery order per shop"
+    # Positive: the seeded shop's order exists (an empty list passed the check above).
+    assert await _corner_store_id() in shop_ids

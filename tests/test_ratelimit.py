@@ -1,4 +1,14 @@
+import pytest
+
+from app.core import ratelimit
 from app.core.ratelimit import allow
+
+
+@pytest.fixture(autouse=True)
+def _frozen_clock(monkeypatch):
+    # Freeze the window clock: calls straddling a minute boundary landed in two buckets
+    # and the "throttled" asserts flaked.
+    monkeypatch.setattr(ratelimit.time, "time", lambda: 1_700_000_000.0)
 
 
 async def test_fixed_window_trips_at_limit():

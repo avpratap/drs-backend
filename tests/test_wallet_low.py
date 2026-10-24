@@ -22,6 +22,7 @@ async def test_wallet_low_emitted_on_delivery(client):
         headers=h,
     )
 
+    bal_before = (await client.get("/api/v1/billing/me", headers=h)).json()["wallet_balance"]
     await client.post(f"/api/v1/admin/cutoff/run?date={DATE}", json={}, headers=h)
     orders = (await client.get(f"/api/v1/delivery/orders?date={DATE}", headers=h)).json()
     mine = next(o for o in orders if o["shop_id"] == shop_id)
@@ -39,8 +40,10 @@ async def test_wallet_low_emitted_on_delivery(client):
 
     # Wallet is now negative (prepaid, debited on delivery) -> below threshold.
     bal = (await client.get("/api/v1/billing/me", headers=h)).json()["wallet_balance"]
-    assert bal < 0
+    assert round(bal - bal_before, 2) == -135.0  # exactly 5 x ₹27 debited
+    assert bal < 100  # below WALLET_LOW_THRESHOLD
 
-    notes = (await client.get("/api/v1/admin/notifications", headers=h)).json()
+    me = (await client.get("/api/v1/auth/me", headers=h)).json()["id"]
+    notes = (await client.get(f"/api/v1/admin/notifications?user_id={me}", headers=h)).json()
     low = [n for n in notes if n["event_type"] == "wallet.low"]
-    assert low, "delivery dropping wallet below threshold should emit wallet.low"
+    assert low, "delivery dropping wallet below threshold should emit wallet.low to THIS owner"

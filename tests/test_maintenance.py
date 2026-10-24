@@ -42,6 +42,8 @@ async def test_wallet_ledger_is_append_only(client):
     )
     # The DB trigger must reject any UPDATE/DELETE on the ledger.
     async with SessionLocal() as db:
-        with pytest.raises(Exception):  # noqa: B017 — asyncpg raises on the trigger
+        from sqlalchemy.exc import DBAPIError
+
+        with pytest.raises(DBAPIError) as ei:  # the append-only trigger (migration 0018)
             await db.execute(text("UPDATE wallet_transactions SET amount = amount + 1"))
-            await db.commit()
+        assert "append-only" in str(ei.value)

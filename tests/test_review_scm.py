@@ -268,3 +268,26 @@ async def test_concurrent_receive_and_consume_no_deadlock(client):
     await asyncio.gather(*[f() for _ in range(5) for f in (recv, take)])
     assert await _on_hand(pid, loc) == 100.0
     assert await _active_lot_qty(pid, loc) == 100.0
+
+
+# ---------- ledger invariant: movements always sum to on-hand ----------
+async def test_movements_sum_to_on_hand_across_all_paths(client):
+    from app.services import batches
+
+    ah = await _admin(client)
+    pid = await _product(client, ah)
+    loc = await _loc(client, ah)
+    await _receive(client, ah, pid, 20, NEXT_MONTH, loc)
+    await _receive(client, ah, pid, 5, YESTERDAY, loc)  # will be written off on consume
+    async with SessionLocal() as db:
+        await batches.consume_fefo(db, pid, 3, "delivery", location_id=loc)
+        await db.commit()
+    await client.post("/api/v1/admin/stock/wastage", json={"product_id": pid, "qty": 2, "location_id": loc},
+                      headers=idem(ah))
+    await client.post("/api/v1/admin/stock/adjust", json={
+        "product_id": pid, "change": -1, "reason": "adjustment", "location_id": loc}, headers=idem(ah))
+    await client.post("/api/v1/admin/stock/adjust", json={
+        "product_id": pid, "change": 4, "reason": "receipt", "location_id": loc}, headers=idem(ah))
+    total = float((await _q("SELECT COALESCE(SUM(change),0) FROM stock_movements WHERE product_id=:p AND location_id=:l",
+                            p=pid, l=loc))[0][0])
+    assert total == await _on_hand(pid, loc) == 20 + 5 - 5 - 3 - 2 - 1 + 4

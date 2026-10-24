@@ -26,7 +26,7 @@ async def test_stock_receipt_wastage_and_movements(client):
     )
     assert r2.json()["qty_on_hand"] == 85.0
 
-    lst = await client.get("/api/v1/admin/stock", headers=h)
+    lst = await client.get(f"/api/v1/admin/stock?product_id={pid}", headers=h)
     assert any(s["product_id"] == pid and s["qty_on_hand"] == 85.0 for s in lst.json())
 
     moves = (await client.get(f"/api/v1/admin/stock/{pid}/movements", headers=h)).json()

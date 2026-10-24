@@ -10,7 +10,7 @@ async def _location(client, h, name) -> int:
 
 
 async def _stock_at(client, h, pid, loc) -> float:
-    rows = (await client.get(f"/api/v1/admin/stock?location_id={loc}", headers=h)).json()
+    rows = (await client.get(f"/api/v1/admin/stock?location_id={loc}&product_id={pid}", headers=h)).json()
     return next((s["qty_on_hand"] for s in rows if s["product_id"] == pid), 0.0)
 
 

@@ -76,7 +76,10 @@ async def test_price_tier_and_price_crud(client):
         headers=h,
     )
     assert price.status_code == 200
-    assert (await client.get("/api/v1/admin/product-prices?product_id=1", headers=h)).status_code == 200
+    listed = await client.get("/api/v1/admin/product-prices?product_id=1", headers=h)
+    assert listed.status_code == 200
+    assert any(p["price_tier_id"] == tid and float(p["unit_price"]) == 22.5 and float(p["min_qty"]) == 10
+               for p in listed.json())
     # bad validity window
     assert (await client.post("/api/v1/admin/product-prices", json={"product_id": 1, "price_tier_id": tid, "unit_price": 5, "valid_from": "2025-06-01", "valid_to": "2025-01-01"}, headers=h)).status_code == 422
 
@@ -90,6 +93,15 @@ async def test_tier_assignment_and_pricing_effect(client):
     await client.post("/api/v1/admin/product-prices", json={"product_id": 1, "price_tier_id": tid, "unit_price": 20, "min_qty": 1, "valid_from": "2025-01-01"}, headers=h)
     shop_id = (await client.post("/api/v1/shops", json={"name": "Tier Shop"}, headers=auth(sub))).json()["id"]
     assert (await client.post(f"/api/v1/admin/shops/{shop_id}/tier", json={"price_tier_id": tid}, headers=h)).status_code == 200
+    # The tier actually changes what the shop is charged: its standing order prices at 20.
+    sid = (await client.post("/api/v1/subscriptions", json={"shop_id": shop_id}, headers=auth(sub))).json()["id"]
+    await client.put(f"/api/v1/subscriptions/{sid}/items",
+                     json=[{"product_id": 1, "default_qty": 2, "frequency": "daily"}], headers=auth(sub))
+    date = "2036-09-09"
+    await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=h)
+    orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=h)).json()
+    mine = next(o for o in orders if o["shop_id"] == shop_id)
+    assert mine["items"][0]["unit_price"] == 20.0 and mine["total"] == 40.0
     # bad tier
     assert (await client.post(f"/api/v1/admin/shops/{shop_id}/tier", json={"price_tier_id": 999999}, headers=h)).status_code == 404
 

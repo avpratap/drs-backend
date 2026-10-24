@@ -53,12 +53,16 @@ async def test_admin_user_management(client):
 
     lst = await client.get("/api/v1/admin/users?role=delivery", headers=h)
     assert lst.status_code == 200
-    assert all(u["role"] == "delivery" for u in lst.json())
+    # Non-empty (the seeded driver) — all() over an empty list passed vacuously.
+    assert lst.json() and all(u["role"] == "delivery" for u in lst.json())
 
-    # Promote the customer (resolved id, never the admin) to subscriber, then restore.
-    patched = await client.patch(f"/api/v1/admin/users/{cid}", json={"role": "subscriber"}, headers=h)
-    assert patched.status_code == 200 and patched.json()["role"] == "subscriber"
-    await client.patch(f"/api/v1/admin/users/{cid}", json={"role": "customer"}, headers=h)
+    # Promote the customer (resolved id, never the admin) to subscriber, then ALWAYS
+    # restore (try/finally: a failed assert must not leave the shared customer re-roled).
+    try:
+        patched = await client.patch(f"/api/v1/admin/users/{cid}", json={"role": "subscriber"}, headers=h)
+        assert patched.status_code == 200 and patched.json()["role"] == "subscriber"
+    finally:
+        await client.patch(f"/api/v1/admin/users/{cid}", json={"role": "customer"}, headers=h)
 
     bad = await client.patch(f"/api/v1/admin/users/{cid}", json={"role": "wizard"}, headers=h)
     assert bad.status_code == 422
@@ -77,7 +81,11 @@ async def test_reports_summary(client):
         "shops",
         "delivered_orders",
     ):
-        assert key in body
+        assert isinstance(body[key], (int, float)), key
+    # Counts can't be negative (money aggregates can: prepaid wallets go below zero), and
+    # the seeded data guarantees at least these.
+    assert body["active_subscriptions"] >= 1 and body["shops"] >= 1
+    assert body["delivered_orders"] >= 0 and body["paid_order_revenue"] >= 0
 
 
 async def test_reports_requires_admin(client):

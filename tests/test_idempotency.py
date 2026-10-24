@@ -6,12 +6,22 @@ async def test_replay_returns_same_payment(client):
     headers = {**auth(token), "Idempotency-Key": "test-key-1"}
     body = {"purpose": "wallet_topup", "amount": 150}
 
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    async def n_payments():
+        async with engine.connect() as conn:
+            return (await conn.execute(sa.text("SELECT count(*) FROM payments"))).scalar()
+
+    before = await n_payments()
     r1 = await client.post("/api/v1/payments/create", json=body, headers=headers)
     assert r1.status_code == 200
     r2 = await client.post("/api/v1/payments/create", json=body, headers=headers)
     assert r2.status_code == 200
     assert r2.headers.get("Idempotent-Replay") == "true"
     assert r1.json()["payment_id"] == r2.json()["payment_id"]
+    assert await n_payments() == before + 1  # executed exactly once
 
 
 async def test_key_reuse_different_body_422(client):

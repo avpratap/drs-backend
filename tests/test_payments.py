@@ -2,9 +2,12 @@ from conftest import auth, login
 
 
 async def _wallet_balance(client, token) -> float:
+    # Ensure the (lazily created) account exists; then read the real field — the old
+    # .get(..., 0) fallback hid a missing account / renamed field as a 0 balance.
+    await client.get("/api/v1/loyalty", headers=auth(token))
     r = await client.get("/api/v1/billing/me", headers=auth(token))
-    d = r.json()
-    return float(d.get("wallet_balance", d.get("balance", 0)))
+    assert r.status_code == 200, r.text
+    return float(r.json()["wallet_balance"])
 
 
 async def test_double_verify_credits_once(client):
@@ -36,12 +39,23 @@ async def test_payment_idor_blocked(client):
         headers=auth(owner),
     )
     goid = create.json()["gateway_order_id"]
+    owner_before = await _wallet_balance(client, owner)
     r = await client.post(
         "/api/v1/payments/verify",
         json={"gateway_order_id": goid, "gateway_payment_id": "p", "signature": "dev"},
         headers=auth(attacker),
     )
     assert r.status_code == 404
+    # The attacker's attempt changed nothing: still open, no credit, and the real owner
+    # can still complete it.
+    assert await _wallet_balance(client, owner) == owner_before
+    ok = await client.post(
+        "/api/v1/payments/verify",
+        json={"gateway_order_id": goid, "gateway_payment_id": "p", "signature": "dev"},
+        headers=auth(owner),
+    )
+    assert ok.status_code == 200 and ok.json()["status"] == "success"
+    assert round(await _wallet_balance(client, owner) - owner_before, 2) == 50.0
 
 
 async def test_negative_amount_rejected(client):

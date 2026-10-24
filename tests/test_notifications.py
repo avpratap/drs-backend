@@ -54,12 +54,22 @@ async def test_consent_then_flush_delivers(client):
     # The whatsapp channel must be QUEUED (consent granted), not skipped.
     wa = next(c for c in created if c["channel"] == "whatsapp")
     assert wa["status"] == "queued", wa
-    await client.post("/api/v1/admin/notifications/flush", headers=auth(admin))
-    # That specific row reached 'sent' (not merely a global flush count > 0).
-    sent = (await client.get(
-        "/api/v1/admin/notifications?status_filter=sent", headers=auth(admin)
-    )).json()
-    assert any(n["id"] == wa["id"] for n in sent), "the consented marketing.promo must be sent"
+    # Drain until THIS row is processed: the outbox is FIFO and other tests may have left
+    # a backlog larger than one flush batch.
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    status = None
+    for _ in range(10):
+        await client.post("/api/v1/admin/notifications/flush?limit=500", headers=auth(admin))
+        async with engine.connect() as conn:
+            status = (await conn.execute(
+                sa.text("SELECT status FROM notifications WHERE id=:i"), {"i": wa["id"]}
+            )).scalar()
+        if status != "queued":
+            break
+    assert status == "sent", "the consented marketing.promo must be sent"
 
 
 async def test_marketing_optout_keeps_transactional_sms(client):

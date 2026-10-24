@@ -103,6 +103,9 @@ async def test_customer_self_cancel_unpaid_then_paid_blocked(client):
     assert (
         await client.post(f"/api/v1/orders/{oid2}/cancel", headers=auth(other))
     ).status_code == 404
+    # …and the attempt had no effect on the owner's order.
+    mine = (await client.get(f"/api/v1/orders/{oid2}", headers=auth(cust))).json()
+    assert mine["status"] == "created"
 
 
 # ---------- subscription cadence validation ----------
@@ -211,16 +214,28 @@ async def test_retail_prepaid_cutoff_skips_on_low_balance(client):
         )
     ).json()
     shop_id = sub["shop_id"]
-    await client.put(
+    put = await client.put(
         f"/api/v1/subscriptions/{sub['id']}/items",
         json=[{"product_id": milk, "default_qty": 2, "frequency": "daily"}],
         headers=auth(cust),
     )
+    assert put.status_code == 200, put.text  # else the "skip" below would pass vacuously
     date = "2035-03-03"
     await client.post(f"/api/v1/admin/cutoff/run?date={date}", json={}, headers=auth(admin))
     # Wallet is 0 < order total -> no delivery order should have been generated.
     orders = (await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(admin))).json()
     assert all(o["shop_id"] != shop_id for o in orders)
+    # Positive control: once the wallet covers it, the same subscription IS materialized.
+    pay = (await client.post("/api/v1/payments/create", json={"purpose": "wallet_topup", "amount": 100},
+                             headers=auth(cust))).json()
+    await client.post("/api/v1/payments/verify", json={
+        "gateway_order_id": pay["gateway_order_id"], "gateway_payment_id": "p", "signature": "dev"},
+        headers=auth(cust))
+    date2 = "2035-03-04"
+    await client.post(f"/api/v1/admin/cutoff/run?date={date2}", json={}, headers=auth(admin))
+    orders2 = (await client.get(f"/api/v1/delivery/orders?date={date2}", headers=auth(admin))).json()
+    mine = [o for o in orders2 if o["shop_id"] == shop_id]
+    assert len(mine) == 1 and mine[0]["total"] == 54.0
 
 
 # ========== Second-pass (12-agent) audit fixes ==========

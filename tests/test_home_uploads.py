@@ -25,7 +25,7 @@ async def test_upload_accepts_png_rejects_others(client):
 
 async def test_upload_requires_auth(client):
     r = await client.post("/api/v1/uploads", files={"file": ("a.png", b"\x89PNG", "image/png")})
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
 
 
 async def test_home_aggregate(client):

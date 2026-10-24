@@ -122,12 +122,15 @@ async def _require_product(db: AsyncSession, product_id: int) -> None:
 @router.get("/stock", response_model=list[StockItemOut], operation_id="list_stock")
 async def list_stock(
     location_id: int | None = None,
+    product_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    q = select(StockItem).order_by(StockItem.product_id)
+    q = select(StockItem).order_by(StockItem.product_id, StockItem.location_id)
     if location_id is not None:
         q = q.where(StockItem.location_id == location_id)
+    if product_id is not None:
+        q = q.where(StockItem.product_id == product_id)
     return (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
 
 

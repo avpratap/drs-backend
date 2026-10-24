@@ -1,6 +1,15 @@
 from conftest import auth, idem, login
 
 
+async def _corner_store_id() -> int:
+    import sqlalchemy as sa
+
+    from app.core.db import engine
+
+    async with engine.connect() as conn:
+        return (await conn.execute(sa.text("SELECT id FROM shops WHERE name='Corner Store'"))).scalar()
+
+
 async def _account(client, token):
     return (await client.get("/api/v1/billing/me", headers=auth(token))).json()
 
@@ -64,7 +73,10 @@ async def test_credit_billing_net_of_returns(client):
     orders = (
         await client.get(f"/api/v1/delivery/orders?date={date}", headers=auth(delivery))
     ).json()
-    order = orders[0]
+    # The seeded Corner Store order specifically (the driver may be assigned other shops
+    # by other tests, so orders[0] could be anyone's).
+    corner = await _corner_store_id()
+    order = next(o for o in orders if o["shop_id"] == corner)
     item = order["items"][0]
     unit = item["unit_price"]
 

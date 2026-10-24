@@ -34,4 +34,4 @@ async def test_logout_revokes_refresh(client):
 async def test_access_token_required(client):
     # No token -> 401/403 on a protected route.
     r = await client.get("/api/v1/auth/me")
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401

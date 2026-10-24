@@ -153,6 +153,11 @@ async def _redis_lifecycle():
     await redis_client.flushdb()
     yield
     await redis_client.aclose()
+    # The pool's asyncio.Lock binds to the loop that first CONTENDED it (any concurrent
+    # test); the next test's fresh loop then fails with "bound to a different event loop".
+    # Reset it so each test's loop gets an unbound lock (a test-harness artifact — prod
+    # runs one loop).
+    redis_client.connection_pool._lock = asyncio.Lock()
 
 
 @pytest_asyncio.fixture

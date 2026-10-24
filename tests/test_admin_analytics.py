@@ -23,17 +23,19 @@ async def test_analytics_overview_and_series(client):
     admin = await login(client, "9999900001")
     ah = auth(admin)
     cust = await login(client, "9876543210")
+    rev0 = (await client.get("/api/v1/admin/analytics/overview", headers=ah)).json()["paid_order_revenue"]
     pid = await _paid_order(client, auth(cust))
 
     ov = await client.get("/api/v1/admin/analytics/overview", headers=ah)
     assert ov.status_code == 200
     body = ov.json()
-    assert body["paid_order_revenue"] > 0 and body["orders"] >= 1
+    assert round(body["paid_order_revenue"] - rev0, 2) == 54.0  # exactly the 2 x ₹27 just paid
+    assert body["orders"] >= 1
     assert "low_stock_items" in body and "credit_outstanding" in body
 
     rev = await client.get("/api/v1/admin/analytics/revenue?days=30", headers=ah)
     assert rev.status_code == 200 and isinstance(rev.json(), list) and len(rev.json()) >= 1
-    assert rev.json()[0]["revenue"] >= 0
+    assert sum(r["revenue"] for r in rev.json()) >= 54.0
 
     top = await client.get("/api/v1/admin/analytics/top-products?limit=10&days=30", headers=ah)
     assert top.status_code == 200 and any(r["product_id"] == pid for r in top.json())

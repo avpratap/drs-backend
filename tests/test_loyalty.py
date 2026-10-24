@@ -53,10 +53,16 @@ async def test_gift_card_redeem(client):
     listing = (await client.get("/api/v1/loyalty/gift-cards", headers=cust)).json()
     assert any(c["code"] == code for c in listing)
 
+    async def wallet():
+        return float((await client.get("/api/v1/billing/me", headers=cust)).json()["wallet_balance"])
+
+    w0 = await wallet()
     r1 = await client.post("/api/v1/loyalty/gift-cards/redeem", json={"code": code, "amount": 200}, headers=cust)
     assert r1.status_code == 200 and r1.json()["balance"] == 300.0
+    assert round(await wallet() - w0, 2) == 200.0  # the value LANDS in the wallet (M4)
     r2 = await client.post("/api/v1/loyalty/gift-cards/redeem", json={"code": code, "amount": 300}, headers=cust)
     assert r2.status_code == 200 and r2.json()["balance"] == 0.0 and r2.json()["status"] == "redeemed"
+    assert round(await wallet() - w0, 2) == 500.0
     # Fully redeemed -> further redeem rejected.
     assert (await client.post("/api/v1/loyalty/gift-cards/redeem", json={"code": code, "amount": 1}, headers=cust)).status_code == 409
 

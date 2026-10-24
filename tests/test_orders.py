@@ -136,7 +136,9 @@ async def test_interstate_d2c_order_invoice_uses_igst(client):
     )
     inv = (await client.post(f"/api/v1/orders/{oid}/invoice", headers=ch)).json()
     assert inv["is_interstate"] is True
-    assert inv["igst"] > 0 and inv["cgst"] == 0.0 and inv["sgst"] == 0.0
+    # ₹500 GST-inclusive @12%: taxable 500/1.12 = 446.43, IGST = 53.57, total unchanged.
+    assert inv["total"] == 500.0 and inv["taxable_value"] == 446.43
+    assert inv["igst"] == 53.57 and inv["cgst"] == 0.0 and inv["sgst"] == 0.0
 
 
 async def test_duplicate_product_lines_merged(client):

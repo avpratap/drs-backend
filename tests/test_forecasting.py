@@ -23,24 +23,30 @@ def test_forecast_empty_is_zero():
 
 async def test_forecast_endpoint_combines_committed_and_variable(client):
     admin = await login(client, "9999900001")
-    cust = await login(client, "9876543210")
+    cust = await login(client, "9100000970")  # own customer: demand attributable to this test
 
-    # Generate some one-time (variable) demand for product 1 today.
+    async def p1():
+        body = (await client.get("/api/v1/admin/forecast", headers=auth(admin))).json()
+        return next((row for row in body["plan"] if row["product_id"] == 1), None)
+
+    before = await p1()
+    committed_before = before["committed_qty"] if before else 0.0
+    # Add a known standing order (7/day) on a fresh shop: committed must rise by exactly 7
+    # (absolute totals depend on every other test's subscriptions in the shared DB).
+    shop = (await client.post("/api/v1/shops", json={"name": "Forecast shop"}, headers=auth(admin))).json()["id"]
+    sid = (await client.post("/api/v1/subscriptions", json={"shop_id": shop}, headers=auth(admin))).json()["id"]
+    await client.put(f"/api/v1/subscriptions/{sid}/items",
+                     json=[{"product_id": 1, "default_qty": 7, "frequency": "daily"}], headers=auth(admin))
+    # And some one-time (variable) demand today.
     for qty in (3, 2):
         await client.post(
             "/api/v1/orders", json={"items": [{"product_id": 1, "qty": qty}]}, headers=auth(cust)
         )
-
-    r = await client.get("/api/v1/admin/forecast", headers=auth(admin))
-    assert r.status_code == 200
-    body = r.json()
-    assert body.get("plan")
-    p1 = next(row for row in body["plan"] if row["product_id"] == 1)
-    # Seeded daily subscription (qty 5) is the known committed base.
-    assert p1["committed_qty"] == 5.0
-    assert p1["forecast_variable_qty"] >= 0
-    assert p1["recommended_production"] >= p1["committed_qty"]
-    assert p1["method"] in ("ewma", "croston", "none")
+    after = await p1()
+    assert round(after["committed_qty"] - committed_before, 3) == 7.0
+    assert after["forecast_variable_qty"] > 0  # real demand was just recorded
+    assert after["recommended_production"] >= after["committed_qty"] + after["forecast_variable_qty"]
+    assert after["method"] in ("ewma", "croston")
 
 
 async def test_forecast_requires_admin(client):

@@ -107,8 +107,10 @@ async def test_concurrent_first_cart_touch_no_500(client):
         client.post("/api/v1/cart/items", json={"product_id": pid, "qty": 1}, headers=h),
         return_exceptions=True,
     )
-    codes = [r.status_code for r in results if not isinstance(r, Exception)]
-    assert all(c == 200 for c in codes), [getattr(r, "text", r) for r in results]
-    # Exactly one active cart exists afterward (the view reflects a single cart).
+    # Both requests must have SUCCEEDED (filtering exceptions out let an all-crash pass).
+    assert not any(isinstance(r, Exception) for r in results), results
+    assert all(r.status_code == 200 for r in results), [r.text for r in results]
+    # Exactly one active cart with ONE merged line of qty 2 (no duplicate lines).
     view = (await client.get("/api/v1/cart", headers=h)).json()
-    assert view["items"][0]["product_id"] == pid
+    assert len(view["items"]) == 1
+    assert view["items"][0]["product_id"] == pid and view["items"][0]["qty"] == 2.0
