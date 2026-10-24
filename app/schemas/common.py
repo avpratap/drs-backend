@@ -4,7 +4,7 @@ These exist so the OpenAPI spec is fully typed (drives Dart/Orval client codegen
 Each matches the exact keys the corresponding route already returns — no behaviour
 change, only an explicit contract.
 """
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class DetailOut(BaseModel):
@@ -44,3 +44,17 @@ class DataExportOut(BaseModel):
     consents: list[dict]
     support_tickets: list[dict] = []
     ratings: list[dict] = []
+
+
+def reject_nulls(*fields: str):
+    """PATCH: a field may be omitted, but an explicit null on a NOT NULL column reached the
+    DB (IntegrityError -> a misleading 409, or a TypeError 500 in a comparison). Reject it
+    as a clean 422 instead."""
+
+    def check(self):
+        bad = [f for f in fields if f in self.model_fields_set and getattr(self, f) is None]
+        if bad:
+            raise ValueError(f"{', '.join(bad)} cannot be null")
+        return self
+
+    return model_validator(mode="after")(check)

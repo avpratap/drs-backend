@@ -37,6 +37,7 @@ async def _get_or_create_account(db: AsyncSession, user: User) -> CustomerAccoun
     return account
 
 
+MAX_MONEY = 9_999_999_999.99  # Numeric(12,2) ceiling for line/order money columns
 MAX_LINE_QTY = 100_000  # same ceiling as OrderItemIn.qty, applied after merging
 # uom is free text: "Piece", "pcs", "packs", "pkt" are the same countable unit.
 _WHOLE_UNIT_ALIASES = {"piece", "pc", "pack", "pkt", "unit", "no", "nos", "box", "bottle", "jar"}
@@ -171,6 +172,9 @@ async def create_order(
             )
         line_total = round(unit_price * qty, 2)
         subtotal += line_total
+        if subtotal > MAX_MONEY:
+            # Numeric(12,2) tops out just under 1e10: a clean 422, not a DataError mid-order.
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Order value is too large")
         db.add(
             OrderItem(
                 order_id=order.id,

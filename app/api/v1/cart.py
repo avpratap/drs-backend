@@ -1,15 +1,17 @@
 """Shopping cart + checkout (customer-scoped, IDOR-safe)."""
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.orders import _detail as _order_detail
 from app.core.db import get_db
+from app.core.gst_states import validate_state
 from app.deps.auth import get_current_user
 from app.models.product import Product
 from app.models.user import User
 from app.schemas.order import OrderOut
+from app.schemas.profile import PINCODE_RE
 from app.services import cart as cart_svc
 from app.services import orders as order_service
 from app.services import shipping
@@ -35,8 +37,10 @@ class CheckoutIn(BaseModel):
     # Delivery state/pincode → the order's GST place of supply (was dropped at checkout,
     # so an interstate buyer was taxed CGST+SGST).
     state: str | None = Field(default=None, max_length=120)
-    pincode: str | None = Field(default=None, max_length=10)
+    pincode: str | None = Field(default=None, pattern=PINCODE_RE)
     coupon_code: str | None = Field(default=None, max_length=32)
+
+    _v_state = field_validator("state")(lambda v: validate_state(v))
 
 
 class CartLineOut(BaseModel):

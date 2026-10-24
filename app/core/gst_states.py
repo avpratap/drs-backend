@@ -79,3 +79,14 @@ def same_state(a: str | None, b: str | None) -> bool:
     if ca and cb:
         return ca == cb
     return _key(a or "") == _key(b or "")
+
+
+def validate_state(raw: str | None) -> str | None:
+    """Input validator for a delivery/billing state: must be a known Indian state/UT
+    (a typo like "Mars" silently made the supply inter-state -> IGST instead of
+    CGST+SGST). Returns the canonical name."""
+    if raw is None or not raw.strip():
+        return None
+    if state_code(raw) is None:
+        raise ValueError("unknown Indian state / union territory")
+    return canonical(raw)

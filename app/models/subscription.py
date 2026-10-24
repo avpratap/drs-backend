@@ -33,6 +33,9 @@ class SubscriptionItem(Base, TimestampMixin):
     """Per-product daily standing quantity + recurrence."""
 
     __tablename__ = "subscription_items"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "product_id", name="uq_subscription_items_sub_product"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     subscription_id: Mapped[int] = mapped_column(

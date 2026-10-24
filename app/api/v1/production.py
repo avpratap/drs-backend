@@ -28,7 +28,7 @@ class BomIn(BaseModel):
     product_id: int
     name: str = Field(min_length=1, max_length=120)
     output_qty: float = Field(default=1, gt=0, le=1_000_000, allow_inf_nan=False)
-    components: list[BomComponentIn] = Field(min_length=1)
+    components: list[BomComponentIn] = Field(min_length=1, max_length=200)
 
 
 class BomComponentOut(BaseModel):

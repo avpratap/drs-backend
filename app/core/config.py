@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     # Reverse proxies in front of the app that APPEND to X-Forwarded-For (Railway: 1).
     # 0 = use the socket peer and ignore the header (dev / direct exposure).
     TRUSTED_PROXY_HOPS: int = 0
+    # Bearer token the Prometheus scraper must send to /metrics ("" = open, dev only).
+    METRICS_TOKEN: str = ""
     JWT_SECRET: str = _DEV_JWT_SECRET
     JWT_ALG: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 15

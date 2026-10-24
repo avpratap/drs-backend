@@ -13,6 +13,7 @@ from app.models.product import Product
 from app.models.rating import Rating, ReviewHelpful
 from app.models.user import User
 from app.models.variant import ProductVariant
+from app.schemas.common import reject_nulls
 from app.schemas.product import ProductCreate, ProductOut, ProductUpdate
 from app.services import reviews as review_svc
 
@@ -371,7 +372,7 @@ class VariantIn(BaseModel):
     price: float = Field(default=0, ge=0, le=1_000_000, allow_inf_nan=False)
     mrp: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
     image_url: str | None = Field(default=None, max_length=512)
-    sort_order: int = 0
+    sort_order: int = Field(default=0, ge=-1_000_000, le=1_000_000)
 
 
 class VariantUpdate(BaseModel):
@@ -381,7 +382,9 @@ class VariantUpdate(BaseModel):
     mrp: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
     image_url: str | None = Field(default=None, max_length=512)
     status: str | None = Field(default=None, pattern="^(active|inactive)$")
-    sort_order: int | None = None
+    sort_order: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
+
+    _v_nulls = reject_nulls("label", "pack_size", "price", "status", "sort_order")
 
 
 class VariantOut(BaseModel):

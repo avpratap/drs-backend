@@ -33,6 +33,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Credit notes have their own serial series since this revision, so (fy, seq_no)
+    # overlaps with invoices once any credit note exists: fail with a clear message
+    # rather than a bare unique-violation half way through the downgrade.
+    op.execute(
+        """
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM invoices GROUP BY fy, seq_no HAVING count(*) > 1) THEN
+            RAISE EXCEPTION 'cannot downgrade 0048: invoice and credit-note serials overlap';
+          END IF;
+        END $$;
+        """
+    )
     op.drop_constraint("uq_invoice_fy_seq_type", "invoices", type_="unique")
     op.create_unique_constraint("uq_invoice_fy_seq", "invoices", ["fy", "seq_no"])
     op.drop_index("uq_invoice_order", table_name="invoices")

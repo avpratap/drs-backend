@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.common import reject_nulls
+
 PHONE_RE = r"^\+?[0-9]{10,15}$"
 PINCODE_RE = r"^[1-9][0-9]{5}$"  # Indian PIN: 6 digits, not starting 0
 GSTIN_RE = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
@@ -39,6 +41,8 @@ class ProfileUpdate(BaseModel):
         if v is not None and not (dt.date(1900, 1, 1) <= v <= dt.date(2100, 1, 1)):
             raise ValueError("invalid date_of_birth")
         return v
+
+    _v_nulls = reject_nulls("locale", "notify_whatsapp", "notify_sms", "notify_push", "notify_email")
 
 
 class ProfileOut(BaseModel):
@@ -96,6 +100,8 @@ class AddressUpdate(BaseModel):
     lat: float | None = Field(default=None, ge=-90, le=90)
     lng: float | None = Field(default=None, ge=-180, le=180)
     is_default: bool | None = None
+
+    _v_nulls = reject_nulls("line1", "city", "state", "pincode", "country", "is_default")
 
 
 class AddressOut(BaseModel):

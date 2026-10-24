@@ -141,7 +141,23 @@ async def list_shipments(
     if order_id is not None:
         q = q.where(Shipment.order_id == order_id)
     ships = (await db.execute(q.limit(page.limit).offset(page.offset))).scalars().all()
-    return [await _shipment_out(db, s) for s in ships]
+    # ONE batched events query for the page (was one query per shipment — N+1).
+    by_ship: dict[int, list[TrackingEventOut]] = {}
+    if ships:
+        for e in (
+            await db.execute(
+                select(ShipmentTrackingEvent)
+                .where(ShipmentTrackingEvent.shipment_id.in_([s_.id for s_ in ships]))
+                .order_by(ShipmentTrackingEvent.shipment_id, ShipmentTrackingEvent.id)
+            )
+        ).scalars():
+            by_ship.setdefault(e.shipment_id, []).append(TrackingEventOut.model_validate(e))
+    outs = []
+    for s_ in ships:
+        out = ShipmentOut.model_validate(s_)
+        out.events = by_ship.get(s_.id, [])
+        outs.append(out)
+    return outs
 
 
 @router.get("/shipments/{shipment_id}", response_model=ShipmentOut, operation_id="get_shipment")
@@ -182,6 +198,7 @@ async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db))
     raw_status = payload.get("current_status") or payload.get("shipment_status")
     if not awb or not raw_status:
         return {"status": "ignored"}
+    raw_status = str(raw_status)
 
     ship = (
         await db.execute(select(Shipment).where(Shipment.awb == awb).with_for_update())
@@ -195,8 +212,11 @@ async def shipping_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     # Dedupe replays of the SAME event (incl. unmapped statuses, which don't change
     # ship.status) so a re-POST doesn't append a duplicate tracking row.
+    # External input: coerce to text (a number/object here used to TypeError on [:120]).
     loc = payload.get("location")
     act = payload.get("activity")
+    loc = str(loc) if loc is not None and not isinstance(loc, str) else loc
+    act = str(act) if act is not None and not isinstance(act, str) else act
     event_status = mapped or str(raw_status)[:32]
     last = await db.scalar(
         select(ShipmentTrackingEvent)

@@ -19,6 +19,7 @@ from app.models.admin_tools import (
     OutboundWebhookDelivery,
 )
 from app.models.product import Product
+from app.schemas.common import reject_nulls
 from app.services import admin_tools as svc
 
 router = APIRouter(prefix="/admin", tags=["admin-tools"], dependencies=[Depends(require_role("admin"))])
@@ -73,6 +74,8 @@ class WebhookPatch(BaseModel):
     secret: str | None = Field(default=None, max_length=128)
     active: bool | None = None
 
+    _v_nulls = reject_nulls("event_type", "url", "active")
+
 
 class WebhookDeliveryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -116,7 +119,7 @@ async def export_csv(
 ):
     if kind not in _EXPORT_KINDS:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown export")
-    data = await svc.export_csv(db, kind)
+    data, truncated = await svc.export_csv(db, kind)
     await svc.record_audit(
         db, user.id, "export", kind, None,
         ip=client_ip(request),
@@ -125,7 +128,10 @@ async def export_csv(
     return Response(
         content=data,
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{kind}.csv"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{kind}.csv"',
+            "X-Export-Truncated": "true" if truncated else "false",
+        },
     )
 
 
@@ -252,7 +258,9 @@ async def test_outbound_webhook(hook_id: int, db: AsyncSession = Depends(get_db)
         webhook_id=hook.id, event_type=hook.event_type, payload=payload, status="pending"
     )
     db.add(delivery)
-    await db.flush()
+    # Commit the pending row first: the HTTP call (up to 10s) then runs with no
+    # transaction open, then the outcome is recorded.
+    await db.commit()
     await svc._attempt_delivery(hook, delivery, payload)
     await db.commit()
     await db.refresh(delivery)

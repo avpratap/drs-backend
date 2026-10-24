@@ -48,13 +48,13 @@ async def active_banners(db: AsyncSession) -> list[Banner]:
 
 
 SITEMAP_MAX_URLS = 50_000  # the sitemap protocol's per-file limit
-_SITEMAP_CACHE_KEY = "sitemap:v1"
+SITEMAP_CACHE_KEY = "sitemap:v1"
 
 
 async def build_sitemap(db: AsyncSession) -> list[dict]:
     """Public + unauthenticated: select only slug/dates (never the up-to-100 KB bodies),
     cap the rows, and cache the result briefly so repeated hits don't hammer the DB."""
-    cached = await cache_get_json(_SITEMAP_CACHE_KEY)
+    cached = await cache_get_json(SITEMAP_CACHE_KEY)
     if cached is not None:
         return cached
     entries: list[dict] = [{"loc": f"{SITE_BASE_URL}{r}", "lastmod": None} for r in _STATIC_ROUTES]
@@ -74,5 +74,5 @@ async def build_sitemap(db: AsyncSession) -> list[dict]:
                 "lastmod": lastmod.date().isoformat() if lastmod else None,
             })
     entries = entries[:SITEMAP_MAX_URLS]
-    await cache_set_json(_SITEMAP_CACHE_KEY, entries, ttl=300)
+    await cache_set_json(SITEMAP_CACHE_KEY, entries, ttl=300)
     return entries

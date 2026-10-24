@@ -1,6 +1,10 @@
 import datetime as dt
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.gst_states import validate_state
+from app.schemas.common import reject_nulls
+from app.schemas.profile import PINCODE_RE
 
 
 class DeliveryAssignmentIn(BaseModel):
@@ -54,12 +58,16 @@ class PriceTierPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     tier_type: str | None = Field(default=None, pattern="^(retail|b2b)$")
 
+    _v_nulls = reject_nulls("name", "tier_type")
+
 
 class ProductPricePatch(BaseModel):
     unit_price: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     min_qty: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
+
+    _v_nulls = reject_nulls("unit_price", "min_qty", "valid_from")
 
 
 class CouponPatch(BaseModel):
@@ -69,9 +77,11 @@ class CouponPatch(BaseModel):
     max_discount: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
-    usage_limit: int | None = Field(default=None, ge=1)
-    per_user_limit: int | None = Field(default=None, ge=1)
+    usage_limit: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    per_user_limit: int | None = Field(default=None, ge=1, le=1_000_000)
     active: bool | None = None
+
+    _v_nulls = reject_nulls("value", "min_order_value", "active")
 
 
 class TierAssignIn(BaseModel):
@@ -92,6 +102,8 @@ class UserPatch(BaseModel):
     role: str | None = Field(default=None, pattern="^(admin|customer|subscriber|delivery)$")
     status: str | None = Field(default=None, pattern="^(active|suspended)$")
 
+    _v_nulls = reject_nulls("role", "status")
+
 
 class CouponIn(BaseModel):
     code: str = Field(min_length=3, max_length=32)
@@ -101,8 +113,8 @@ class CouponIn(BaseModel):
     max_discount: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     valid_from: dt.date | None = None
     valid_to: dt.date | None = None
-    usage_limit: int | None = Field(default=None, ge=1)
-    per_user_limit: int | None = Field(default=None, ge=1)
+    usage_limit: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    per_user_limit: int | None = Field(default=None, ge=1, le=1_000_000)
 
 
 class CouponOut(BaseModel):
@@ -141,7 +153,10 @@ class AccountBillingOut(BaseModel):
 
 class ShopPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    address: str | None = None
+    address: str | None = Field(default=None, max_length=1024)
     state: str | None = Field(default=None, max_length=120)
-    pincode: str | None = Field(default=None, max_length=10)
+    pincode: str | None = Field(default=None, pattern=PINCODE_RE)
     status: str | None = Field(default=None, pattern="^(active|inactive)$")
+
+    _v_nulls = reject_nulls("name", "status")
+    _v_state = field_validator("state")(lambda v: validate_state(v))

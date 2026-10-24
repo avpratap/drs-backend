@@ -91,6 +91,16 @@ def init_sentry() -> None:
         log.warning("Sentry not initialised: %s", exc)
 
 
+def _is_body_too_large(exc: BaseException) -> bool:
+    from app.core.bodylimit import _BodyTooLarge
+
+    if isinstance(exc, _BodyTooLarge):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return exc.subgroup(_BodyTooLarge) is not None
+    return False
+
+
 class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         global _latency_sum_ms, _latency_count
@@ -98,7 +108,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         try:
             response = await call_next(request)
-        except Exception:
+        except Exception as exc:
+            if _is_body_too_large(exc):
+                # A client-side oversize body (answered 413 by BodySizeLimitMiddleware),
+                # not a server error: don't page anyone or count it as a 500.
+                _req_total[(request.method, 413)] += 1
+                raise
             _req_total[(request.method, 500)] += 1
             log.exception(
                 "unhandled error",

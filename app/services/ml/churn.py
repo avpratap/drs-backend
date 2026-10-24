@@ -23,6 +23,9 @@ from app.models.payment import Payment
 from app.models.shop import CustomerAccount
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 
+_RELEASE_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
+)
 _MODEL_PATH = os.environ.get("CHURN_MODEL_PATH", "models/churn_lgbm.txt")
 # Heuristic weights (documented): higher recency/failures/skips => higher churn risk.
 _W = {
@@ -153,11 +156,13 @@ async def score_all(db: AsyncSession) -> dict:
     a whole chunk; accounts are processed in id order so row locks are taken in one order."""
     counts = {"low": 0, "medium": 0, "high": 0, "scored": 0}
     token = secrets.token_hex(8)
+    redis_ok = True
     try:
+        # SET NX returns None (not False) when the key exists.
         got = await redis_client.set(_LOCK_KEY, token, nx=True, ex=3600)
     except Exception:
-        got = None  # Redis down: proceed (the upsert keeps it correct)
-    if got is False:
+        got, redis_ok = None, False  # Redis down: proceed (the upsert keeps it correct)
+    if redis_ok and not got:
         return counts  # another run is in progress
     try:
         account_ids = (
@@ -189,7 +194,7 @@ async def score_all(db: AsyncSession) -> dict:
     finally:
         if got:
             try:
-                if await redis_client.get(_LOCK_KEY) == token:
-                    await redis_client.delete(_LOCK_KEY)
+                # Atomic compare-and-delete: never release a lock another run re-took.
+                await redis_client.eval(_RELEASE_LUA, 1, _LOCK_KEY, token)
             except Exception:
                 pass

@@ -52,15 +52,16 @@ class SupplierOut(BaseModel):
 
 class POItemIn(BaseModel):
     product_id: int
-    qty: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
-    unit_cost: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    # qty x unit_cost must fit the Numeric(12,2) line/total columns (< 1e10).
+    qty: float = Field(gt=0, le=100_000, allow_inf_nan=False)
+    unit_cost: float = Field(ge=0, le=50_000, allow_inf_nan=False)
 
 
 class POIn(BaseModel):
     supplier_id: int
     location_id: int | None = None
     expected_date: dt.date | None = None
-    items: list[POItemIn] = Field(min_length=1)
+    items: list[POItemIn] = Field(min_length=1, max_length=200)
 
 
 class POItemOut(BaseModel):
@@ -94,7 +95,7 @@ class GRNLineIn(BaseModel):
 
 
 class GRNIn(BaseModel):
-    lines: list[GRNLineIn] = Field(min_length=1)
+    lines: list[GRNLineIn] = Field(min_length=1, max_length=200)
 
 
 async def _po_out(db: AsyncSession, po: PurchaseOrder) -> POOut:

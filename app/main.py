@@ -1,3 +1,4 @@
+import logging
 import math
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -13,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
 from app.core.bodylimit import BodySizeLimitMiddleware
+from app.core.clientip import ProxySchemeMiddleware
 from app.core.config import settings
 from app.core.db import engine
 from app.core.idempotency import IdempotencyMiddleware
@@ -74,6 +76,16 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+app.add_middleware(ProxySchemeMiddleware)  # https scheme behind the trusted proxy
+
+if settings.ENV == "prod" and settings.TRUSTED_PROXY_HOPS == 0:
+    # Behind a proxy this makes every request appear to come from the proxy's IP: ONE
+    # shared rate-limit / OTP-per-IP bucket for all users.
+    logging.getLogger("drs").warning(
+        "TRUSTED_PROXY_HOPS=0 in prod: client IPs come from the socket peer. Set it to the "
+        "number of proxies in front of the app (Railway: 1)."
+    )
+
 # Registered LAST so it is the OUTERMOST middleware — error responses produced by the
 # inner middleware (429 rate-limit, 413 body-size, 409/422 idempotency) then still carry
 # Access-Control-* headers so a browser on an allowed origin can read them.
@@ -111,6 +123,9 @@ def _error_code(status_code: int) -> str:
         return "error"
 
 
+_log = logging.getLogger("drs.errors")
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
@@ -134,7 +149,9 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 async def integrity_exception_handler(request: Request, exc: IntegrityError):
     # Safety net: a constraint violation (duplicate / dangling FK / CHECK) is a client
     # conflict, not a server crash. Specific paths still validate up front; this stops
-    # any missed one from surfacing as an opaque 500. The DB message is not echoed.
+    # any missed one from surfacing as an opaque 500. The DB message is not echoed, but
+    # it IS logged: a code bug (FK/NOT NULL) must stay visible, not vanish into a 409.
+    _log.warning("IntegrityError on %s %s", request.method, request.url.path, exc_info=exc)
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content={"detail": "Request conflicts with existing data", "error_code": "conflict"},
@@ -144,6 +161,7 @@ async def integrity_exception_handler(request: Request, exc: IntegrityError):
 @app.exception_handler(DataError)
 async def data_exception_handler(request: Request, exc: DataError):
     # Value out of range for its column (too long / numeric overflow): invalid input.
+    _log.warning("DataError on %s %s", request.method, request.url.path, exc_info=exc)
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": "A value is out of range or too long", "error_code": "unprocessable_entity"},
@@ -152,10 +170,15 @@ async def data_exception_handler(request: Request, exc: DataError):
 
 @app.exception_handler(ValidationError)
 async def pydantic_validation_handler(request: Request, exc: ValidationError):
-    # A schema built inside a handler (not request parsing) failed validation.
+    # A schema built inside a handler (not request parsing) failed validation. Never echo
+    # the input (it may be server-built data: gateway/AI payloads); log it for debugging.
+    _log.warning("ValidationError on %s %s", request.method, request.url.path, exc_info=exc)
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": _sanitize(exc.errors()), "error_code": "unprocessable_entity"},
+        content={
+            "detail": _sanitize(exc.errors(include_input=False, include_url=False)),
+            "error_code": "unprocessable_entity",
+        },
     )
 
 
@@ -167,7 +190,17 @@ app.include_router(api_router)  # /api/v1/...
 
 
 @app.get("/metrics", include_in_schema=False)
-async def metrics():
+async def metrics(request: Request):
+    # Request counts/latencies per route are operational intel: when METRICS_TOKEN is
+    # set, the scraper must present it (Authorization: Bearer <token>).
+    if settings.METRICS_TOKEN:
+        import hmac
+
+        got = request.headers.get("authorization", "")
+        if not hmac.compare_digest(got, f"Bearer {settings.METRICS_TOKEN}"):
+            from fastapi import HTTPException
+
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
     return metrics_response()
 
 
@@ -199,4 +232,5 @@ if not _storage_enabled():
 
 @app.get("/", include_in_schema=False)
 async def root():
-    return {"app": "DRS API", "env": settings.ENV, "docs": "/docs"}
+    # No environment disclosure; docs are only served outside prod.
+    return {"app": "DRS API", "docs": "/docs" if settings.ENV != "prod" else None}

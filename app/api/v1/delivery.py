@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import media
 from app.core.db import get_db
 from app.core.ratelimit_quota import upload_quota_ok
+from app.core.redis import redis_client
 from app.core.storage import put_private_object
 from app.core.uploads import precheck_upload_size, read_validated_image, strip_metadata
 from app.deps.auth import get_current_user
@@ -24,6 +25,7 @@ from app.services import delivery as delivery_service
 from app.services.subscription import today_ist
 
 router = APIRouter(prefix="/delivery", tags=["delivery"])
+_PING_EVERY_S = 5
 
 
 class UploadOut(BaseModel):
@@ -215,8 +217,15 @@ async def post_driver_location(
 ):
     """Driver GPS ping (append-only; latest row is the driver's current position)."""
     _require_delivery(user)
-    db.add(DriverLocation(driver_id=user.id, lat=data.lat, lng=data.lng))
-    await db.commit()
+    # At most one stored ping per driver per few seconds: a misbehaving app (or script)
+    # can't grow the table without bound. Extra pings are acknowledged and dropped.
+    try:
+        fresh = await redis_client.set(f"drvloc:{user.id}", 1, nx=True, ex=_PING_EVERY_S)
+    except Exception:
+        fresh = True
+    if fresh:
+        db.add(DriverLocation(driver_id=user.id, lat=data.lat, lng=data.lng))
+        await db.commit()
     return {"ok": True}
 
 

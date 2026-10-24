@@ -14,6 +14,18 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def include_object(obj, name, type_, reflected, compare_to):
+    """Autogenerate guard: many integrity backstops (partial unique indexes, functional
+    indexes, CHECKs added in raw SQL) exist only in migrations, not in the models. Never
+    propose DROPPING an index/constraint that is in the DB but not modelled — that would
+    silently remove a race-safety backstop. New ones in the models are still detected."""
+    if reflected and compare_to is None and type_ in (
+        "index", "unique_constraint", "foreign_key_constraint", "check_constraint"
+    ):
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=settings.DATABASE_URL,
@@ -21,13 +33,17 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection, target_metadata=target_metadata, compare_type=True,
+        include_object=include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

@@ -70,24 +70,19 @@ def upgrade() -> None:
     )
     op.create_unique_constraint("uq_cart_items_cart_product", "cart_items", ["cart_id", "product_id"])
 
-    # subscription_items: keep the newest row per (subscription, product), drop the rest
-    # (their one-day overrides first — FK — those duplicates were never reachable by the
-    # override endpoint anyway, which 500'd on MultipleResultsFound).
-    op.execute(
-        """
-        DELETE FROM subscription_overrides o USING subscription_items s, subscription_items k
-        WHERE o.subscription_item_id = s.id
-          AND s.subscription_id = k.subscription_id AND s.product_id = k.product_id
-          AND s.id < k.id
-        """
-    )
-    op.execute(
-        """
-        DELETE FROM subscription_items s USING subscription_items k
-        WHERE s.subscription_id = k.subscription_id AND s.product_id = k.product_id
-          AND s.id < k.id
-        """
-    )
+    # subscription_items: keep ONE row per (subscription, product) — the ACTIVE line the
+    # customer is actually receiving (newest if several), never an inactive duplicate —
+    # and drop the rest (their one-day overrides first — FK).
+    ranked = """
+        SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY subscription_id, product_id ORDER BY active DESC, id DESC
+            ) AS rn
+            FROM subscription_items
+        ) r WHERE rn > 1
+    """
+    op.execute(f"DELETE FROM subscription_overrides WHERE subscription_item_id IN ({ranked})")
+    op.execute(f"DELETE FROM subscription_items WHERE id IN ({ranked})")
     op.create_unique_constraint(
         "uq_subscription_items_sub_product", "subscription_items", ["subscription_id", "product_id"]
     )
@@ -107,7 +102,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint("ck_payments_amount_pos", "payments", type_="check")
-    op.create_check_constraint("ck_payments_amount_pos", "payments", "amount > 0")
+    # NOT VALID: existing no-gateway ₹0 settlements would otherwise make the downgrade
+    # fail; the old rule still applies to every new row.
+    op.execute("ALTER TABLE payments ADD CONSTRAINT ck_payments_amount_pos CHECK (amount > 0) NOT VALID")
     op.drop_index("uq_shops_one_home_per_account", table_name="shops")
     op.drop_constraint("uq_subscription_items_sub_product", "subscription_items", type_="unique")
     op.drop_constraint("uq_cart_items_cart_product", "cart_items", type_="unique")
