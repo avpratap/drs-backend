@@ -21,7 +21,7 @@ from app.schemas.delivery import DeliveryOrderOut
 router = APIRouter(prefix="/admin", tags=["admin-ops"], dependencies=[Depends(require_role("admin"))])
 
 
-class LedgerEntryOut(BaseModel):
+class AccountLedgerEntryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     entry_type: str
@@ -79,7 +79,7 @@ async def _require_account(db: AsyncSession, account_id: int) -> None:
 
 @router.get(
     "/accounts/{account_id}/wallet/transactions",
-    response_model=list[LedgerEntryOut],
+    response_model=list[AccountLedgerEntryOut],
     operation_id="admin_wallet_transactions",
 )
 async def wallet_transactions(
@@ -95,7 +95,7 @@ async def wallet_transactions(
     )
     rows = await paged(db, q, page)
     return [
-        LedgerEntryOut(
+        AccountLedgerEntryOut(
             id=t.id,
             entry_type=t.txn_type,
             amount=float(t.amount),
@@ -110,7 +110,7 @@ async def wallet_transactions(
 
 @router.get(
     "/accounts/{account_id}/credit/ledger",
-    response_model=list[LedgerEntryOut],
+    response_model=list[AccountLedgerEntryOut],
     operation_id="admin_credit_ledger",
 )
 async def credit_ledger(
