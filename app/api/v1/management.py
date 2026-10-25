@@ -920,3 +920,57 @@ async def reports_summary(db: AsyncSession = Depends(get_db)):
         "shops": shops or 0,
         "delivered_orders": delivered or 0,
     }
+
+
+# ---------- Catalog: packs the storefront can't price ----------
+class UnpricedPackOut(BaseModel):
+    product_id: int
+    product_sku: str
+    variant_id: int | None = None  # None = the product's own pack (no variants)
+    variant_sku: str | None = None
+    label: str | None = None
+    pack_size: float
+    reason: str
+
+
+@router.get(
+    "/catalog/unpriced-packs",
+    response_model=list[UnpricedPackOut],
+    operation_id="admin_unpriced_packs",
+)
+async def admin_unpriced_packs(db: AsyncSession = Depends(get_db)):
+    """Every ACTIVE sellable pack the B2C storefront shows as "price unavailable": no
+    RETAIL price row applies at its pack size today (none configured, none valid today,
+    or min_qty above the pack size — e.g. min_qty 1 vs a 0.5 L pack)."""
+    from app.models.product import Product
+    from app.models.variant import ProductVariant
+    from app.services import pricing
+
+    products = (
+        await db.execute(select(Product).where(Product.status == "active").order_by(Product.id))
+    ).scalars().all()
+    variants = (
+        await db.execute(
+            select(ProductVariant)
+            .where(ProductVariant.status == "active")
+            .order_by(ProductVariant.product_id, ProductVariant.sort_order, ProductVariant.id)
+        )
+    ).scalars().all()
+    by_product: dict[int, list] = {}
+    for v in variants:
+        by_product.setdefault(v.product_id, []).append(v)
+    packs: list[tuple] = []  # (product, variant | None, pack_size)
+    for p in products:
+        vs = by_product.get(p.id)
+        packs += [(p, v, float(v.pack_size)) for v in vs] if vs else [(p, None, float(p.pack_size))]
+    prices = await pricing.retail_pack_prices(db, [(p.id, size) for p, _v, size in packs])
+    return [
+        UnpricedPackOut(
+            product_id=p.id, product_sku=p.sku,
+            variant_id=v.id if v else None, variant_sku=v.sku if v else None,
+            label=v.label if v else None, pack_size=size,
+            reason="no RETAIL price row applies at this pack size today",
+        )
+        for p, v, size in packs
+        if prices.get((p.id, size)) is None
+    ]

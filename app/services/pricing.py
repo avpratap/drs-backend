@@ -92,3 +92,38 @@ async def load_price_book(db: AsyncSession, today: dt.date | None = None) -> Pri
     ).scalars().all()
     retail = await db.scalar(select(PriceTier.id).where(PriceTier.code == "RETAIL"))
     return PriceBook(today, list(prices), retail)
+
+
+async def retail_pack_prices(
+    db: AsyncSession, packs: list[tuple[int, float]]
+) -> dict[tuple[int, float], float | None]:
+    """B2C storefront price of each (product_id, pack_size) pack: the RETAIL unit price a
+    cart line of qty=pack_size is charged, x pack_size — exactly the cart/checkout line
+    total (round(unit_price * qty, 2)); unit prices are GST-inclusive, nothing is added.
+
+    Same rules as resolve_unit_price (RETAIL tier, valid today, highest min_qty <= qty,
+    newest valid_from), but ONE query for all packs. None = no applicable RETAIL row for
+    that pack (e.g. min_qty 1 vs a 0.5 pack): "price unavailable", never guessed."""
+    if not packs:
+        return {}
+    today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+    retail = await db.scalar(select(PriceTier.id).where(PriceTier.code == "RETAIL"))
+    if retail is None:
+        return dict.fromkeys(packs)
+    rows = (
+        await db.execute(
+            select(ProductPrice).where(
+                ProductPrice.price_tier_id == retail,
+                ProductPrice.product_id.in_({pid for pid, _ in packs}),
+                ProductPrice.valid_from <= today,
+                or_(ProductPrice.valid_to.is_(None), ProductPrice.valid_to >= today),
+            )
+        )
+    ).scalars().all()
+    book = PriceBook(today, list(rows), retail)
+    out: dict[tuple[int, float], float | None] = {}
+    for pid, pack in packs:
+        qty = round(float(pack), 3)  # carts/orders quantize qty to 3 dp before pricing
+        unit = book.unit_price(pid, retail, qty)
+        out[(pid, pack)] = None if unit is None else round(unit * qty, 2)
+    return out

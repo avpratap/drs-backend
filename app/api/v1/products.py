@@ -15,6 +15,7 @@ from app.models.user import User
 from app.models.variant import ProductVariant
 from app.schemas.common import reject_nulls
 from app.schemas.product import ProductCreate, ProductOut, ProductUpdate
+from app.services import pricing
 from app.services import reviews as review_svc
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -64,6 +65,47 @@ _SORTS = {
 }
 
 
+async def _from_prices(db: AsyncSession, products: list[dict]) -> dict[int, float | None]:
+    """Storefront "from" price per product: min selling price over its ACTIVE variants
+    (its own pack_size when it has none), from the cart's RETAIL resolver. Two queries for
+    the whole page. None when no pack has a retail price."""
+    ids = [p["id"] for p in products]
+    if not ids:
+        return {}
+    variants = (
+        await db.execute(
+            select(ProductVariant.product_id, ProductVariant.pack_size).where(
+                ProductVariant.product_id.in_(ids), ProductVariant.status == "active"
+            )
+        )
+    ).all()
+    packs_by_product: dict[int, list[float]] = {}
+    for pid, pack in variants:
+        packs_by_product.setdefault(pid, []).append(float(pack))
+    for p in products:
+        packs_by_product.setdefault(p["id"], [float(p["pack_size"])])
+    prices = await pricing.retail_pack_prices(
+        db, [(pid, pack) for pid, packs in packs_by_product.items() for pack in packs]
+    )
+    out: dict[int, float | None] = {}
+    for pid, packs in packs_by_product.items():
+        known = [prices[(pid, pack)] for pack in packs if prices.get((pid, pack)) is not None]
+        out[pid] = min(known) if known else None
+    return out
+
+
+async def _with_from_prices(db: AsyncSession, products: list[dict]) -> list[dict]:
+    fp = await _from_prices(db, products)
+    return [{**p, "from_price": fp.get(p["id"])} for p in products]
+
+
+async def _from_price_one(db: AsyncSession, product: Product, variants: list) -> float | None:
+    if variants:
+        known = [v.selling_price for v in variants if v.selling_price is not None]
+        return min(known) if known else None
+    return (await _from_prices(db, [{"id": product.id, "pack_size": product.pack_size}]))[product.id]
+
+
 @router.get("", response_model=list[ProductOut], operation_id="list_products")
 async def list_products(
     category: str | None = None,
@@ -85,7 +127,9 @@ async def list_products(
     if plain:
         cached = await cache_get_json(_CACHE_KEY)
         if cached is not None:
-            return cached
+            # Prices are attached fresh on every read (never cached), so a price change
+            # shows immediately and the card always equals what the cart charges.
+            return await _with_from_prices(db, cached)
     query = select(Product).where(Product.status == "active")
     if category is not None:
         query = query.where(Product.category == category)
@@ -111,7 +155,7 @@ async def list_products(
     out = [ProductOut.model_validate(p).model_dump() for p in rows]
     if plain:
         await cache_set_json(_CACHE_KEY, out)
-    return out
+    return await _with_from_prices(db, out)
 
 
 @router.get("/categories", response_model=list[str], operation_id="list_product_categories")
@@ -133,7 +177,9 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     product = await db.get(Product, product_id)
     if product is None or product.status == "retired":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
-    return product
+    out = ProductOut.model_validate(product)
+    out.from_price = (await _from_prices(db, [out.model_dump()]))[product.id]
+    return out
 
 
 @router.post(
@@ -394,11 +440,37 @@ class VariantOut(BaseModel):
     sku: str
     label: str
     pack_size: float
+    # Legacy catalogue field — NOT what checkout charges (may be stale). Storefronts must
+    # show `selling_price`.
     price: float
     mrp: float | None = None
     image_url: str | None = None
     status: str
     sort_order: int
+    # B2C storefront price of this pack: RETAIL unit price x pack_size, GST-inclusive —
+    # exactly the cart line total for qty = pack_size. None => price unavailable (no
+    # RETAIL row applies at this pack size). Filled on public catalog reads.
+    selling_price: float | None = None
+    price_available: bool | None = None
+    # True when `mrp` should be shown struck through (mrp > selling_price).
+    show_mrp_strike: bool = False
+
+
+async def _priced(db: AsyncSession, variants) -> list[VariantOut]:
+    """VariantOut rows with the storefront price from the cart's RETAIL resolver."""
+    prices = await pricing.retail_pack_prices(
+        db, [(v.product_id, float(v.pack_size)) for v in variants]
+    )
+    out = []
+    for v in variants:
+        o = VariantOut.model_validate(v)
+        o.selling_price = prices.get((v.product_id, float(v.pack_size)))
+        o.price_available = o.selling_price is not None
+        o.show_mrp_strike = (
+            o.selling_price is not None and o.mrp is not None and o.mrp > o.selling_price
+        )
+        out.append(o)
+    return out
 
 
 class ProductFullOut(ProductOut):
@@ -449,7 +521,7 @@ async def list_variants(
     if not (all and user is not None and user.role == "admin"):
         q = q.where(ProductVariant.status == "active")
     q = q.order_by(ProductVariant.sort_order, ProductVariant.id).limit(200)
-    return (await db.execute(q)).scalars().all()
+    return await _priced(db, (await db.execute(q)).scalars().all())
 
 
 @router.get("/{product_id}/full", response_model=ProductFullOut, operation_id="get_product_full")
@@ -463,7 +535,8 @@ async def get_product_full(product_id: int, db: AsyncSession = Depends(get_db)):
         )
     ).scalars().all()
     out = ProductFullOut.model_validate(product)
-    out.variants = [VariantOut.model_validate(v) for v in variants]
+    out.variants = await _priced(db, variants)
+    out.from_price = await _from_price_one(db, product, out.variants)
     return out
 
 
