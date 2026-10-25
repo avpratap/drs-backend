@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # Global per-IP rate limit (fixed window). Fail-open if Redis is down.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_PER_MIN: int = 300
+    # Stock policy. True (default): a delivery/consume that exceeds on-hand still goes
+    # through and on-hand goes negative (an implicit backorder, reconciled by the next
+    # receipt). PRODUCTION SETS THIS FALSE: any delivery or stock consume that would take
+    # on-hand below zero is refused with 409 instead of silently backordering.
+    ALLOW_NEGATIVE_STOCK: bool = True
     # Reverse proxies in front of the app that APPEND to X-Forwarded-For (Railway: 1).
     # 0 = use the socket peer and ignore the header (dev / direct exposure).
     TRUSTED_PROXY_HOPS: int = 0

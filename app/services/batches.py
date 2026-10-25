@@ -3,7 +3,9 @@
 stock_items.qty_on_hand stays the aggregate; batches track the lot-level detail.
 Consumption picks earliest-expiry-first (FEFO). If demand exceeds batched stock,
 the remainder is still decremented from the aggregate as an unbatched movement
-(stock can go negative — a delivery is never blocked on inventory).
+(stock can go negative — a delivery is never blocked on inventory — unless
+settings.ALLOW_NEGATIVE_STOCK is off, as in production: then a consume beyond on-hand
+raises InsufficientStock).
 """
 import datetime as dt
 from zoneinfo import ZoneInfo
@@ -104,9 +106,10 @@ async def receive_batch(
 
 
 class InsufficientStock(Exception):
-    def __init__(self, available: float):
+    def __init__(self, available: float, product_id: int | None = None):
         super().__init__(f"only {available} available")
         self.available = available
+        self.product_id = product_id
 
 
 async def _expire_unswept(
@@ -169,14 +172,15 @@ async def consume_fefo(
     lock: previously they were skipped but kept their qty in on-hand, so the shortfall
     was booked unbatched and the later sweep removed the same units again (negative
     stock). Any remaining shortfall of fresh stock falls to the unbatched remainder
-    (a delivery is never blocked), unless `strict` — then InsufficientStock is raised
-    before anything changes (wastage / count corrections can't go below zero)."""
+    (a delivery is never blocked) — unless `strict` or settings.ALLOW_NEGATIVE_STOCK is
+    off: then InsufficientStock is raised before anything changes (wastage / count
+    corrections never go below zero; with the setting off, nothing does)."""
     location_id = await require_location(db, location_id)
     today = _today()
     item = await _locked_item(db, product_id, location_id)
     await _expire_unswept(db, item, product_id, location_id, today, created_by)
-    if strict and float(item.qty_on_hand) < qty:
-        raise InsufficientStock(max(float(item.qty_on_hand), 0.0))
+    if (strict or not settings.ALLOW_NEGATIVE_STOCK) and float(item.qty_on_hand) < qty:
+        raise InsufficientStock(max(float(item.qty_on_hand), 0.0), product_id)
     item.qty_on_hand = round(float(item.qty_on_hand) - qty, 3)
 
     batches = (

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.inventory import StockItem, StockMovement
 from app.models.warehouse import Location
 
@@ -116,7 +117,12 @@ async def adjust_stock(
 ) -> StockItem:
     location_id = await require_location(db, location_id)
     item = await _locked_item(db, product_id, location_id)
-    item.qty_on_hand = round(float(item.qty_on_hand) + change, 3)
+    new_qty = round(float(item.qty_on_hand) + change, 3)
+    if change < 0 and new_qty < 0 and not settings.ALLOW_NEGATIVE_STOCK:
+        from app.services.batches import InsufficientStock
+
+        raise InsufficientStock(max(float(item.qty_on_hand), 0.0), product_id)
+    item.qty_on_hand = new_qty
     db.add(
         StockMovement(
             product_id=product_id,
