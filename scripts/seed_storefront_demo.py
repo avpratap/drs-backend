@@ -21,7 +21,9 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `app` when run by path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling `demo_content`
 
+from demo_content import ARTICLES, PAGES
 from sqlalchemy import select
 
 DEMO_PREFIX = "storefront-demo"
@@ -31,15 +33,11 @@ POINTS_TARGET = 250
 GIFT_CARD_AMOUNT = 500.0
 WISHLIST_SIZE = 3
 
-# Brand palette.
-CREAM, GREEN, GOLD = "#F7F1E3", "#1F4D3A", "#C9A227"
+# Baked demo photos (scripts/demo_assets/**.jpg), stored into the media store on seed.
+ASSETS_DIR = Path(__file__).resolve().parent / "demo_assets"
 
-# Placeholders: replace before showing these pages to anyone outside the team.
-CONTACT = {
-    "email": "support@example.com",
-    "phone": "+91 00000 00000",
-    "hours": "7:00 am to 8:00 pm, every day",
-}
+# Brand palette (used by the fallback SVG art helpers below).
+CREAM, GREEN, GOLD = "#F7F1E3", "#1F4D3A", "#C9A227"
 
 
 # ---------------------------------------------------------------- SVG art (800x800 art box)
@@ -171,137 +169,34 @@ def _store(key: str, data: bytes) -> str:
 
 
 # ---------------------------------------------------------------- content
-BANNERS = [  # (title, art, cta_link)
-    ("Farm-fresh milk at your door every morning", "milk", "/shop"),
-    ("Pure ghee, slow-cooked the traditional way", "ghee", "/shop?q=ghee"),
-    ("Recipes and stories from our dairy", "curd", "/blog"),
+BANNERS = [  # (title, image filename in demo_assets/banners/, cta_link)
+    ("Farm-fresh milk at your door every morning", "banner-milk.jpg", "/shop"),
+    ("Pure ghee, slow-cooked the traditional way", "banner-ghee-drizzle.jpg", "/shop?q=ghee"),
+    ("Recipes and stories from our dairy", "banner-dairy-spread.jpg", "/blog"),
 ]
 
 
-def _p(*paras: str) -> str:
-    return "".join(f"<p>{x}</p>" for x in paras)
+def photo_kind(*fields: str | None) -> str:
+    """Photo category from a product's category / name / sku (paneer before cheese)."""
+    text = " ".join(f for f in fields if f).lower()
+    for kind, words in (
+        ("buttermilk", ("buttermilk", "chaas", "chhach", "chaach", "lassi")),
+        ("curd", ("curd", "dahi", "yogurt", "yoghurt", "shrikhand")),
+        ("ghee", ("ghee",)),
+        ("paneer", ("paneer",)),
+        ("cheese", ("cheese",)),
+        ("milk", ("milk",)),
+    ):
+        if any(w in text for w in words):
+            return kind
+    return "milk"
 
 
-ARTICLES = [
-    {
-        "slug": "from-farm-to-your-doorstep", "kind": "milk", "category": "our-story",
-        "title": "From the farm to your doorstep before breakfast",
-        "author_name": "DRS Team", "published": dt.datetime(2026, 9, 2, 6, 30, tzinfo=dt.UTC),
-        "tags": ["milk", "delivery"],
-        "excerpt": "How a morning's milk travels from partner farms to your door, chilled all the way.",
-        "body_html": _p(
-            "Our day starts long before yours. Milk from our partner farms is collected at dawn, "
-            "chilled within minutes and brought to the dairy, where every can is checked before it "
-            "is accepted.",
-            "Accepted milk is pasteurised, cooled again and packed the same morning. Nothing sits "
-            "on a shelf overnight: packs go straight onto delivery routes planned around the "
-            "orders and subscriptions placed by the previous evening's cutoff.",
-            "By the time you wake up, your milk is at the door. If you are away, pause a "
-            "delivery from your account before the cutoff and it simply skips that day.",
-        ),
-    },
-    {
-        "slug": "what-pure-milk-means-to-us", "kind": "milk", "category": "quality",
-        "title": "What 'pure milk' means to us",
-        "author_name": "DRS Quality Team", "published": dt.datetime(2026, 9, 16, 6, 30, tzinfo=dt.UTC),
-        "tags": ["quality", "milk"],
-        "excerpt": "The checks every batch goes through before it is packed.",
-        "body_html": _p(
-            "Pure milk should taste like milk and nothing else. That is why each collection is "
-            "tested for fat and solids-not-fat, and screened for common adulterants, before it "
-            "joins a batch.",
-            "Temperature matters as much as testing. Milk is kept cold from collection to "
-            "packing, which keeps it fresh without preservatives.",
-            "Every pack carries a batch number, so if you ever have a question about what you "
-            "received, we can trace it back to the day and the route it came from.",
-        ),
-    },
-    {
-        "slug": "ghee-the-traditional-way", "kind": "ghee", "category": "process",
-        "title": "Ghee, the slow and traditional way",
-        "author_name": "DRS Kitchen", "published": dt.datetime(2026, 9, 30, 6, 30, tzinfo=dt.UTC),
-        "tags": ["ghee", "tradition"],
-        "excerpt": "Why our ghee takes hours, and why you can smell the difference.",
-        "body_html": _p(
-            "Good ghee cannot be hurried. Cream is cultured, churned into butter and then "
-            "simmered on a low flame until the milk solids turn golden and settle.",
-            "That slow simmer is what gives ghee its nutty aroma and grainy texture. It is "
-            "strained warm and packed once it has cooled, with nothing added.",
-            "Store it with the lid closed, away from moisture, and always use a dry spoon; it "
-            "keeps for months at room temperature.",
-        ),
-    },
-    {
-        "slug": "three-summer-coolers-with-chaas", "kind": "buttermilk", "category": "recipes",
-        "title": "Three summer coolers with chaas",
-        "author_name": "DRS Kitchen", "published": dt.datetime(2026, 10, 7, 6, 30, tzinfo=dt.UTC),
-        "tags": ["recipes", "buttermilk"],
-        "excerpt": "Masala chaas, mint chaas and a sweet saffron version for hot afternoons.",
-        "body_html": _p(
-            "<strong>Masala chaas:</strong> whisk a glass of chilled chaas with a pinch of roasted "
-            "cumin, black salt and finely chopped coriander.",
-            "<strong>Mint chaas:</strong> blend a handful of mint leaves and a small piece of green "
-            "chilli into the chaas, then strain and serve over ice.",
-            "<strong>Saffron chaas:</strong> soak a few saffron strands in a spoon of warm milk, "
-            "stir into chaas with a little sugar and a pinch of cardamom.",
-        ),
-    },
-    {
-        "slug": "easy-homemade-paneer-tikka", "kind": "cheese", "category": "recipes",
-        "title": "Easy paneer tikka at home",
-        "author_name": "DRS Kitchen", "published": dt.datetime(2026, 10, 14, 6, 30, tzinfo=dt.UTC),
-        "tags": ["recipes", "paneer"],
-        "excerpt": "Smoky, tender paneer tikka on a regular pan in under 30 minutes.",
-        "body_html": _p(
-            "Cut fresh paneer into large cubes. Mix thick curd with ginger-garlic paste, red chilli, "
-            "turmeric, garam masala, salt and a spoon of mustard oil.",
-            "Coat the paneer with onion and capsicum chunks and rest for twenty minutes; fresh "
-            "paneer soaks up the marinade quickly.",
-            "Sear on a hot pan with a little ghee until charred at the edges, then finish with "
-            "lemon juice and chaat masala.",
-        ),
-    },
-]
+def _store_asset(key: str) -> str:
+    """Store a baked demo JPEG (scripts/demo_assets/<key>) into the media store."""
+    from app.core import storage
 
-PAGES = {
-    "faq": ("Frequently asked questions", _p(
-        "<strong>When do deliveries arrive?</strong> Morning deliveries reach most areas before "
-        "8 am.",
-        "<strong>Can I change tomorrow's order?</strong> Yes. Edit, pause or skip it from your "
-        "account any time before the daily cutoff.",
-        "<strong>How do I pay?</strong> Use your DRS wallet, a gift card or online payment at "
-        "checkout. Wallet top-ups are available from your account.",
-        "<strong>Are prices inclusive of GST?</strong> Yes, all prices shown include GST.",
-    )),
-    "delivery-areas": ("Delivery areas", _p(
-        "We deliver to a growing list of neighbourhoods. Enter your pincode on the shop page to "
-        "check whether we deliver to you and which delivery slots are available.",
-        "If we do not reach you yet, leave your details and we will let you know as soon as "
-        "your area is added.",
-    )),
-    "terms": ("Terms of service", _p(
-        "These terms govern your use of the DRS website and app and the purchase of products "
-        "through them. By placing an order you agree to them.",
-        "Orders and subscription changes must be made before the daily cutoff to apply to the "
-        "next delivery. Prices include GST and are confirmed at checkout.",
-        "If a product arrives damaged or is not delivered, contact us within 24 hours and we "
-        "will replace it or refund you to your original payment method or wallet.",
-    )),
-    "privacy": ("Privacy policy", _p(
-        "We collect only what we need to deliver your orders: your phone number, delivery "
-        "address and order history, plus payment references from our payment partner.",
-        "Your data is used to fulfil orders, send delivery updates and, with your consent, "
-        "offers. We do not sell your personal data.",
-        "You can download or erase your data from your account settings at any time, in line "
-        "with India's Digital Personal Data Protection Act, 2023.",
-    )),
-    "contact": ("Contact us", _p(
-        f"Email: {escape(CONTACT['email'])}",
-        f"Phone: {escape(CONTACT['phone'])}",
-        f"Hours: {escape(CONTACT['hours'])}",
-        "For order issues, include your order number so we can help faster.",
-    )),
-}
+    return storage.put_object(f"{DEMO_PREFIX}/{key}", (ASSETS_DIR / key).read_bytes(), "image/jpeg")
 
 # Demo reviewers. Reviews are attributed to these accounts and are NOT marked as verified
 # purchases.
@@ -361,22 +256,26 @@ async def seed_demo(db, *, phone: str = DEFAULT_PHONE, force: bool = False) -> d
     products = (
         await db.execute(select(Product).where(Product.status == "active").order_by(Product.id))
     ).scalars().all()
-    urls = {kind: _store(f"products/{kind}.svg", product_svg(kind))
-            for kind in ("milk", "buttermilk", "curd", "ghee", "cheese", "dairy")}
+    photos = {kind: _store_asset(f"products/{kind}-photo.jpg")
+              for kind in ("milk", "buttermilk", "curd", "ghee", "cheese", "paneer")}
     set_, kept = [], []
     for p in products:
         current = p.image_url or ""
         if current and f"/{DEMO_PREFIX}/" not in current and not force:
             kept.append(p.sku)  # an image an admin set: keep it
             continue
-        p.image_url = urls[product_kind(p.category, p.name, p.sku)]
+        p.image_url = photos[photo_kind(p.category, p.name, p.sku)]
         set_.append(p.sku)
     summary["product_images"] = {"set": set_, "kept_existing": kept}
 
+    # 1b. Site images used by the hardcoded home hero and about page.
+    _store_asset("hero.jpg")
+    _store_asset("about-heritage.jpg")
+
     # 2. Banners (matched by title).
     created = updated = 0
-    for pos, (title, kind, cta) in enumerate(BANNERS):
-        image = _store(f"banners/banner-{pos + 1}.svg", banner_svg(title, kind))
+    for pos, (title, fname, cta) in enumerate(BANNERS):
+        image = _store_asset(f"banners/{fname}")
         b = await db.scalar(select(Banner).where(Banner.title == title))
         if b is None:
             db.add(Banner(title=title, image_url=image, cta_link=cta, position=pos, active=True))
@@ -389,7 +288,7 @@ async def seed_demo(db, *, phone: str = DEFAULT_PHONE, force: bool = False) -> d
     # 3. Journal articles (matched by slug), published.
     created = updated = 0
     for a in ARTICLES:
-        cover = _store(f"articles/{a['slug']}.svg", cover_svg(a["title"], a["kind"]))
+        cover = _store_asset(f"articles/{a['slug']}.jpg")
         fields = {
             "title": a["title"], "body_html": a["body_html"], "excerpt": a["excerpt"],
             "author_name": a["author_name"], "category": a["category"], "tags": a["tags"],

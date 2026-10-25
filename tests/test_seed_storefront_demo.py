@@ -7,7 +7,6 @@ import importlib.util
 import os
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import asyncpg
@@ -89,8 +88,8 @@ async def test_demo_seed_is_complete_and_idempotent(demo, client):
     from app.models.rating import Rating
 
     first = await script.seed_demo_session(Session)
-    assert first["banners"]["created"] == 3 and first["articles"]["created"] == 5
-    assert first["pages"]["created"] == 5
+    assert first["banners"]["created"] == 3 and first["articles"]["created"] == 6
+    assert first["pages"]["created"] == 6
     assert set(first["product_images"]["kept_existing"]) == {"GHEE-500"}  # admin image kept
 
     # Second run creates nothing new and leaves balances on target.
@@ -99,34 +98,34 @@ async def test_demo_seed_is_complete_and_idempotent(demo, client):
         assert second[key] == {"created": 0, "updated": 0}
     assert second["ratings"]["created"] == 0
     assert second["demo_customer"]["created"] is False
-    for model, n in ((Banner, 3), (Article, 5), (StaticPage, 5), (GiftCard, 1)):
+    for model, n in ((Banner, 3), (Article, 6), (StaticPage, 6), (GiftCard, 1)):
         assert await _count(Session, model) == n
     assert await _count(Session, PointsLedger) == 1  # no extra adjustment on re-run
 
-    # Every generated image is a stored, well-formed on-brand SVG served from /files.
-    files = sorted(storage_dir.rglob("*.svg"))
-    assert len(files) == 6 + 3 + 5
+    # Every generated image is a stored JPEG photo served from /files.
+    files = sorted(storage_dir.rglob("*.jpg"))
+    assert len(files) == 6 + 3 + 6 + 2  # products, banners, article covers, hero + about
     for f in files:
-        assert ET.fromstring(f.read_bytes()).tag == "{http://www.w3.org/2000/svg}svg"
+        assert f.read_bytes()[:3] == b"\xff\xd8\xff"  # JPEG magic bytes
 
     # --- What the storefront sees (public, no auth) ---
     products = {p["sku"]: p for p in (await client.get("/api/v1/products?limit=200")).json()}
     assert "CHAAS-200" not in products  # inactive: untouched
     assert products["GHEE-500"]["image_url"] == "/files/admin/ghee.jpg"
-    assert products["MILK-500"]["image_url"] == "/files/storefront-demo/products/milk.svg"
-    assert products["PANEER-200"]["image_url"].endswith("/products/cheese.svg")
-    assert products["KULFI-1PC"]["image_url"].endswith("/products/dairy.svg")
+    assert products["MILK-500"]["image_url"] == "/files/storefront-demo/products/milk-photo.jpg"
+    assert products["PANEER-200"]["image_url"].endswith("/products/paneer-photo.jpg")
+    assert products["KULFI-1PC"]["image_url"].endswith("/products/milk-photo.jpg")  # fallback
     r = await client.get(products["MILK-500"]["image_url"])
-    assert r.status_code == 200 and r.headers["content-type"].startswith("image/svg+xml")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("image/jpeg")
 
     banners = (await client.get("/api/v1/content/banners")).json()
     assert [b["position"] for b in banners] == [0, 1, 2]
     assert all(b["image_url"].startswith("/files/storefront-demo/banners/") for b in banners)
     articles = (await client.get("/api/v1/content/articles")).json()
-    assert len(articles) == 5
+    assert len(articles) == 6
     assert all(a["cover_image_url"] and a["author_name"] and a["published_at"] for a in articles)
-    assert all(a["body_html"].count("<p>") == 3 for a in articles)
-    for slug in ("faq", "delivery-areas", "terms", "privacy", "contact"):
+    assert all(len(a["body_html"]) > 200 and "<h2" in a["body_html"] for a in articles)
+    for slug in ("about-us", "faq", "delivery-areas", "terms", "privacy", "contact"):
         assert (await client.get(f"/api/v1/content/pages/{slug}")).status_code == 200
 
     for sku, p in products.items():
@@ -174,7 +173,7 @@ async def test_force_replaces_existing_content(demo):
         assert (await db.scalar(select(StaticPage.body_html).where(StaticPage.slug == "terms"))) \
             == "<p>edited by an admin</p>"
     out = await script.seed_demo_session(Session, force=True)
-    assert out["pages"]["updated"] == 5 and "GHEE-500" in out["product_images"]["set"]
+    assert out["pages"]["updated"] == 6 and "GHEE-500" in out["product_images"]["set"]
 
 
 def test_refuses_prod_and_bad_phone(monkeypatch):
