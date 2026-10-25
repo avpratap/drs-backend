@@ -228,10 +228,20 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             # restockable. Damaged/expired returns are NOT added back — they're written off.
             out_qty = round(float(it.qty_delivered) - restockable_qty.get(pid, 0.0), 3)
             if out_qty > 0:  # FEFO: deplete earliest-expiry batches first
-                await batches.consume_fefo(
-                    db, pid, out_qty, "delivery", location_id=loc,
-                    ref_type="delivery_order", ref_id=order.id, created_by=user.id,
-                )
+                try:
+                    await batches.consume_fefo(
+                        db, pid, out_qty, "delivery", location_id=loc,
+                        ref_type="delivery_order", ref_id=order.id, created_by=user.id,
+                    )
+                except batches.InsufficientStock as exc:
+                    # ALLOW_NEGATIVE_STOCK is off: refuse rather than backorder. Nothing
+                    # of this delivery (billing, POD, stock) is committed.
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        f"Not enough stock for product {pid} at the delivering location: "
+                        f"{exc.available:g} on hand, {out_qty:g} needed. Receive or "
+                        "transfer stock first.",
+                    ) from None
 
     # Notify the account owner that their stop is done (idempotent per order).
     account = await db.get(CustomerAccount, order.account_id)
