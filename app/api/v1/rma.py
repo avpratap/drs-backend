@@ -1,4 +1,6 @@
 """Customer returns / RMA endpoints (customer self-service + admin resolution)."""
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -7,10 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, paged, pagination
+from app.models.billing import Wallet, WalletTransaction
+from app.models.invoice import Invoice
 from app.models.order import Order
-from app.models.rma import ReturnRequest, ReturnRequestItem
+from app.models.rma import RMA_STATUSES, ReturnRequest, ReturnRequestItem
 from app.models.shop import CustomerAccount
 from app.models.user import User
+from app.services import refunds as refund_acct
 from app.services import rma as rma_service
 
 router = APIRouter(tags=["returns"])
@@ -55,6 +60,37 @@ class RMAOut(BaseModel):
     resolution: str | None = None
     refund_amount: float
     items: list[RMAItemOut] = []
+    created_at: dt.datetime | None = None
+
+
+class RMARefundCreditOut(BaseModel):
+    """Store credit paid for a return (a wallet ledger row with ref_type='rma')."""
+
+    id: int
+    amount: float
+    balance_after: float
+    created_at: dt.datetime
+
+
+class RMACreditNoteOut(BaseModel):
+    id: int
+    invoice_no: str
+    invoice_date: dt.date
+    total: float
+
+
+class AdminRMADetailOut(RMAOut):
+    order_no: str | None = None
+    order_total: float | None = None
+    order_payment_status: str | None = None
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    # Value of the returned lines (discount-adjusted): the most a refund may pay.
+    returned_value: float = 0
+    # What the order can still refund across gateway refunds + RMA credit.
+    refundable_headroom: float = 0
+    refund_credits: list[RMARefundCreditOut] = []
+    credit_notes: list[RMACreditNoteOut] = []
 
 
 async def _my_account_ids(db: AsyncSession, user: User) -> set[int]:
@@ -170,14 +206,75 @@ async def cancel_return(rr_id: int, user: User = Depends(get_current_user), db: 
             dependencies=[Depends(require_role("admin"))])
 async def admin_list_returns(
     status_filter: str | None = None,
+    account_id: int | None = None,
+    order_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
+    if status_filter is not None and status_filter not in RMA_STATUSES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"status_filter must be one of {', '.join(RMA_STATUSES)}"
+        )
     q = select(ReturnRequest).order_by(ReturnRequest.id.desc())
     if status_filter:
         q = q.where(ReturnRequest.status == status_filter)
+    if account_id is not None:
+        q = q.where(ReturnRequest.account_id == account_id)
+    if order_id is not None:
+        q = q.where(ReturnRequest.order_id == order_id)
     rows = await paged(db, q, page)
     return await _outs(db, list(rows))
+
+
+@router.get("/admin/returns/{rr_id}", response_model=AdminRMADetailOut, operation_id="admin_get_return",
+            dependencies=[Depends(require_role("admin"))])
+async def admin_get_return(rr_id: int, db: AsyncSession = Depends(get_db)):
+    """One return with its order, customer, refund limits and the refund it produced:
+    the store-credit wallet entry and any GST credit notes on the order."""
+    rr = await db.get(ReturnRequest, rr_id)
+    if rr is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Return not found")
+    out = AdminRMADetailOut.model_validate((await _out(db, rr)).model_dump())
+    order = await db.get(Order, rr.order_id)
+    if order is not None:
+        out.order_no = order.order_no
+        out.order_total = float(order.total)
+        out.order_payment_status = order.payment_status
+        out.refundable_headroom = await refund_acct.order_refund_headroom(db, order)
+        out.credit_notes = [
+            RMACreditNoteOut(id=i.id, invoice_no=i.invoice_no, invoice_date=i.invoice_date, total=float(i.total))
+            for i in (
+                await db.execute(
+                    select(Invoice)
+                    .where(Invoice.order_id == order.id, Invoice.is_credit_note.is_(True))
+                    .order_by(Invoice.id)
+                )
+            ).scalars()
+        ]
+    acct = await db.get(CustomerAccount, rr.account_id)
+    owner = await db.get(User, acct.owner_user_id) if acct else None
+    if owner is not None:
+        out.customer_name = owner.full_name
+        out.customer_phone = owner.phone
+    out.returned_value = await rma_service.returned_value(db, rr)
+    out.refund_credits = [
+        RMARefundCreditOut(
+            id=t.id, amount=float(t.amount), balance_after=float(t.balance_after), created_at=t.created_at
+        )
+        for t in (
+            await db.execute(
+                select(WalletTransaction)
+                .join(Wallet, Wallet.id == WalletTransaction.wallet_id)
+                .where(
+                    Wallet.account_id == rr.account_id,
+                    WalletTransaction.ref_type == "rma",
+                    WalletTransaction.ref_id == rr.id,
+                )
+                .order_by(WalletTransaction.id)
+            )
+        ).scalars()
+    ]
+    return out
 
 
 async def _locked_admin(db: AsyncSession, rr_id: int) -> ReturnRequest:

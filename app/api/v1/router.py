@@ -6,6 +6,7 @@ from app.api.v1 import (
     admin_analytics,
     admin_ops,
     admin_sales,
+    admin_subscriptions,
     admin_tools,
     ai,
     auth,
@@ -72,6 +73,7 @@ api_router.include_router(ai.router)
 api_router.include_router(admin_sales.router)
 api_router.include_router(admin_analytics.router)
 api_router.include_router(admin_ops.router)
+api_router.include_router(admin_subscriptions.router)
 api_router.include_router(uploads.router)
 api_router.include_router(home.router)
 api_router.include_router(inbox.router)

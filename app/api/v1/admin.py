@@ -5,16 +5,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.deps.auth import require_role
+from app.deps.pagination import Page, paged, pagination
+from app.models.delivery import ScheduleRun
 from app.models.notification import Notification
 from app.models.user import User
 from app.schemas.common import OutboxFlushOut
 from app.schemas.delivery import CutoffResult
 from app.services import forecasting
 from app.services import notifications as notify
+from app.services import subscription as sub_service
 from app.services.cutoff import run_cutoff
-from app.services.subscription import today_ist
+from app.services.subscription import IST, today_ist
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_role("admin"))])
 
@@ -33,6 +37,99 @@ async def run_cutoff_endpoint(
             "Cutoff can only run for tomorrow or later (pass force=true to override)",
         )
     return await run_cutoff(db, delivery_date)
+
+
+class CutoffRunOut(BaseModel):
+    id: int
+    for_delivery_date: dt.date
+    status: str  # generating | frozen | partial | failed
+    orders_generated: int
+    started_at: dt.datetime
+    finished_at: dt.datetime | None = None
+    duration_seconds: float | None = None
+
+    @classmethod
+    def of(cls, run: ScheduleRun) -> "CutoffRunOut":
+        took = (run.finished_at - run.started_at).total_seconds() if run.finished_at else None
+        return cls(
+            id=run.id,
+            for_delivery_date=run.for_delivery_date,
+            status=run.status,
+            orders_generated=run.orders_generated,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            duration_seconds=round(took, 3) if took is not None else None,
+        )
+
+
+class CutoffStatusOut(BaseModel):
+    timezone: str
+    cutoff_hour: int
+    now: dt.datetime
+    next_cutoff_at: dt.datetime
+    # The delivery date the next scheduled cutoff materializes.
+    next_delivery_date: dt.date
+    # Latest run for tomorrow (None until tonight's cutoff has run).
+    tomorrow_run: CutoffRunOut | None = None
+    last_run: CutoffRunOut | None = None
+    # Whether customers' standing-order changes are frozen right now (admins never are).
+    standing_changes_frozen: bool
+
+
+@router.get("/cutoff/runs", response_model=list[CutoffRunOut], operation_id="list_cutoff_runs")
+async def list_cutoff_runs(
+    status_filter: str | None = Query(default=None, pattern="^(generating|frozen|partial|failed)$"),
+    date_from: dt.date | None = None,
+    date_to: dt.date | None = None,
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    """Cutoff batch history, newest first (filter by status / delivery-date range)."""
+    q = select(ScheduleRun).order_by(ScheduleRun.started_at.desc(), ScheduleRun.id.desc())
+    if status_filter:
+        q = q.where(ScheduleRun.status == status_filter)
+    if date_from:
+        q = q.where(ScheduleRun.for_delivery_date >= date_from)
+    if date_to:
+        q = q.where(ScheduleRun.for_delivery_date <= date_to)
+    return [CutoffRunOut.of(r) for r in await paged(db, q, page)]
+
+
+@router.get("/cutoff/status", response_model=CutoffStatusOut, operation_id="cutoff_status")
+async def cutoff_status(db: AsyncSession = Depends(get_db)):
+    """When the next cutoff is, whether tomorrow is already frozen, and the last run."""
+    now = dt.datetime.now(IST)
+    hour = settings.CUTOFF_HOUR
+    if hour >= 24:  # cutoff disabled (tests) — report the next midnight
+        next_at = (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        next_at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if now >= next_at:
+            next_at += dt.timedelta(days=1)
+    tomorrow = now.date() + dt.timedelta(days=1)
+
+    async def latest(*where) -> ScheduleRun | None:
+        return await db.scalar(
+            select(ScheduleRun).where(*where).order_by(ScheduleRun.started_at.desc(), ScheduleRun.id.desc()).limit(1)
+        )
+
+    tomorrow_run = await latest(ScheduleRun.for_delivery_date == tomorrow)
+    last_run = await latest()
+    try:
+        await sub_service.assert_standing_change_allowed(db, "customer")
+        frozen = False
+    except HTTPException:
+        frozen = True
+    return CutoffStatusOut(
+        timezone=settings.TIMEZONE,
+        cutoff_hour=hour,
+        now=now,
+        next_cutoff_at=next_at,
+        next_delivery_date=next_at.date() + dt.timedelta(days=1),
+        tomorrow_run=CutoffRunOut.of(tomorrow_run) if tomorrow_run else None,
+        last_run=CutoffRunOut.of(last_run) if last_run else None,
+        standing_changes_frozen=frozen,
+    )
 
 
 class NotifyTestIn(BaseModel):
