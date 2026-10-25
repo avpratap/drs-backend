@@ -132,7 +132,9 @@ async def list_products(
             return await _with_from_prices(db, cached)
     query = select(Product).where(Product.status == "active")
     if category is not None:
-        query = query.where(Product.category == category)
+        # Case-insensitive: the storefront sends clean lowercase slugs (?category=milk)
+        # while the stored category is title-cased ("Milk").
+        query = query.where(func.lower(Product.category) == category.strip().lower())
     if q is not None:
         # Escape LIKE metacharacters so a `%`/`_` in the query is matched literally
         # (otherwise `q=%` matches everything and forces a full scan).
