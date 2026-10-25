@@ -1,13 +1,29 @@
 """Price resolution: shop tier -> account tier -> RETAIL default, with volume breaks."""
 import datetime as dt
+import math
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.pricing import PriceTier, ProductPrice
 from app.models.shop import CustomerAccount, Shop
+
+
+async def default_retail_min_qty(db: AsyncSession, product) -> float:
+    """min_qty for a retail-tier price row created without one: the product's smallest
+    ACTIVE variant pack_size (else its own pack_size), so every pack the storefront sells
+    resolves a price. Rounded DOWN to the column's 2 dp (never above the pack), floor 0.01."""
+    from app.models.variant import ProductVariant
+
+    smallest = await db.scalar(
+        select(func.min(ProductVariant.pack_size)).where(
+            ProductVariant.product_id == product.id, ProductVariant.status == "active"
+        )
+    )
+    pack = float(smallest if smallest is not None else product.pack_size)
+    return max(math.floor(round(pack * 100, 6)) / 100, 0.01)
 
 
 async def resolve_tier_id(db: AsyncSession, shop: Shop) -> int | None:
