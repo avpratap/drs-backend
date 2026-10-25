@@ -128,23 +128,56 @@ async def assign_delivery(data: DeliveryAssignmentIn, db: AsyncSession = Depends
     return row
 
 
+class AdminDeliveryAssignmentRow(DeliveryAssignmentOut):
+    driver_name: str | None = None
+    driver_phone: str | None = None
+    driver_status: str | None = None
+    shop_name: str | None = None
+    shop_pincode: str | None = None
+    shop_status: str | None = None
+    created_at: dt.datetime | None = None
+
+
 @router.get(
     "/delivery-assignments",
-    response_model=list[DeliveryAssignmentOut],
+    response_model=list[AdminDeliveryAssignmentRow],
     operation_id="list_delivery_assignments",
 )
 async def list_delivery_assignments(
     delivery_id: int | None = None,
     shop_id: int | None = None,
+    active: bool | None = None,
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
+    """Driver <-> shop assignments, newest first, with driver and shop names."""
     q = select(DeliveryAssignment).order_by(DeliveryAssignment.id.desc())
     if delivery_id is not None:
         q = q.where(DeliveryAssignment.delivery_id == delivery_id)
     if shop_id is not None:
         q = q.where(DeliveryAssignment.shop_id == shop_id)
-    return await paged(db, q, page)
+    if active is not None:
+        q = q.where(DeliveryAssignment.active.is_(active))
+    rows = list(await paged(db, q, page))
+    if not rows:
+        return []
+    drivers = {
+        u.id: u
+        for u in (await db.execute(select(User).where(User.id.in_({r.delivery_id for r in rows})))).scalars()
+    }
+    shops = {
+        x.id: x for x in (await db.execute(select(Shop).where(Shop.id.in_({r.shop_id for r in rows})))).scalars()
+    }
+    out = []
+    for r in rows:
+        row = AdminDeliveryAssignmentRow.model_validate(r)
+        driver, shop = drivers.get(r.delivery_id), shops.get(r.shop_id)
+        if driver is not None:
+            row.driver_name, row.driver_phone, row.driver_status = driver.full_name, driver.phone, driver.status
+        if shop is not None:
+            row.shop_name, row.shop_pincode, row.shop_status = shop.name, shop.pincode, shop.status
+        out.append(row)
+    return out
 
 
 @router.delete(

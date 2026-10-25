@@ -187,6 +187,32 @@ async def test_admin_shop_list_and_detail_with_tier_and_drivers(client):
     assert (await client.get("/api/v1/admin/shops?status_filter=closed", headers=ah)).status_code == 422
 
 
+
+async def test_delivery_assignments_list_names_and_active_filter(client):
+    ah = auth(await login(client, ADMIN))
+    shop, _ = await _shop_with_subscription(client, ah, items=False)
+    driver = (await client.get(f"/api/v1/admin/users?q={DRIVER}", headers=ah)).json()[0]
+    aid = (
+        await client.post("/api/v1/admin/delivery-assignments", json={"delivery_id": driver["id"], "shop_id": shop["id"]}, headers=ah)
+    ).json()["id"]
+
+    r = await client.get(f"/api/v1/admin/delivery-assignments?shop_id={shop['id']}&active=true", headers=ah)
+    assert r.status_code == 200 and r.headers["x-total-count"] == "1"
+    (row,) = r.json()
+    assert row["id"] == aid and row["active"] is True
+    assert row["driver_phone"] == DRIVER and row["driver_status"] == "active"
+    assert row["shop_name"] == shop["name"] and row["shop_pincode"] == shop["pincode"] and row["created_at"]
+
+    assert (await client.delete(f"/api/v1/admin/delivery-assignments/{aid}", headers=ah)).status_code == 204
+    inactive = await client.get(f"/api/v1/admin/delivery-assignments?shop_id={shop['id']}&active=false", headers=ah)
+    assert [a["id"] for a in inactive.json()] == [aid] and inactive.headers["x-total-count"] == "1"
+    active = await client.get(f"/api/v1/admin/delivery-assignments?shop_id={shop['id']}&active=true", headers=ah)
+    assert active.json() == [] and active.headers["x-total-count"] == "0"
+
+    cust = auth(await login(client, "9876543210"))
+    assert (await client.get("/api/v1/admin/delivery-assignments", headers=cust)).status_code == 403
+
+
 # ---------- (6) unique location names ----------
 async def test_location_names_are_unique_ignoring_case_and_spaces(client):
     ah = auth(await login(client, ADMIN))
