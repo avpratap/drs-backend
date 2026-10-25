@@ -4,7 +4,10 @@ Run:  uv run python scripts/backfill_retail_min_qty.py
 """
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `app` when run by path
 
 from sqlalchemy import text
 
