@@ -38,7 +38,9 @@ class ProductPriceIn(BaseModel):
     product_id: int
     price_tier_id: int
     unit_price: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
-    min_qty: float = Field(default=1, gt=0, le=1_000_000, allow_inf_nan=False)
+    # Omitted => a retail-tier row starts at the product's smallest sellable pack (so a
+    # 0.5 L pack is priceable); any other tier defaults to 1 (volume breaks unchanged).
+    min_qty: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     valid_from: dt.date
     valid_to: dt.date | None = None
 

@@ -254,15 +254,29 @@ async def delete_price_tier(tier_id: int, db: AsyncSession = Depends(get_db)):
     "/product-prices", response_model=ProductPriceOut, operation_id="create_product_price"
 )
 async def create_product_price(data: ProductPriceIn, db: AsyncSession = Depends(get_db)):
-    if await db.get(PriceTier, data.price_tier_id) is None:
+    from app.models.product import Product
+    from app.services.pricing import default_retail_min_qty
+
+    tier = await db.get(PriceTier, data.price_tier_id)
+    if tier is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Price tier not found")
     if data.valid_to and data.valid_to < data.valid_from:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "valid_to before valid_from")
+    min_qty = data.min_qty
+    if min_qty is None:
+        if tier.tier_type == "retail":
+            # The old flat default of 1 left every sub-1 pack (0.5 L, 200 g) unpriceable.
+            product = await db.get(Product, data.product_id)
+            if product is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
+            min_qty = await default_retail_min_qty(db, product)
+        else:
+            min_qty = 1  # B2B volume-break rows keep the historical default
     price = ProductPrice(
         product_id=data.product_id,
         price_tier_id=data.price_tier_id,
         unit_price=data.unit_price,
-        min_qty=data.min_qty,
+        min_qty=min_qty,
         valid_from=data.valid_from,
         valid_to=data.valid_to,
     )
