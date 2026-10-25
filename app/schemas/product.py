@@ -40,6 +40,10 @@ class ProductOut(ProductCreate):
     model_config = ConfigDict(from_attributes=True)
     id: int
     status: str
+    # B2C storefront "from ₹X": the lowest active-variant selling price (the product's own
+    # pack when it has no variants). GST-inclusive, == what the cart charges for that
+    # pack. None = no retail price applies to any pack. Filled on public catalog reads.
+    from_price: float | None = None
     avg_rating: float = 0
     rating_count: int = 0
     weight_kg: float | None = None
