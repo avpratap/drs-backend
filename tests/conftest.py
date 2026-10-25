@@ -165,8 +165,26 @@ async def client():
     from app.main import app
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", event_hooks={"request": [_auto_idem_key]}
+    ) as c:
         yield c
+
+
+# Customer writes that REQUIRE an Idempotency-Key. Like a real storefront, the test client
+# sends a fresh key on each such call unless the test sets one itself (to exercise replay)
+# or opts out with the NO_IDEM header (to exercise the 428).
+_IDEM_REQUIRED_PATHS = {"/api/v1/orders", "/api/v1/cart/checkout", "/api/v1/payments/create"}
+NO_IDEM = {"X-Test-No-Idempotency-Key": "1"}
+
+
+async def _auto_idem_key(request) -> None:
+    import uuid
+
+    if request.headers.pop("X-Test-No-Idempotency-Key", None):
+        return
+    if request.method == "POST" and request.url.path in _IDEM_REQUIRED_PATHS:
+        request.headers.setdefault("Idempotency-Key", uuid.uuid4().hex)
 
 
 async def login(client: AsyncClient, phone: str) -> str:

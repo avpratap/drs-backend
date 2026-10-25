@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user
+from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, pagination
 from app.models.invoice import InvoiceLine
 from app.models.order import Order, OrderItem
@@ -93,7 +94,12 @@ async def _my_account_ids(db: AsyncSession, user: User) -> list[int]:
     return list(res.scalars().all())
 
 
-@router.post("", response_model=OrderOut, operation_id="create_order")
+# Idempotency-Key REQUIRED: a storefront retry after a lost response must replay the
+# first result, never place a second order.
+@router.post(
+    "", response_model=OrderOut, operation_id="create_order",
+    dependencies=[Depends(require_idempotency_key)],
+)
 async def create_order(
     data: OrderCreate,
     user: User = Depends(get_current_user),

@@ -11,9 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache_get_json, cache_set_json
 from app.core.config import settings
 from app.core.db import get_db
-from app.deps.auth import get_current_user, require_role
+from app.deps.auth import get_current_user, get_optional_user, require_role
 from app.deps.pagination import Page, pagination
 from app.models.shipment import Shipment, ShipmentTrackingEvent
 from app.models.shop import CustomerAccount
@@ -92,15 +93,27 @@ async def _shipment_out(db: AsyncSession, ship: Shipment) -> ShipmentOut:
     return out
 
 
-# ---------- Serviceability (customer) ----------
+# ---------- Serviceability (public: a pre-login storefront checks a pincode) ----------
+_SERVICEABILITY_TTL = 900  # courier coverage changes rarely; spares the courier API
+
+
 @router.get("/shipping/serviceability", response_model=ServiceabilityOut, operation_id="check_serviceability")
 async def serviceability(
     pincode: str = Query(pattern=r"^\d{6}$"),
-    weight_kg: float = Query(default=0.5, gt=0, le=100),
+    weight_kg: float = Query(default=0.5, gt=0, le=100, allow_inf_nan=False),
     cod: bool = False,
-    _user: User = Depends(get_current_user),
+    _user: User | None = Depends(get_optional_user),
 ):
-    return await shipping.check_serviceability(pincode, weight_kg, cod)
+    """No login required (the answer doesn't depend on who asks). Anonymous traffic is
+    bounded by the global per-IP rate limit, and answers are cached briefly so repeated
+    lookups don't each cost a courier API call."""
+    key = f"svc:{pincode}:{weight_kg:g}:{int(cod)}"
+    cached = await cache_get_json(key)
+    if cached is not None:
+        return cached
+    result = await shipping.check_serviceability(pincode, weight_kg, cod)
+    await cache_set_json(key, result, ttl=_SERVICEABILITY_TTL)
+    return result
 
 
 # ---------- Admin: create / cancel ----------
