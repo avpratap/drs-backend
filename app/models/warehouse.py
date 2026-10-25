@@ -1,7 +1,7 @@
 """Stock-holding locations: plants, distribution hubs, cold storage, vehicles, stores."""
 import datetime as dt
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -9,6 +9,8 @@ from app.models.base import Base
 
 class Location(Base):
     __tablename__ = "locations"
+    # Names are unique ignoring case (migration 0057); the API trims + returns 409.
+    __table_args__ = (Index("uq_locations_name_ci", text("lower(name)"), unique=True),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)

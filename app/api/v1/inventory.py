@@ -2,8 +2,9 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -25,12 +26,23 @@ router = APIRouter(
 
 
 # ---------- Schemas ----------
+def _clean_name(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip()
+    if not v:
+        raise ValueError("name must not be blank")
+    return v
+
+
 class LocationIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     kind: str = Field(default="warehouse", pattern="^(plant|hub|cold_storage|vehicle|store|warehouse)$")
     state: str | None = Field(default=None, max_length=120)
     is_default: bool = False
     driver_user_id: int | None = None  # vehicle locations: the driver carrying the stock
+
+    _v_name = field_validator("name")(_clean_name)
 
 
 class LocationOut(BaseModel):
@@ -84,8 +96,29 @@ class StockMovementOut(BaseModel):
 
 
 # ---------- Locations ----------
+_NAME_TAKEN = "A location with this name already exists"
+
+
+async def _assert_name_free(db: AsyncSession, name: str, exclude_id: int | None = None) -> None:
+    """Names are unique ignoring case (uq_locations_name_ci); answer 409, not a 500."""
+    q = select(Location.id).where(func.lower(Location.name) == name.lower())
+    if exclude_id is not None:
+        q = q.where(Location.id != exclude_id)
+    if await db.scalar(q.limit(1)) is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, _NAME_TAKEN)
+
+
+async def _commit_location(db: AsyncSession) -> None:
+    try:
+        await db.commit()
+    except IntegrityError:  # a concurrent create/rename took the name first
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, _NAME_TAKEN) from None
+
+
 @router.post("/locations", response_model=LocationOut, operation_id="create_location")
 async def create_location(data: LocationIn, db: AsyncSession = Depends(get_db)):
+    await _assert_name_free(db, data.name)
     if data.is_default:  # only one default
         # Serialize concurrent default-location creates (a fixed advisory lock) so two
         # requests can't each clear + set is_default and leave the system with two defaults.
@@ -101,13 +134,15 @@ async def create_location(data: LocationIn, db: AsyncSession = Depends(get_db)):
             )
     loc = Location(**data.model_dump())
     db.add(loc)
-    await db.commit()
+    await _commit_location(db)
     await db.refresh(loc)
     return loc
 
 
 class LocationPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
+
+    _v_name = field_validator("name")(_clean_name)
     status: str | None = Field(default=None, pattern="^(active|inactive)$")
     # Bind (or with null, unbind) an existing vehicle to its driver.
     driver_user_id: int | None = None
@@ -119,6 +154,8 @@ async def update_location(location_id: int, data: LocationPatch, db: AsyncSessio
     if loc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
     patch = data.model_dump(exclude_unset=True)
+    if patch.get("name") is not None:
+        await _assert_name_free(db, patch["name"], exclude_id=loc.id)
     if patch.get("driver_user_id") is not None:
         driver = await db.get(User, patch["driver_user_id"])
         if loc.kind != "vehicle" or driver is None or driver.role != "delivery":
@@ -131,7 +168,7 @@ async def update_location(location_id: int, data: LocationPatch, db: AsyncSessio
             setattr(loc, field, patch[field])
     if "driver_user_id" in patch:
         loc.driver_user_id = patch["driver_user_id"]
-    await db.commit()
+    await _commit_location(db)
     await db.refresh(loc)
     return loc
 

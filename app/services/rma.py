@@ -120,7 +120,7 @@ async def reject(db: AsyncSession, rr: ReturnRequest, note: str | None) -> Retur
     return rr
 
 
-async def _returned_value(db: AsyncSession, rr: ReturnRequest) -> float:
+async def returned_value(db: AsyncSession, rr: ReturnRequest) -> float:
     """Value actually PAID for the returned lines = sum(unit_price * returned qty), scaled
     by the order's discount factor (total/subtotal) so a refund can never exceed what the
     customer paid when an order-level discount/coupon applied. Prices are GST-inclusive."""
@@ -148,7 +148,7 @@ async def refund(db: AsyncSession, rr: ReturnRequest, amount: float) -> ReturnRe
     if amount <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Refund amount must be > 0")
     # Never credit more than the (discount-adjusted) value of the returned goods.
-    cap = await _returned_value(db, rr)
+    cap = await returned_value(db, rr)
     if round(float(amount), 2) > cap:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,

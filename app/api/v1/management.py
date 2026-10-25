@@ -4,7 +4,7 @@ assignment, account finance, shop mgmt, coupons, users, withdrawals. All admin-g
 import datetime as dt
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +53,11 @@ from app.services import refunds as refund_acct
 router = APIRouter(
     prefix="/admin", tags=["management"], dependencies=[Depends(require_role("admin"))]
 )
+
+
+def _escape_like(term: str) -> str:
+    """Match a search term literally (a `%`/`_` in it must not act as a wildcard)."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class TierSetShopOut(BaseModel):
@@ -123,23 +128,56 @@ async def assign_delivery(data: DeliveryAssignmentIn, db: AsyncSession = Depends
     return row
 
 
+class AdminDeliveryAssignmentRow(DeliveryAssignmentOut):
+    driver_name: str | None = None
+    driver_phone: str | None = None
+    driver_status: str | None = None
+    shop_name: str | None = None
+    shop_pincode: str | None = None
+    shop_status: str | None = None
+    created_at: dt.datetime | None = None
+
+
 @router.get(
     "/delivery-assignments",
-    response_model=list[DeliveryAssignmentOut],
+    response_model=list[AdminDeliveryAssignmentRow],
     operation_id="list_delivery_assignments",
 )
 async def list_delivery_assignments(
     delivery_id: int | None = None,
     shop_id: int | None = None,
+    active: bool | None = None,
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
+    """Driver <-> shop assignments, newest first, with driver and shop names."""
     q = select(DeliveryAssignment).order_by(DeliveryAssignment.id.desc())
     if delivery_id is not None:
         q = q.where(DeliveryAssignment.delivery_id == delivery_id)
     if shop_id is not None:
         q = q.where(DeliveryAssignment.shop_id == shop_id)
-    return await paged(db, q, page)
+    if active is not None:
+        q = q.where(DeliveryAssignment.active.is_(active))
+    rows = list(await paged(db, q, page))
+    if not rows:
+        return []
+    drivers = {
+        u.id: u
+        for u in (await db.execute(select(User).where(User.id.in_({r.delivery_id for r in rows})))).scalars()
+    }
+    shops = {
+        x.id: x for x in (await db.execute(select(Shop).where(Shop.id.in_({r.shop_id for r in rows})))).scalars()
+    }
+    out = []
+    for r in rows:
+        row = AdminDeliveryAssignmentRow.model_validate(r)
+        driver, shop = drivers.get(r.delivery_id), shops.get(r.shop_id)
+        if driver is not None:
+            row.driver_name, row.driver_phone, row.driver_status = driver.full_name, driver.phone, driver.status
+        if shop is not None:
+            row.shop_name, row.shop_pincode, row.shop_status = shop.name, shop.pincode, shop.status
+        out.append(row)
+    return out
 
 
 @router.delete(
@@ -409,17 +447,21 @@ async def admin_create_user(data: StaffUserIn, db: AsyncSession = Depends(get_db
 
 @router.get("/users", response_model=list[UserAdminOut], operation_id="list_users")
 async def list_users(
-    role: str | None = None,
-    status_filter: str | None = None,
+    role: str | None = Query(default=None, pattern="^(admin|customer|subscriber|delivery)$"),
+    status_filter: str | None = Query(default=None, pattern="^(active|suspended|erased)$"),
+    q: str | None = Query(default=None, max_length=64, description="Phone or name contains"),
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
 ):
-    q = select(User).order_by(User.id)
+    query = select(User).order_by(User.id)
     if role is not None:
-        q = q.where(User.role == role)
+        query = query.where(User.role == role)
     if status_filter is not None:
-        q = q.where(User.status == status_filter)
-    return await paged(db, q, page)
+        query = query.where(User.status == status_filter)
+    if q:
+        like = f"%{_escape_like(q)}%"
+        query = query.where(User.phone.ilike(like, escape="\\") | User.full_name.ilike(like, escape="\\"))
+    return await paged(db, query, page)
 
 
 @router.patch("/users/{user_id}", response_model=UserAdminOut, operation_id="update_user")
@@ -647,9 +689,102 @@ async def admin_settle_credit(
 
 
 # ---------- Shop management ----------
-@router.get("/shops", response_model=list[ShopOut], operation_id="admin_list_shops")
-async def admin_list_shops(db: AsyncSession = Depends(get_db), page: Page = Depends(pagination)):
-    return await paged(db, select(Shop).order_by(Shop.id), page)
+class AdminShopRow(ShopOut):
+    price_tier_id: int | None = None
+    is_home: bool = False
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    subscription_id: int | None = None
+    subscription_status: str | None = None
+
+
+class ShopDriverOut(BaseModel):
+    assignment_id: int
+    delivery_id: int
+    full_name: str | None = None
+    phone: str
+    active: bool
+
+
+class AdminShopDetail(AdminShopRow):
+    drivers: list[ShopDriverOut] = []
+
+
+async def _shop_rows(db: AsyncSession, shops: list[Shop]) -> list[AdminShopRow]:
+    if not shops:
+        return []
+    owners = dict(
+        (
+            await db.execute(
+                select(CustomerAccount.id, User)
+                .join(User, User.id == CustomerAccount.owner_user_id)
+                .where(CustomerAccount.id.in_({x.account_id for x in shops}))
+            )
+        ).all()
+    )
+    subs = {
+        sub.shop_id: sub
+        for sub in (
+            await db.execute(select(Subscription).where(Subscription.shop_id.in_([x.id for x in shops])))
+        ).scalars()
+    }
+    rows = []
+    for shop in shops:
+        row = AdminShopRow.model_validate(shop)
+        owner = owners.get(shop.account_id)
+        sub = subs.get(shop.id)
+        row.customer_name = owner.full_name if owner else None
+        row.customer_phone = owner.phone if owner else None
+        row.subscription_id = sub.id if sub else None
+        row.subscription_status = sub.status if sub else None
+        rows.append(row)
+    return rows
+
+
+@router.get("/shops", response_model=list[AdminShopRow], operation_id="admin_list_shops")
+async def admin_list_shops(
+    status_filter: str | None = Query(default=None, pattern="^(active|inactive)$"),
+    account_id: int | None = None,
+    price_tier_id: int | None = None,
+    q: str | None = Query(default=None, max_length=64, description="Name or pincode contains"),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    query = select(Shop).order_by(Shop.id)
+    if status_filter is not None:
+        query = query.where(Shop.status == status_filter)
+    if account_id is not None:
+        query = query.where(Shop.account_id == account_id)
+    if price_tier_id is not None:
+        query = query.where(Shop.price_tier_id == price_tier_id)
+    if q:
+        like = f"%{_escape_like(q)}%"
+        query = query.where(Shop.name.ilike(like, escape="\\") | Shop.pincode.ilike(like, escape="\\"))
+    return await _shop_rows(db, list(await paged(db, query, page)))
+
+
+@router.get("/shops/{shop_id}", response_model=AdminShopDetail, operation_id="admin_get_shop")
+async def admin_get_shop(shop_id: int, db: AsyncSession = Depends(get_db)):
+    """One shop with its owner, price tier, standing order and assigned drivers."""
+    shop = await db.get(Shop, shop_id)
+    if shop is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Shop not found")
+    (row,) = await _shop_rows(db, [shop])
+    out = AdminShopDetail.model_validate(row.model_dump())
+    out.drivers = [
+        ShopDriverOut(
+            assignment_id=a.id, delivery_id=u.id, full_name=u.full_name, phone=u.phone, active=a.active
+        )
+        for a, u in (
+            await db.execute(
+                select(DeliveryAssignment, User)
+                .join(User, User.id == DeliveryAssignment.delivery_id)
+                .where(DeliveryAssignment.shop_id == shop_id)
+                .order_by(DeliveryAssignment.active.desc(), DeliveryAssignment.id)
+            )
+        ).all()
+    ]
+    return out
 
 
 @router.patch("/shops/{shop_id}", response_model=ShopOut, operation_id="admin_update_shop")
