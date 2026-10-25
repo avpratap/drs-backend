@@ -1,15 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
-from app.models.billing import WalletTransaction, WithdrawalRequest
+from app.deps.pagination import Page, paged, pagination, set_total
+from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
 from app.models.shop import CustomerAccount
 from app.models.user import User
-from app.schemas.billing import BillingSummary, TopupIn, WalletTxnOut
+from app.schemas.billing import (
+    BillingSummary,
+    CreditLedgerLineOut,
+    TopupIn,
+    WalletTxnLineOut,
+    WalletTxnOut,
+)
 from app.services import admin_tools as audit_svc
 from app.services import billing as billing_service
 
@@ -70,6 +77,57 @@ async def my_billing(user: User = Depends(get_current_user), db: AsyncSession = 
         credit_outstanding=outstanding,
         recent_wallet_txns=txns,
     )
+
+
+@router.get(
+    "/transactions", response_model=list[WalletTxnLineOut], operation_id="my_wallet_transactions"
+)
+async def my_wallet_transactions(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    """The caller's full wallet ledger, newest first (`?limit=&offset=`, total in
+    `X-Total-Count`). Read-only and scoped to the caller's own account."""
+    account = await db.scalar(
+        select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+    )
+    if account is None:  # nothing yet: an empty ledger, not an error
+        await set_total(db, select(WalletTransaction).where(false()), page)
+        return []
+    q = (
+        select(WalletTransaction)
+        .join(Wallet, Wallet.id == WalletTransaction.wallet_id)
+        .where(Wallet.account_id == account.id)
+        .order_by(WalletTransaction.id.desc())
+    )
+    return await paged(db, q, page)
+
+
+@router.get(
+    "/credit-statement", response_model=list[CreditLedgerLineOut], operation_id="my_credit_statement"
+)
+async def my_credit_statement(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    """Line-item statement for an account on credit terms (B2B postpaid): every charge,
+    payment and credit note with the running outstanding, newest first (`?limit=&offset=`,
+    total in `X-Total-Count`). Scoped to the caller's own account; an account that was
+    never on credit simply has no lines."""
+    account = await db.scalar(
+        select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
+    )
+    if account is None:
+        await set_total(db, select(CreditLedger).where(false()), page)
+        return []
+    q = (
+        select(CreditLedger)
+        .where(CreditLedger.account_id == account.id)
+        .order_by(CreditLedger.id.desc())
+    )
+    return await paged(db, q, page)
 
 
 @router.post(

@@ -8,6 +8,7 @@ from app.api.v1.orders import _detail as _order_detail
 from app.core.db import get_db
 from app.core.gst_states import validate_state
 from app.deps.auth import get_current_user
+from app.deps.idempotency import require_idempotency_key
 from app.models.product import Product
 from app.models.user import User
 from app.schemas.order import OrderOut
@@ -212,7 +213,11 @@ async def cart_quote(
     )
 
 
-@router.post("/checkout", response_model=OrderOut, operation_id="checkout_cart")
+# Idempotency-Key REQUIRED: a retried checkout must replay, not create a second order.
+@router.post(
+    "/checkout", response_model=OrderOut, operation_id="checkout_cart",
+    dependencies=[Depends(require_idempotency_key)],
+)
 async def checkout_cart(
     data: CheckoutIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):

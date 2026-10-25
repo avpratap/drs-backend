@@ -141,7 +141,12 @@ async def _my_account_ids(db: AsyncSession, user: User) -> set[int]:
 CREATING_STALE_AFTER = dt.timedelta(minutes=1)
 
 
-@router.post("/create", response_model=PaymentCreateOut, operation_id="create_payment")
+# Idempotency-Key REQUIRED: a retried create must not open a second gateway order /
+# placeholder (and a top-up retry must not charge twice).
+@router.post(
+    "/create", response_model=PaymentCreateOut, operation_id="create_payment",
+    dependencies=[Depends(require_idempotency_key)],
+)
 async def create_payment(
     data: PaymentCreate,
     user: User = Depends(get_current_user),
