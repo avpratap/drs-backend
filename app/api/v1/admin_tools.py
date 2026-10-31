@@ -304,3 +304,18 @@ async def product_search(
         .params(q=q)
     )
     return await paged(db, stmt, page)
+
+
+# ---------- Admin product detail ----------
+# Declared after /products/search so the literal path wins over the int parameter.
+@router.get(
+    "/products/{product_id}", response_model=ProductOut, operation_id="admin_get_product",
+    responses={404: {"description": "Product not found"}},
+)
+async def admin_get_product(product_id: int, db: AsyncSession = Depends(get_db)):
+    """One product for the admin detail screen. Unlike the storefront GET /products/{id},
+    retired products are returned too (their status says so)."""
+    product = await db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
+    return product

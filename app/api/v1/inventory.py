@@ -178,6 +178,18 @@ async def list_locations(db: AsyncSession = Depends(get_db), page: Page = Depend
     return await paged(db, select(Location).order_by(Location.id), page)
 
 
+@router.get(
+    "/locations/{location_id}", response_model=LocationOut, operation_id="admin_get_location",
+    responses={404: {"description": "Location not found"}},
+)
+async def admin_get_location(location_id: int, db: AsyncSession = Depends(get_db)):
+    """One stock location (warehouse / shop / vehicle) for the admin detail screen."""
+    loc = await db.get(Location, location_id)
+    if loc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+    return loc
+
+
 # ---------- Stock ----------
 async def _require_product(db: AsyncSession, product_id: int) -> None:
     if await db.get(Product, product_id) is None:
