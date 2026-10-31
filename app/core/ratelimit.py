@@ -23,7 +23,7 @@ from app.core.redis import redis_client
 from app.core.security import decode_token
 
 log = logging.getLogger("drs.ratelimit")
-_SKIP = {"/healthz", "/readyz", "/metrics"}
+_SKIP = {"/healthz", "/readyz", "/health", "/ready", "/metrics"}
 
 
 async def allow(ip: str, limit: int, window: int = 60) -> bool:
