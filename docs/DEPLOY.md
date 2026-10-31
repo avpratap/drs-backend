@@ -22,6 +22,8 @@ RuntimeError: Refusing to start: ENV=prod but these settings are missing or unsa
 - `SELLER_GSTIN` — **required** (GST tax invoices are invalid without it)
 - `MSG91_AUTHKEY`, `MSG91_TEMPLATE_ID` (DLT-approved OTP template) — **required**: without
   them OTP SMS is never sent and nobody can log in, so the app refuses to boot
+- `JOBS_TOKEN` — optional; enables `POST /api/v1/internal/jobs/{job}` for an external
+  scheduler (see "Scheduled jobs"). When set in prod it must be ≥ 32 chars
 - `DATABASE_URL`, `REDIS_URL` — **required** (boot fails if left on the local dev defaults)
 - `FCM_PROJECT_ID` + `FCM_CREDENTIALS_JSON` — set **both or neither** (one alone fails
   boot); with neither, push is not sent (dev stub) and boot logs a warning
@@ -97,9 +99,62 @@ See `SCALING.md`. In short: PgBouncer transaction pooling (`DB_POOL_MODE=pgbounc
 NullPool app-side), Redis in-region, cutoff is a chunked idempotent ARQ batch, and
 `/metrics` is per-process (aggregate at the Prometheus scraper across instances).
 
-## Worker (ARQ) crons
-- `scheduled_cutoff` — 17:35 UTC (23:05 IST): materialize tomorrow's delivery orders.
-- `drain_outbox` — every minute: send queued notifications.
-- `housekeeping` — 01:00 UTC: prune idempotency keys / webhook events / old notifications.
+## Scheduled jobs (cutoff, notifications, housekeeping)
 
-If `CUTOFF_HOUR` changes, recompute the UTC cron time in `app/worker.py`.
+| Job | What | ARQ worker cron (UTC) | GitHub Actions (UTC) |
+|---|---|---|---|
+| `cutoff` | materialize tomorrow's standing orders into `delivery_orders` | 17:35 (23:05 IST) | 17:35 + 18:05 retry |
+| `outbox` | send queued WhatsApp/SMS/push/email notifications | every minute | every 10 min |
+| `expire_batches` | write off stock batches past expiry | 18:45 (00:15 IST) | 18:45 (00:15 IST) |
+| `housekeeping` | prune idempotency keys, webhook events, old notifications; reward missed referrals | 01:00 | 01:00 |
+| `churn` | churn scoring over all accounts | 02:00 | 02:00 |
+
+All jobs are idempotent: a repeat or overlapping run is safe (the cutoff re-materializes
+the same rows and takes a per-date Redis lock). The cutoff runs **inline** in whatever
+calls it (chunked, one savepoint per subscription): `POST /api/v1/admin/cutoff/run`
+(admin), `POST /api/v1/internal/jobs/cutoff` (scheduler), `scripts/run_job.py cutoff`
+(platform cron) and the worker all call the same `run_cutoff`; none needs a worker.
+
+### Free tier (Render free: API only, no workers or cron) — GitHub Actions
+`.github/workflows/scheduled-jobs.yml` calls `POST /api/v1/internal/jobs/{job}` on the
+live API on the schedule above. One-time setup:
+
+1. Generate a token: `openssl rand -hex 32`.
+2. Render → the API service → Environment: add `JOBS_TOKEN=<token>` (redeploys). With
+   `JOBS_TOKEN` unset the endpoint is disabled (404). In prod the boot guard requires it
+   to be ≥ 32 chars when set.
+3. GitHub → repo Settings → Secrets and variables → Actions:
+   - secret `DRS_JOBS_TOKEN` = the same token;
+   - variable `DRS_API_URL` = `https://drs-backend-zvb1.onrender.com` (no trailing slash).
+   Until both are set, scheduled runs are skipped with a warning, not failed.
+4. Test: Actions → scheduled-jobs → Run workflow → job `outbox` (or `cutoff`). A run fails
+   (and GitHub emails you) on a non-200 or when a cutoff ran partially (`"ok": false`);
+   re-run it, the jobs are idempotent.
+
+Why a dedicated token, not an admin login: admin access tokens live 15 minutes and
+refresh tokens rotate on every use, so neither can sit in a CI secret.
+
+Caveats of the free path:
+- GitHub starts scheduled runs late under load (sometimes 10–30 min), hence the second
+  cutoff run at 23:35 IST. Customers' standing-order changes freeze at the 23:00 cutoff
+  anyway; both runs land before IST midnight.
+- A free instance sleeps after ~15 idle minutes; the workflow wakes it via `/healthz`
+  first. The 10-minute outbox run keeps it mostly awake, which uses ~744 of the 750
+  free instance-hours a month (enough for this one service, not a second one).
+- Notifications go out within ~10 minutes (not ~1) because the outbox drains every 10.
+- Manual run with a date: Actions → scheduled-jobs → Run workflow → `cutoff` + date.
+
+### Paid plan — `render.yaml` (API + ARQ worker + cutoff cron)
+`render.yaml` is a Render Blueprint: the API (`sh start.sh`, health check `/readyz`), the
+ARQ worker (`uv run arq app.worker.WorkerSettings`, which runs the crons in the table),
+a Render cron job at 18:05 UTC running `scripts/run_job.py cutoff` as a safety net after
+the worker's 23:05 IST run (exits non-zero on a partial run, so Render alerts), Key
+Value (Redis, `noeviction`) and Postgres 16 (PostGIS). Secrets are `sync: false` and are
+asked for on the first sync. `DATABASE_URL` comes from the database's `connectionString`
+(`postgresql://` is normalized to `postgresql+asyncpg://` by the app).
+
+When switching to it, **disable the GitHub workflow** (Actions → scheduled-jobs →
+Disable) or unset `JOBS_TOKEN`, so jobs aren't triggered twice (harmless, but noisy).
+
+If `CUTOFF_HOUR` changes, recompute the UTC cron times in `app/worker.py`,
+`.github/workflows/scheduled-jobs.yml` and `render.yaml`.

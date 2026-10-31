@@ -1,0 +1,135 @@
+# Render Blueprint for a PAID plan: API + ARQ worker + cutoff cron + Postgres + Key Value.
+#
+# The live demo deploy is the FREE tier, which has no background workers or cron jobs:
+# there, only the API runs and the scheduled jobs are triggered from GitHub Actions
+# (.github/workflows/scheduled-jobs.yml -> POST /api/v1/internal/jobs/{job}). See
+# docs/DEPLOY.md "Scheduled jobs". When moving to this blueprint, disable that workflow
+# (the worker's own crons cover the same jobs).
+#
+# Secrets are `sync: false`: Render prompts for them on the first Blueprint sync; they
+# are never committed. Plans/regions are starting points; adjust in the dashboard.
+envVarGroups:
+  - name: drs-shared
+    envVars:
+      - key: ENV
+        value: dev            # set to prod only once every prod setting below is filled in
+      - key: TIMEZONE
+        value: Asia/Kolkata
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"            # Render's proxy in front of the web service
+      - key: DB_SSL
+        value: "false"        # internal network; set true with an external DB URL
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: MSG91_AUTHKEY
+        sync: false
+      - key: MSG91_TEMPLATE_ID
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: SELLER_GSTIN
+        sync: false
+      - key: SHIPROCKET_WEBHOOK_TOKEN
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_ACCESS_KEY
+        sync: false
+      - key: R2_SECRET_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PRIVATE_BUCKET
+        sync: false
+      - key: FCM_PROJECT_ID
+        sync: false
+      - key: FCM_CREDENTIALS_JSON
+        sync: false
+
+services:
+  # --- API -----------------------------------------------------------------------
+  - type: web
+    name: drs-api
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    # migrate -> (dev-only) seeds -> uvicorn on $PORT. Single instance: migrating at
+    # start is safe; before scaling out, move `alembic upgrade head` to preDeployCommand.
+    dockerCommand: sh start.sh
+    healthCheckPath: /readyz
+    envVars:
+      - fromGroup: drs-shared
+      - key: DATABASE_URL     # postgresql:// is normalized to postgresql+asyncpg://
+        fromDatabase:
+          name: drs-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: drs-redis
+          property: connectionString
+
+  # --- ARQ worker: cutoff 23:05 IST, outbox every minute, housekeeping, churn ---------
+  - type: worker
+    name: drs-worker
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerCommand: uv run arq app.worker.WorkerSettings
+    envVars:
+      - fromGroup: drs-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: drs-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: drs-redis
+          property: connectionString
+
+  # --- Cutoff safety net: 23:35 IST, after the worker's 23:05 run. Idempotent (no-op
+  # re-materialization, per-date Redis lock), so it only matters if the worker's run
+  # failed or the worker was down. Exits non-zero on a partial run -> Render alerts.
+  - type: cron
+    name: drs-cutoff
+    runtime: docker
+    plan: starter
+    region: singapore
+    schedule: "5 18 * * *"    # UTC
+    dockerfilePath: ./Dockerfile
+    dockerCommand: uv run python scripts/run_job.py cutoff
+    envVars:
+      - fromGroup: drs-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: drs-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: drs-redis
+          property: connectionString
+
+  # --- Redis (ARQ queue, locks, rate limits, caches) ---------------------------------
+  - type: keyvalue
+    name: drs-redis
+    plan: starter
+    region: singapore
+    maxmemoryPolicy: noeviction   # ARQ jobs/locks must not be evicted
+    ipAllowList: []               # internal connections only
+
+databases:
+  - name: drs-db
+    plan: basic-256mb
+    region: singapore
+    postgresMajorVersion: "16"    # migration 0001 runs CREATE EXTENSION postgis
+    ipAllowList: []

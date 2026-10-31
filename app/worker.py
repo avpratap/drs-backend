@@ -77,6 +77,16 @@ async def housekeeping(ctx: dict) -> dict:
         return counts
 
 
+async def expire_stock(ctx: dict) -> dict:
+    """Write off stock batches past expiry, as of the IST business day (00:15 IST)."""
+    from app.services import batches as batch_svc
+
+    async with SessionLocal() as db:
+        result = await batch_svc.expire_batches(db, today_ist(), created_by=None)
+        await db.commit()
+        return result
+
+
 async def score_churn(ctx: dict) -> dict:
     """Nightly churn scoring over all accounts (ML on our infra; aggregate data only)."""
     async with SessionLocal() as db:
@@ -85,7 +95,7 @@ async def score_churn(ctx: dict) -> dict:
 
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    functions = [scheduled_cutoff, drain_outbox, housekeeping, score_churn]
+    functions = [scheduled_cutoff, drain_outbox, housekeeping, expire_stock, score_churn]
     # arq's cron() takes PER-JOB max_tries/keep_result that OVERRIDE the worker-level
     # settings (and default to max_tries=1, keep_result=0), so they must be set here or
     # the "retry + 1h result retention" below would NOT apply to these scheduled jobs.
@@ -96,6 +106,7 @@ class WorkerSettings:
         ),  # 23:05 IST
         cron(drain_outbox, max_tries=2, keep_result=300),  # every minute
         cron(housekeeping, hour=1, minute=0, max_tries=3, keep_result=3600),  # daily prune
+        cron(expire_stock, hour=18, minute=45, max_tries=3, keep_result=3600),  # 00:15 IST
         cron(score_churn, hour=2, minute=0, max_tries=3, keep_result=3600),  # nightly churn
     ]
     # Resilience: retry failed jobs with backoff; a job that exhausts max_tries
