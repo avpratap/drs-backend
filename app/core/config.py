@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     DATABASE_URL: str = _DEV_DATABASE_URL
     REDIS_URL: str = _DEV_REDIS_URL
 
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _asyncpg_scheme(cls, v: str) -> str:
+        # Managed Postgres (e.g. Render's fromDatabase connectionString) hands out
+        # postgres:// or postgresql:// URLs; the app's engine needs the asyncpg driver.
+        for prefix in ("postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+asyncpg://" + v[len(prefix):]
+        return v
+
     # DB pooling. 'direct' = app-side pool (local/dev, direct Postgres).
     # 'pgbouncer' = NullPool + disable asyncpg statement cache (prod behind PgBouncer
     # transaction pooling, where server-side prepared statements must be off).
@@ -137,6 +147,9 @@ class Settings(BaseSettings):
     # so rotating JWT auth doesn't invalidate unsubscribe links already in inboxes; falls
     # back to JWT_SECRET when unset (dev).
     NEWSLETTER_UNSUB_SECRET: str = ""
+    # Shared secret for POST /api/v1/internal/jobs/{job} (external scheduler, e.g. the
+    # GitHub Actions cron on a deploy with no ARQ worker). Empty = endpoint disabled.
+    JOBS_TOKEN: str = ""
 
     # Email (SMTP). Empty host -> dev stub (logs, no send).
     SMTP_HOST: str = ""
@@ -207,6 +220,8 @@ class Settings(BaseSettings):
         fcm = (bool(self.FCM_PROJECT_ID.strip()), bool(self.FCM_CREDENTIALS_JSON.strip()))
         need(fcm[0] == fcm[1], "FCM_PROJECT_ID, FCM_CREDENTIALS_JSON",
              "set both or neither (only one is set)")
+        need(not self.JOBS_TOKEN or len(self.JOBS_TOKEN) >= 32, "JOBS_TOKEN",
+             "set but shorter than 32 chars (it runs the cutoff); use a long random value")
         if problems:
             lines = "\n".join(f"  - {names}: {why}" for names, why in problems)
             raise ProdConfigError(

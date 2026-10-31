@@ -4947,6 +4947,30 @@
         "title": "ItemOut",
         "type": "object"
       },
+      "JobRunOut": {
+        "properties": {
+          "job": {
+            "title": "Job",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          }
+        },
+        "required": [
+          "job",
+          "ok",
+          "result"
+        ],
+        "title": "JobRunOut",
+        "type": "object"
+      },
       "LedgerEntryOut": {
         "properties": {
           "balance_after": {
@@ -24086,6 +24110,95 @@
         "summary": "Upload Pod Asset",
         "tags": [
           "delivery"
+        ]
+      }
+    },
+    "/api/v1/internal/jobs/{job}": {
+      "post": {
+        "description": "Run one scheduled job now, inline.\n\n- cutoff: materialize standing orders into delivery_orders for `date` (default\n  tomorrow, IST); today/past dates are refused.\n- outbox: deliver due queued notifications (WhatsApp/SMS/push/email).\n- housekeeping: prune short-retention rows + reward missed referrals.\n- churn: churn scoring over all accounts.\n- expire_batches: write off stock batches past expiry (as of today, IST).",
+        "operationId": "run_scheduled_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job",
+            "required": true,
+            "schema": {
+              "enum": [
+                "cutoff",
+                "outbox",
+                "housekeeping",
+                "churn",
+                "expire_batches"
+              ],
+              "title": "Job",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "bad or missing jobs token"
+          },
+          "404": {
+            "description": "jobs endpoint disabled (JOBS_TOKEN unset)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Scheduled Job",
+        "tags": [
+          "jobs"
         ]
       }
     },
