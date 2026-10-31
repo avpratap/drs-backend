@@ -50,6 +50,8 @@ class ProductionOrder(Base):
         String(16), default="draft", nullable=False
     )  # draft|in_progress|completed|cancelled
     output_batch_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Actual finished-goods output booked on completion (None until completed).
+    produced_qty: Mapped[float | None] = mapped_column(Numeric(12, 3), nullable=True)
     mfg_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     expiry_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

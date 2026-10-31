@@ -17,6 +17,7 @@ from app.models.loyalty import (
     ReferralRedemption,
 )
 from app.services import billing
+from app.services.subscription import today_ist
 
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no ambiguous 0/O/1/I
 _MAX_POINTS = 1_000_000_000  # keep within int4; reject absurd balances cleanly
@@ -209,7 +210,9 @@ async def reward_referral_on_purchase(db: AsyncSession, referee_account_id: int)
 async def issue_gift_card(db: AsyncSession, amount: float, issued_to=None, expires_at: dt.date | None = None) -> GiftCard:
     if amount <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount must be > 0")
-    if expires_at is not None and expires_at < dt.date.today():
+    # Business-local (IST) date like the rest of the system: the server date (UTC) is
+    # still yesterday between 00:00 and 05:30 IST.
+    if expires_at is not None and expires_at < today_ist():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "expires_at is in the past")
     for _ in range(10):
         code = _token(16)
@@ -238,7 +241,7 @@ async def redeem_gift_card(db: AsyncSession, code: str, account_id: int, amount:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Gift card not found")
     if gc.status in ("disabled", "redeemed", "expired"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Gift card is {gc.status}")
-    if gc.expires_at is not None and gc.expires_at < dt.date.today():
+    if gc.expires_at is not None and gc.expires_at < today_ist():
         # (Status is flipped to 'expired' by the expiry sweep, not here — a raise would
         # roll back the write anyway; the check alone blocks redemption.)
         raise HTTPException(status.HTTP_409_CONFLICT, "Gift card has expired")

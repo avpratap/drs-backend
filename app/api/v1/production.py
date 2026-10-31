@@ -56,6 +56,8 @@ class ProductionIn(BaseModel):
 
 class CompleteIn(BaseModel):
     output_batch_no: str = Field(min_length=1, max_length=64)
+    # What the run actually yielded; omitted -> the planned quantity.
+    produced_qty: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     mfg_date: dt.date | None = None
     expiry_date: dt.date | None = None
 
@@ -76,6 +78,7 @@ class ProductionOut(BaseModel):
     planned_qty: float
     status: str
     output_batch_no: str | None = None
+    produced_qty: float | None = None
 
 
 async def _bom_out(db: AsyncSession, bom: BillOfMaterials) -> BomOut:
@@ -210,7 +213,10 @@ async def complete_production_order(
     db: AsyncSession = Depends(get_db),
 ):
     pro = await _locked(db, pro_id)
-    await production.complete_order(db, pro, data.output_batch_no, data.mfg_date, data.expiry_date, user.id)
+    await production.complete_order(
+        db, pro, data.output_batch_no, data.mfg_date, data.expiry_date, user.id,
+        produced_qty=data.produced_qty,
+    )
     await db.commit()
     await db.refresh(pro)
     return pro

@@ -136,3 +136,24 @@ async def test_gift_card_redeem_requires_key_and_retry_does_not_double_credit(cl
     assert r1.status_code == r2.status_code == 200
     assert r1.json() == r2.json() and r2.json()["balance"] == 300.0
     assert round(await wallet() - w0, 2) == 200.0  # credited once, not twice
+
+
+async def test_gift_card_expiry_uses_ist_date(client, monkeypatch):
+    """B9: between 00:00 and 05:30 IST the server (UTC) date is still yesterday; a card
+    that expired yesterday in IST must already be refused."""
+    import datetime as dt
+
+    from app.services import loyalty as loyalty_svc
+
+    admin = auth(await login(client, "9999900001"))
+    cust = auth(await login(client, "9100003003"))
+    aid = await _account_id(client, cust)
+    utc_today = dt.datetime.now(dt.UTC).date()
+    code = (await client.post("/api/v1/admin/gift-cards", json={
+        "amount": 100, "issued_to_account_id": aid, "expires_at": str(utc_today)},
+        headers=ik(admin))).json()["code"]
+    # It is now 01:00 IST on the next day: the card expired yesterday (IST).
+    monkeypatch.setattr(loyalty_svc, "today_ist", lambda: utc_today + dt.timedelta(days=1))
+    r = await client.post("/api/v1/loyalty/gift-cards/redeem",
+                          json={"code": code, "amount": 10}, headers=cust)
+    assert r.status_code in (409, 422) and "expire" in r.text.lower()
