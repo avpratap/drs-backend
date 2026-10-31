@@ -98,3 +98,29 @@ async def test_receive_same_batch_merges_not_duplicates(client):
     assert r2.json()["id"] == first_id
     assert r2.json()["qty"] == 25.0
     assert await _stock(client, h, pid) == 25.0
+
+
+async def test_lot_is_good_through_its_expiry_date():
+    """Convention: expiry_date is the LAST sellable day. A lot expiring today is used
+    today and written off from tomorrow."""
+    import datetime as dt
+
+    from app.core.db import SessionLocal
+    from app.models.batch import StockBatch
+    from app.models.product import Product
+    from app.services import batches
+
+    async with SessionLocal() as db:
+        p = Product(sku=f"EXP-{dt.datetime.now().timestamp()}", name="exp", uom="litre")
+        db.add(p)
+        await db.flush()
+        today = batches._today()
+        lot = await batches.receive_batch(db, p.id, "TODAY", 5, expiry_date=today)
+        await batches.consume_fefo(db, p.id, 2, "delivery", strict=True)  # sellable today
+        assert float(lot.qty) == 3.0 and lot.status == "active"
+        swept = await batches.expire_batches(db, today)  # today's sweep: not yet expired
+        assert swept["batches_expired"] == 0
+        swept = await batches.expire_batches(db, today + dt.timedelta(days=1))
+        assert swept["batches_expired"] == 1 and swept["qty_written_off"] == 3.0
+        assert (await db.get(StockBatch, lot.id)).status == "expired"
+        await db.rollback()

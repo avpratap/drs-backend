@@ -166,3 +166,37 @@ async def test_production_requires_admin(client):
     assert (await client.get("/api/v1/admin/boms", headers=hc)).status_code == 403
     assert (await client.get("/api/v1/admin/production-orders", headers=hc)).status_code == 403
     assert (await client.post("/api/v1/admin/boms", json={"product_id": 1, "name": "x", "components": [{"component_product_id": 1, "qty": 1}]}, headers=hc)).status_code == 403
+
+
+async def test_complete_books_actual_produced_qty(client):
+    """B8: a run that yields less (or more) than planned books what was actually made."""
+    h = auth(await login(client, "9999900001"))
+    ghee = await _product(client, h, "PRD-GHEE-YIELD")
+    cream = await _product(client, h, "PRD-CREAM-YIELD")
+    bom_id = await _bom(client, h, ghee, [(cream, 10)], output_qty=1)
+    await _seed_batch(client, h, cream, 100, "CR-Y")
+    pro = (await client.post("/api/v1/admin/production-orders",
+                             json={"bom_id": bom_id, "planned_qty": 5}, headers=h)).json()
+    await client.post(f"/api/v1/admin/production-orders/{pro['id']}/start", headers=h)
+    bad = await client.post(f"/api/v1/admin/production-orders/{pro['id']}/complete",
+                            json={"output_batch_no": "GY", "produced_qty": 0}, headers=h)
+    assert bad.status_code == 422
+    done = await client.post(f"/api/v1/admin/production-orders/{pro['id']}/complete",
+                             json={"output_batch_no": "GY", "produced_qty": 4.25}, headers=h)
+    assert done.status_code == 200, done.text
+    assert done.json()["produced_qty"] == 4.25 and done.json()["planned_qty"] == 5.0
+    assert await _stock(client, h, ghee) == 4.25  # actual, not planned
+
+
+async def test_complete_without_produced_qty_books_planned(client):
+    h = auth(await login(client, "9999900001"))
+    ghee = await _product(client, h, "PRD-GHEE-PLAN")
+    cream = await _product(client, h, "PRD-CREAM-PLAN")
+    bom_id = await _bom(client, h, ghee, [(cream, 1)], output_qty=1)
+    await _seed_batch(client, h, cream, 10, "CR-P")
+    pro = (await client.post("/api/v1/admin/production-orders",
+                             json={"bom_id": bom_id, "planned_qty": 3}, headers=h)).json()
+    await client.post(f"/api/v1/admin/production-orders/{pro['id']}/start", headers=h)
+    done = await client.post(f"/api/v1/admin/production-orders/{pro['id']}/complete",
+                             json={"output_batch_no": "GP"}, headers=h)
+    assert done.json()["produced_qty"] == 3.0 and await _stock(client, h, ghee) == 3.0

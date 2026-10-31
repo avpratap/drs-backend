@@ -89,15 +89,22 @@ async def start_order(db: AsyncSession, pro: ProductionOrder, user_id) -> Produc
     return pro
 
 
-async def complete_order(db: AsyncSession, pro: ProductionOrder, output_batch_no, mfg_date, expiry_date, user_id) -> ProductionOrder:
+async def complete_order(
+    db: AsyncSession, pro: ProductionOrder, output_batch_no, mfg_date, expiry_date, user_id,
+    produced_qty: float | None = None,
+) -> ProductionOrder:
+    """Book the finished goods. `produced_qty` is what the run ACTUALLY yielded (a
+    short or over run is normal); omitted, the planned quantity is assumed."""
     if pro.status != "in_progress":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Order is {pro.status}, cannot complete")
+    qty = round(float(produced_qty if produced_qty is not None else pro.planned_qty), 3)
     await batch_svc.receive_batch(
-        db, pro.product_id, output_batch_no, float(pro.planned_qty),
+        db, pro.product_id, output_batch_no, qty,
         location_id=pro.location_id, mfg_date=mfg_date, expiry_date=expiry_date,
         created_by=user_id, reason="production", ref_type="production", ref_id=pro.id,
     )
     pro.output_batch_no = output_batch_no
+    pro.produced_qty = qty
     pro.mfg_date = mfg_date
     pro.expiry_date = expiry_date
     pro.status = "completed"

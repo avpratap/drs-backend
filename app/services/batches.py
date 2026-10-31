@@ -112,12 +112,19 @@ class InsufficientStock(Exception):
         self.product_id = product_id
 
 
+# Expiry convention (GOOD-THROUGH): a lot's expiry_date is the LAST day it may be sold —
+# the "use by" date printed on dairy packs. A lot expiring today is still sellable today
+# (consume_fefo: expiry_date >= today) and is written off from tomorrow (expiry_date <
+# as_of). Both checks below and in consume_fefo/transfers follow this one rule.
+
+
 async def _expire_unswept(
     db: AsyncSession, item, product_id: int, location_id: int, as_of: dt.date,
     created_by: int | None = None,
 ) -> tuple[int, float]:
-    """Write off this (product, location)'s lots whose expiry is before `as_of`. Caller
-    holds the StockItem lock (stock_item -> batch order). Returns (lots, qty)."""
+    """Write off this (product, location)'s lots whose expiry is before `as_of` (lots are
+    good through their expiry date). Caller holds the StockItem lock (stock_item -> batch
+    order). Returns (lots, qty)."""
     lots = (
         await db.execute(
             select(StockBatch)
