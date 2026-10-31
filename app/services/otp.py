@@ -15,7 +15,8 @@ from app.services.sms import send_otp_sms, sms_enabled
 OTP_TTL = max(60, settings.MSG91_OTP_EXPIRY_MIN * 60)  # keep in sync with the SMS's stated expiry
 MAX_SENDS_PER_HOUR = 5
 MAX_SENDS_PER_IP_HOUR = 50  # across all phones from one device/IP
-MAX_VERIFY_ATTEMPTS = 5
+MAX_VERIFY_ATTEMPTS = 5  # per issued OTP, per phone
+MAX_VERIFY_FAILS_PER_IP_HOUR = 50  # failed verifies across all phones from one IP
 RESEND_COOLDOWN = 60  # seconds
 
 
@@ -65,19 +66,36 @@ return 0
 """
 
 
-async def verify_otp(phone: str, otp: str) -> bool:
+async def _verify_failed(ip: str | None) -> bool:
+    """Count a failed verify against the caller's IP; always returns False."""
+    if ip:
+        key = f"otp:vfail:{ip}"
+        if await redis_client.incr(key) == 1:
+            await redis_client.expire(key, 3600)
+    return False
+
+
+async def verify_otp(phone: str, otp: str, ip: str | None = None) -> bool:
+    """True when `otp` is the outstanding code for `phone` (consumed on success).
+
+    Raises ValueError once `ip` has MAX_VERIFY_FAILS_PER_IP_HOUR failed verifies in the
+    hour: the per-phone attempt cap alone let one client guess across many phones that
+    have a code outstanding. Only failures count, so a shared (CGNAT/office) IP full of
+    users typing their codes correctly is not throttled."""
+    if ip and int(await redis_client.get(f"otp:vfail:{ip}") or 0) >= MAX_VERIFY_FAILS_PER_IP_HOUR:
+        raise ValueError("Too many incorrect codes from this device. Try again later.")
     stored = await redis_client.get(f"otp:{phone}")
     if not stored:
-        return False
+        return await _verify_failed(ip)
 
     attempts = await redis_client.incr(f"otp:attempts:{phone}")
     if attempts > MAX_VERIFY_ATTEMPTS:
         await redis_client.delete(f"otp:{phone}", f"otp:attempts:{phone}")
-        return False
+        return await _verify_failed(ip)
 
     expected = _hash_otp(phone, otp)
     if not secrets.compare_digest(stored, expected):
-        return False
+        return await _verify_failed(ip)
     # Consume atomically: only the request that actually deletes the stored hash wins, so
     # two concurrent verifies with the right code can't BOTH log in (replay race).
     consumed = await redis_client.eval(_CONSUME_LUA, 1, f"otp:{phone}", expected)

@@ -17,7 +17,8 @@ class OTPRequest(BaseModel):
 
 class OTPRequestResponse(BaseModel):
     detail: str
-    dev_otp: str | None = None  # populated only in non-prod, for testing
+    # Only in non-prod when no SMS was sent; otherwise the key is omitted from the response.
+    dev_otp: str | None = None
 
 
 class OTPVerify(BaseModel):
