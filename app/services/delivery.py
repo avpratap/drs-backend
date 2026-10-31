@@ -223,7 +223,7 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
         if owner is not None:
             await notify.emit_event(
                 db, "wallet.low", owner,
-                {"balance": round(exc.balance, 2), "needed": exc.needed},
+                {"balance": round(exc.balance, 2), "needed": exc.needed, "delivery_id": order_id},
                 account_id=account_id, dedupe_key=f"delivery.lowbalance:{order_id}",
             )
             await db.commit()
@@ -278,7 +278,7 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             db,
             "delivery.completed",
             owner,
-            {"summary": f"{delivered_count} item(s)", "amount": net},
+            {"summary": f"{delivered_count} item(s)", "amount": net, "delivery_id": order.id},
             account_id=order.account_id,
             dedupe_key=f"delivery.completed:{order.id}",
         )

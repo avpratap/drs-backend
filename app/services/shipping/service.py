@@ -337,7 +337,8 @@ async def _notify_delivered(db: AsyncSession, ship: Shipment) -> None:
     owner = await db.get(User, account.owner_user_id) if account else None
     if owner is not None:
         await notify.emit_event(
-            db, "shipment.delivered", owner, {"shipment_no": ship.shipment_no},
+            db, "shipment.delivered", owner,
+            {"shipment_no": ship.shipment_no, "shipment_id": ship.id, "order_id": ship.order_id},
             account_id=ship.account_id, dedupe_key=f"shipment.delivered:{ship.id}",
         )
         # Post-delivery review prompt (marketing-gated by the notification router, so

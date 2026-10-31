@@ -109,6 +109,25 @@ def _fcm_access_token() -> str:
     return creds.token
 
 
+# Keys copied from the event payload into the FCM `data` block so a tap deep-links to
+# the right screen (the app routes on `type` + these ids). An allow-list: amounts,
+# balances and free text stay out of the device-visible data. FCM data values must be
+# strings.
+PUSH_DATA_KEYS = (
+    "type", "order_id", "delivery_id", "shipment_id", "subscription_id", "payment_id",
+    "shop_id", "date",
+)
+
+
+def push_data(payload: dict | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key in PUSH_DATA_KEYS:
+        value = (payload or {}).get(key)
+        if value is not None and isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            out[key] = str(value)
+    return out
+
+
 async def send_push(to_addr: str, body: str, payload: dict | None) -> tuple[bool, str | None, str | None]:
     # to_addr is a comma-joined list of the user's active device tokens (resolved at
     # emit time). No creds -> dev stub.
@@ -124,9 +143,12 @@ async def send_push(to_addr: str, body: str, payload: dict | None) -> tuple[bool
         url = f"https://fcm.googleapis.com/v1/projects/{settings.FCM_PROJECT_ID}/messages:send"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         sent_ids, last_err = [], None
+        data = push_data(payload)
         async with httpx.AsyncClient(timeout=10) as client:
             for tok in tokens:
                 msg = {"message": {"token": tok, "notification": {"title": "DRS", "body": body}}}
+                if data:
+                    msg["message"]["data"] = data
                 resp = await client.post(url, json=msg, headers=headers)
                 if resp.status_code < 300:
                     sent_ids.append(resp.json().get("name", tok[:12]))

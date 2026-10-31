@@ -193,7 +193,7 @@ async def create_subscription(
     if created:
         owner = await _account_owner(db, shop.account_id) or user
         await notify.emit_event(
-            db, "subscription.created", owner, {"shop_id": shop.id},
+            db, "subscription.created", owner, {"shop_id": shop.id, "subscription_id": sub.id},
             account_id=shop.account_id, dedupe_key=f"subscription.created:{sub.id}",
         )
         await db.commit()
@@ -418,7 +418,8 @@ async def _set_status(user, db, sub_id, new_status, allowed_from):
         # Notify the ACCOUNT OWNER (not the actor — e.g. an admin acting on their behalf).
         owner = await _account_owner(db, sub.account_id) or user
         await notify.emit_event(
-            db, event, owner, {"shop_id": sub.shop_id}, account_id=sub.account_id,
+            db, event, owner, {"shop_id": sub.shop_id, "subscription_id": sub.id},
+            account_id=sub.account_id,
         )
     await db.commit()
     await db.refresh(sub)
