@@ -61,6 +61,12 @@ class DeviceTokenUnregisterIn(BaseModel):
     token: str = Field(min_length=1, max_length=512)
 
 
+# `delete_device_token` (DELETE on the collection, token in the BODY) is an alias of
+# `unregister_device_token_body`: same handler, same behaviour, for clients generated
+# against that operationId (mobile logout de-registration).
+@router.delete(
+    "", status_code=status.HTTP_204_NO_CONTENT, operation_id="delete_device_token",
+)
 @router.post(
     "/unregister", status_code=status.HTTP_204_NO_CONTENT,
     operation_id="unregister_device_token_body",
@@ -70,7 +76,8 @@ async def unregister_device_token_body(
     db: AsyncSession = Depends(get_db),
 ):
     """Deactivate a device token, sent in the BODY (preferred: the DELETE /{token} form
-    puts the push token in the URL, i.e. in access logs and traces)."""
+    puts the push token in the URL, i.e. in access logs and traces). Only the caller's
+    own token is touched; 204 either way, so another user's tokens can't be probed."""
     await _deactivate(db, user, data.token)
 
 
