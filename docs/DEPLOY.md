@@ -12,10 +12,12 @@ without the required ones (see `app/main.py`):
 - `CORS_ORIGINS` (explicit allow-list, no `*`) — **required**
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` — **required**
 - `SELLER_GSTIN` — **required** (GST tax invoices are invalid without it)
+- `MSG91_AUTHKEY`, `MSG91_TEMPLATE_ID` (DLT-approved OTP template) — **required**: without
+  them OTP SMS is never sent and nobody can log in, so the app refuses to boot
 - `DATABASE_URL`, `REDIS_URL`
 - `DB_POOL_MODE=pgbouncer` (behind PgBouncer transaction pooling) and `DB_SSL=true`
   (managed Postgres requires TLS)
-- Integration keys as they come online: `MSG91_*`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,
+- Integration keys as they come online: `MSG91_SENDER`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,
   `R2_*`, `SENTRY_DSN`.
 - **PostgreSQL 15 or newer** (migration 0051 uses `NULLS NOT DISTINCT`); CI/compose run 16.
 - `ALLOW_NEGATIVE_STOCK=false` — **production sets this to false.** Any delivery or stock
@@ -27,8 +29,12 @@ without the required ones (see `app/main.py`):
 - Global rate limit (`RATE_LIMIT_PER_MIN`, default 300/min per IP): authenticated
   **admin** requests are exempt (verified against the DB: active admin, current token),
   so bulk admin/batch work isn't throttled; anonymous and non-admin traffic keeps the limit.
-- `TRUSTED_PROXY_HOPS`: the Dockerfile sets `1` (one platform proxy). Do **not** set it
-  to `0` in the platform variables, or every user shares the proxy IP's rate limits.
+- `TRUSTED_PROXY_HOPS`: the number of reverse proxies in front of the app that append to
+  `X-Forwarded-For`; the Dockerfile sets `1` (one platform proxy). With `0` behind a
+  proxy, every user would share the proxy IP's rate limits and OTP caps, so **prod
+  refuses to boot with `0`** unless `ALLOW_DIRECT_CLIENT_IP=true` states the app is
+  exposed directly (no proxy). Never set it higher than the real hop count: the extra
+  hop would be read from the client-controlled part of the header.
 - `METRICS_TOKEN`: set it, and configure the scraper with `Authorization: Bearer <token>`
   (unset leaves `/metrics` open).
 - One-off ops after upgrading past the review hardening: invoice PDFs rendered before
@@ -36,11 +42,14 @@ without the required ones (see `app/main.py`):
   privately on next access, but delete the old public objects from the bucket.
 
 ## Health probes
-- **Liveness**: `GET /healthz` — always 200 if the process is up. Used by the
-  Docker `HEALTHCHECK`.
-- **Readiness**: `GET /readyz` — checks Postgres + Redis. **Point the platform's
-  traffic gate at `/readyz`**, not `/healthz`, so a booting/degraded instance
-  doesn't receive traffic.
+- **Liveness**: `GET /healthz` (alias `GET /health`) — always 200 if the process is up.
+  Used by the Docker `HEALTHCHECK`.
+- **Readiness**: `GET /readyz` (alias `GET /ready`) — pings Postgres + Redis, each
+  bounded to 2 s, and returns 200, or 503 when either is down or hung. **Point the
+  platform's traffic gate at `/readyz`**, not `/healthz`, so a booting/degraded
+  instance doesn't receive traffic.
+- Both are unauthenticated, exempt from the per-IP rate limit, and return no error
+  details (those go to the log).
 
 ## Migrations on deploy (zero-downtime)
 At **multi-instance scale** (Fly.io), run migrations as a **release/pre-deploy step

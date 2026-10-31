@@ -110,6 +110,34 @@ async def test_loyalty_admin_gate(client):
     assert (await client.post("/api/v1/admin/loyalty/1/adjust", json={"points": 10}, headers=ik(cust))).status_code == 403
 
 
+async def test_gift_card_redeem_requires_key_and_retry_does_not_double_credit(client):
+    """B3: a retried PARTIAL redeem with the same Idempotency-Key replays, so card value
+    moves into the wallet once; a redeem without a key is refused (428)."""
+    from conftest import NO_IDEM
+
+    admin = auth(await login(client, "9999900001"))
+    cust = auth(await login(client, "9100003002"))
+    aid = await _account_id(client, cust)
+    code = (await client.post("/api/v1/admin/gift-cards",
+                              json={"amount": 500, "issued_to_account_id": aid}, headers=ik(admin))).json()["code"]
+    url = "/api/v1/loyalty/gift-cards/redeem"
+
+    async def wallet():
+        return float((await client.get("/api/v1/billing/me", headers=cust)).json()["wallet_balance"])
+
+    w0 = await wallet()
+    r = await client.post(url, json={"code": code, "amount": 200}, headers={**cust, **NO_IDEM})
+    assert r.status_code == 428
+    assert await wallet() == w0  # nothing moved
+
+    key = {**cust, "Idempotency-Key": "redeem-retry-1"}
+    r1 = await client.post(url, json={"code": code, "amount": 200}, headers=key)
+    r2 = await client.post(url, json={"code": code, "amount": 200}, headers=key)  # network retry
+    assert r1.status_code == r2.status_code == 200
+    assert r1.json() == r2.json() and r2.json()["balance"] == 300.0
+    assert round(await wallet() - w0, 2) == 200.0  # credited once, not twice
+
+
 async def test_gift_card_expiry_uses_ist_date(client, monkeypatch):
     """B9: between 00:00 and 05:30 IST the server (UTC) date is still yesterday; a card
     that expired yesterday in IST must already be refused."""

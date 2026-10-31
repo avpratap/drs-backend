@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends
@@ -11,13 +12,21 @@ from app.core.redis import redis_client
 log = logging.getLogger("drs.health")
 router = APIRouter(tags=["health"])
 
+# Each dependency check is bounded: a hung DB/Redis must fail the probe (503) within the
+# orchestrator's probe timeout, not hang it.
+READY_CHECK_TIMEOUT_S = 2.0
 
+
+# /health and /ready are aliases of /healthz and /readyz for platforms whose probes
+# default to those paths (kept out of the OpenAPI schema: one operation each).
+@router.get("/health", include_in_schema=False)
 @router.get("/healthz", operation_id="healthz")
 async def healthz():
     """Liveness — the process is up."""
     return {"status": "ok"}
 
 
+@router.get("/ready", include_in_schema=False)
 @router.get(
     "/readyz", operation_id="readyz",
     responses={503: {"description": "a dependency (DB/Redis) is unreachable"}},
@@ -28,13 +37,13 @@ async def readyz(db: AsyncSession = Depends(get_db)):
     # Unauthenticated endpoint: report only ok/error; the raw exception (DB host, user,
     # driver internals) goes to the log, never to the caller.
     try:
-        await db.execute(text("SELECT 1"))
+        await asyncio.wait_for(db.execute(text("SELECT 1")), READY_CHECK_TIMEOUT_S)
         checks["db"] = "ok"
     except Exception as exc:
         log.warning("readyz: db check failed: %s", exc)
         checks["db"] = "error"
     try:
-        await redis_client.ping()
+        await asyncio.wait_for(redis_client.ping(), READY_CHECK_TIMEOUT_S)
         checks["redis"] = "ok"
     except Exception as exc:
         log.warning("readyz: redis check failed: %s", exc)

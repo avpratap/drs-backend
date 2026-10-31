@@ -45,6 +45,11 @@ async def request_otp(data: OTPRequest, request: Request):
     ip = client_ip(request)
     try:
         dev_otp = await otp_service.request_otp(phone, ip=ip)
+    except otp_service.UseLatestCode:
+        # Capped, but the last code sent to this number is still valid: not an error.
+        return OTPRequestResponse(
+            detail="An OTP was already sent to this number; use the latest code you received"
+        )
     except ValueError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
     return OTPRequestResponse(detail="OTP sent", dev_otp=dev_otp)

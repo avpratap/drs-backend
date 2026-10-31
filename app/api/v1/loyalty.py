@@ -184,7 +184,14 @@ async def gift_card_balance(
     return gc
 
 
-@router.post("/loyalty/gift-cards/redeem", response_model=GiftCardOut, operation_id="redeem_gift_card")
+# Moves card value into the wallet, so a retried (e.g. PARTIAL) redeem must replay, not
+# re-apply: the Idempotency-Key is required like every other money-moving write.
+@router.post(
+    "/loyalty/gift-cards/redeem",
+    response_model=GiftCardOut,
+    operation_id="redeem_gift_card",
+    dependencies=[Depends(require_idempotency_key)],
+)
 async def redeem_gift_card(
     data: RedeemGiftIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):

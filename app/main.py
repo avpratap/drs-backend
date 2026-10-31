@@ -78,14 +78,6 @@ async def security_headers(request: Request, call_next):
 
 app.add_middleware(ProxySchemeMiddleware)  # https scheme behind the trusted proxy
 
-if settings.ENV == "prod" and settings.TRUSTED_PROXY_HOPS == 0:
-    # Behind a proxy this makes every request appear to come from the proxy's IP: ONE
-    # shared rate-limit / OTP-per-IP bucket for all users.
-    logging.getLogger("drs").warning(
-        "TRUSTED_PROXY_HOPS=0 in prod: client IPs come from the socket peer. Set it to the "
-        "number of proxies in front of the app (Railway: 1)."
-    )
-
 # Registered LAST so it is the OUTERMOST middleware — error responses produced by the
 # inner middleware (429 rate-limit, 413 body-size, 409/422 idempotency) then still carry
 # Access-Control-* headers so a browser on an allowed origin can read them.
@@ -185,7 +177,7 @@ async def pydantic_validation_handler(request: Request, exc: ValidationError):
 
 from app.api.v1.content import public_root_router  # noqa: E402
 
-app.include_router(health_router)  # /healthz, /readyz
+app.include_router(health_router)  # /healthz, /readyz (+ /health, /ready aliases)
 app.include_router(public_root_router)  # /sitemap.xml, /robots.txt (domain root)
 app.include_router(api_router)  # /api/v1/...
 

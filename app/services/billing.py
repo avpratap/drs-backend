@@ -20,6 +20,16 @@ class InsufficientBalance(Exception):
     pass
 
 
+class InsufficientPrepaidBalance(Exception):
+    """A prepaid wallet can't cover a delivery: the delivery must be skipped/deferred,
+    never billed into the negative."""
+
+    def __init__(self, balance: float, needed: float):
+        super().__init__(f"prepaid balance {balance:.2f} < {needed:.2f}")
+        self.balance = balance
+        self.needed = needed
+
+
 async def get_or_create_wallet(db: AsyncSession, account_id: int, *, lock: bool = False) -> Wallet:
     query = select(Wallet).where(Wallet.account_id == account_id)
     if lock:
@@ -186,9 +196,14 @@ async def bill_delivery(db: AsyncSession, order: DeliveryOrder, amount: float) -
     if account.billing_mode == "postpaid_credit":
         await credit_entry(db, account.id, amount, "charge", "delivery_order", order.id)
     else:
+        # Prepaid invariant (retail AND B2B): the wallet never goes negative for a
+        # delivery. Checked under the wallet row lock — the cutoff's funds gate is only a
+        # start-of-run snapshot, so spending/other deliveries since then can't overdraw.
+        wallet = await get_or_create_wallet(db, account.id, lock=True)
+        if round(float(wallet.balance), 2) < round(float(amount), 2):
+            raise InsufficientPrepaidBalance(float(wallet.balance), round(float(amount), 2))
         wallet = await wallet_adjust(
             db, order.account_id, -amount, "debit_order", "delivery_order", order.id,
-            allow_negative=True,
         )
         if float(wallet.balance) < settings.WALLET_LOW_THRESHOLD:
             owner = await db.get(User, account.owner_user_id)

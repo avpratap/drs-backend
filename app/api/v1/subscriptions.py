@@ -2,7 +2,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -295,10 +295,17 @@ async def set_items(
     )
     existing = {i.product_id: i for i in res.scalars().all()}
     seen: set[int] = set()
+    # Items whose FUTURE one-day overrides must go: a dropped product's (else they come
+    # back when it is re-added, since re-adding reactivates the same row and an override
+    # forces its date), and a re-added product's (clears orphans left by drops made
+    # before this existed). Past/today's overrides stay as history.
+    stale_override_items: list[int] = []
     for it in items:
         seen.add(it.product_id)
         e = existing.get(it.product_id)
         if e is not None:
+            if not e.active:
+                stale_override_items.append(e.id)
             e.default_qty = it.default_qty
             e.frequency = it.frequency
             e.interval_days = it.interval_days
@@ -318,7 +325,16 @@ async def set_items(
             )
     for pid, e in existing.items():
         if pid not in seen:
+            if e.active:
+                stale_override_items.append(e.id)
             e.active = False
+    if stale_override_items:
+        await db.execute(
+            delete(SubscriptionOverride).where(
+                SubscriptionOverride.subscription_item_id.in_(stale_override_items),
+                SubscriptionOverride.for_date > sub_service.today_ist(),
+            )
+        )
     await db.commit()
     return await _detail(db, sub)
 

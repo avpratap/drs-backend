@@ -516,6 +516,157 @@ async def update_user(
     return user
 
 
+# ---------- Staff + multi-shop scope ----------
+# A user's shop scope is what app.deps.scope.allowed_shop_ids enforces: admins -> ALL;
+# delivery staff -> their ACTIVE delivery assignments (the only scope set per person);
+# subscribers/customers -> the shops their account owns (follows ownership, not editable
+# here). "Staff" = admin + delivery users.
+_STAFF_ROLES = ("admin", "delivery")
+
+
+class ShopScopeOut(BaseModel):
+    user_id: int
+    role: str
+    all_shops: bool  # True for admins: no restriction (shop_ids is then empty)
+    shop_ids: list[int]
+    editable: bool  # only delivery staff's scope can be set via PUT .../shop-scope
+    source: Literal["admin", "delivery_assignments", "account_ownership", "none"]
+
+
+class StaffOut(UserAdminOut):
+    all_shops: bool
+    shop_ids: list[int]
+
+
+class ShopScopeIn(BaseModel):
+    shop_ids: list[int] = Field(max_length=1000)
+
+
+async def _scope_out(db: AsyncSession, user: User) -> ShopScopeOut:
+    from app.deps.scope import ALL, allowed_shop_ids
+
+    ids = await allowed_shop_ids(user, db)
+    source = {
+        "admin": "admin", "delivery": "delivery_assignments",
+        "subscriber": "account_ownership", "customer": "account_ownership",
+    }.get(user.role, "none")
+    return ShopScopeOut(
+        user_id=user.id, role=user.role, all_shops=ids is ALL,
+        shop_ids=[] if ids is ALL else sorted(ids),
+        editable=user.role == "delivery", source=source,
+    )
+
+
+@router.get("/staff", response_model=list[StaffOut], operation_id="admin_list_staff")
+async def list_staff(
+    role: str | None = Query(default=None, pattern="^(admin|delivery)$"),
+    status_filter: str | None = Query(default=None, pattern="^(active|suspended)$"),
+    q: str | None = Query(default=None, max_length=64, description="Phone or name contains"),
+    db: AsyncSession = Depends(get_db),
+    page: Page = Depends(pagination),
+):
+    """Staff users (admins + delivery) with their shop scope, for the staff management
+    screen (`?limit=&offset=`, total in `X-Total-Count`). Erased accounts are excluded."""
+    query = select(User).where(User.role.in_(_STAFF_ROLES), User.status != "erased").order_by(User.id)
+    if role is not None:
+        query = query.where(User.role == role)
+    if status_filter is not None:
+        query = query.where(User.status == status_filter)
+    if q:
+        like = f"%{_escape_like(q)}%"
+        query = query.where(User.phone.ilike(like, escape="\\") | User.full_name.ilike(like, escape="\\"))
+    users = list(await paged(db, query, page))
+    drivers = [u.id for u in users if u.role == "delivery"]
+    by_driver: dict[int, list[int]] = {}
+    if drivers:  # one query for the whole page (no N+1)
+        rows = await db.execute(
+            select(DeliveryAssignment.delivery_id, DeliveryAssignment.shop_id).where(
+                DeliveryAssignment.delivery_id.in_(drivers), DeliveryAssignment.active.is_(True)
+            )
+        )
+        for uid, sid in rows:
+            by_driver.setdefault(uid, []).append(sid)
+    return [
+        StaffOut(
+            **UserAdminOut.model_validate(u).model_dump(),
+            all_shops=u.role == "admin", shop_ids=sorted(by_driver.get(u.id, [])),
+        )
+        for u in users
+    ]
+
+
+@router.get(
+    "/users/{user_id}/shop-scope", response_model=ShopScopeOut, operation_id="admin_get_shop_scope"
+)
+async def get_shop_scope(user_id: int, db: AsyncSession = Depends(get_db)):
+    """The shops this user may access, exactly as authorization enforces it."""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return await _scope_out(db, user)
+
+
+@router.put(
+    "/users/{user_id}/shop-scope", response_model=ShopScopeOut, operation_id="admin_set_shop_scope"
+)
+async def set_shop_scope(
+    user_id: int,
+    data: ShopScopeIn,
+    actor: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace a delivery staff member's shop scope with exactly `shop_ids`: missing
+    assignments are created/reactivated, others deactivated (history kept). Only delivery
+    users have an editable scope — admins see all shops, and a subscriber's/customer's
+    scope follows the shops their account owns."""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if user.status == "erased":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Erased accounts can't be modified")
+    if user.role != "delivery":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"A {user.role}'s shop scope isn't editable: admins see all shops and "
+            "subscribers/customers see the shops their account owns",
+        )
+    wanted = set(data.shop_ids)
+    found = set(
+        (await db.execute(select(Shop.id).where(Shop.id.in_(wanted)))).scalars().all()
+    ) if wanted else set()
+    if wanted - found:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown shop_id(s): {sorted(wanted - found)}"
+        )
+    # Serialize scope edits per user (lock the user row): two concurrent PUTs would
+    # otherwise both insert the same new assignment and hit uq_delivery_shop (500).
+    await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+    rows = (
+        await db.execute(select(DeliveryAssignment).where(DeliveryAssignment.delivery_id == user_id))
+    ).scalars().all()
+    existing = {r.shop_id: r for r in rows}
+    added, removed = [], []
+    for sid in sorted(wanted):
+        r = existing.get(sid)
+        if r is None:
+            db.add(DeliveryAssignment(delivery_id=user_id, shop_id=sid, active=True))
+            added.append(sid)
+        elif not r.active:
+            r.active = True
+            added.append(sid)
+    for sid, r in existing.items():
+        if sid not in wanted and r.active:
+            r.active = False
+            removed.append(sid)
+    if added or removed:
+        await audit_svc.record_audit(
+            db, actor.id, "staff_shop_scope", "user", user_id,
+            detail={"added": added, "removed": sorted(removed)},
+        )
+    await db.commit()
+    return await _scope_out(db, user)
+
+
 @router.post("/users/{user_id}/erase", operation_id="admin_erase_user", response_model=EraseResultOut)
 async def admin_erase_user(
     user_id: int,
