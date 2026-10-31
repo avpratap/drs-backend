@@ -105,10 +105,16 @@ async def test_consume_and_adjust_respect_the_setting(client, monkeypatch):
 
 # ---------- admin exemption from the global per-IP rate limit ----------
 async def _tight_rate_limit(monkeypatch) -> None:
-    """Turn the limiter on (3/min) with a clean window — AFTER the test has logged in."""
+    """Turn the limiter on (3/min) with a clean window — AFTER the test has logged in.
+    The window is pinned: with the real clock, a run that crossed a minute boundary
+    landed in a fresh fixed window and the expected 429s never came (CI flake)."""
+    import types
+
+    from app.core import ratelimit
     from app.core.config import settings
     from app.core.redis import redis_client
 
+    monkeypatch.setattr(ratelimit, "time", types.SimpleNamespace(time=lambda: 1_800_000_000.0))
     monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
     monkeypatch.setattr(settings, "RATE_LIMIT_PER_MIN", 3)
     await redis_client.flushdb()
