@@ -29,8 +29,12 @@ without the required ones (see `app/main.py`):
 - Global rate limit (`RATE_LIMIT_PER_MIN`, default 300/min per IP): authenticated
   **admin** requests are exempt (verified against the DB: active admin, current token),
   so bulk admin/batch work isn't throttled; anonymous and non-admin traffic keeps the limit.
-- `TRUSTED_PROXY_HOPS`: the Dockerfile sets `1` (one platform proxy). Do **not** set it
-  to `0` in the platform variables, or every user shares the proxy IP's rate limits.
+- `TRUSTED_PROXY_HOPS`: the number of reverse proxies in front of the app that append to
+  `X-Forwarded-For`; the Dockerfile sets `1` (one platform proxy). With `0` behind a
+  proxy, every user would share the proxy IP's rate limits and OTP caps, so **prod
+  refuses to boot with `0`** unless `ALLOW_DIRECT_CLIENT_IP=true` states the app is
+  exposed directly (no proxy). Never set it higher than the real hop count: the extra
+  hop would be read from the client-controlled part of the header.
 - `METRICS_TOKEN`: set it, and configure the scraper with `Authorization: Bearer <token>`
   (unset leaves `/metrics` open).
 - One-off ops after upgrading past the review hardening: invoice PDFs rendered before

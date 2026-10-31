@@ -1,4 +1,4 @@
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEV_JWT_SECRET = "dev-only-change-me-to-a-long-random-32plus-byte-string"
@@ -57,7 +57,11 @@ class Settings(BaseSettings):
     ALLOW_NEGATIVE_STOCK: bool = True
     # Reverse proxies in front of the app that APPEND to X-Forwarded-For (Railway: 1).
     # 0 = use the socket peer and ignore the header (dev / direct exposure).
-    TRUSTED_PROXY_HOPS: int = 0
+    TRUSTED_PROXY_HOPS: int = Field(default=0, ge=0)
+    # Prod refuses TRUSTED_PROXY_HOPS=0 (behind a proxy every client would share the
+    # proxy's IP: one rate-limit / OTP-per-IP bucket for everyone) unless the app really
+    # is exposed directly, stated explicitly here.
+    ALLOW_DIRECT_CLIENT_IP: bool = False
     # Bearer token the Prometheus scraper must send to /metrics ("" = open, dev only).
     METRICS_TOKEN: str = ""
     JWT_SECRET: str = _DEV_JWT_SECRET
@@ -170,6 +174,13 @@ class Settings(BaseSettings):
             problems.append("SELLER_GSTIN required in prod (GST tax invoices)")
         if not self.SHIPROCKET_WEBHOOK_TOKEN:
             problems.append("SHIPROCKET_WEBHOOK_TOKEN required in prod")
+        if self.TRUSTED_PROXY_HOPS == 0 and not self.ALLOW_DIRECT_CLIENT_IP:
+            problems.append(
+                "TRUSTED_PROXY_HOPS must be set to the number of proxies in front of the app "
+                "(e.g. 1); 0 behind a proxy collapses every client onto the proxy's IP for "
+                "rate limiting and OTP caps. Set ALLOW_DIRECT_CLIENT_IP=true only if the app "
+                "is exposed directly"
+            )
         # Without both, OTPs are generated but never delivered (and never returned in
         # prod), so every OTP login would silently fail. MSG91 only sends with a
         # DLT-approved template id, hence both are required.
