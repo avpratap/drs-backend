@@ -98,13 +98,35 @@ def _inclusive_split(
     the invoice line total equals the amount collected.
 
     Returns (taxable_value, cgst, sgst, igst)."""
-    taxable = round(charged / (1 + rate / 100), 2)
-    total_tax = round(charged - taxable, 2)
     if interstate:
-        return taxable, 0.0, 0.0, total_tax
-    # Halve from the single rounded total so CGST+SGST always equals it (no paisa drift).
-    cgst = round(total_tax / 2, 2)
-    return taxable, cgst, round(total_tax - cgst, 2), 0.0
+        taxable = round(charged / (1 + rate / 100), 2)
+        return taxable, 0.0, 0.0, round(charged - taxable, 2)
+    # CGST and SGST are each rate/2 on the SAME taxable value, so they must be equal.
+    # Compute one half from the exact taxable value and let the rounded taxable value
+    # absorb the paisa (halving a single rounded total split an odd paisa unevenly,
+    # e.g. 0.02 + 0.01). taxable + cgst + sgst == charged still holds exactly.
+    half = round(charged / (1 + rate / 100) * (rate / 2) / 100, 2)
+    return round(charged - 2 * half, 2), half, half, 0.0
+
+
+def _apportion_paise(weights: list[float], target_paise: int) -> list[float]:
+    """Split `target_paise` across lines pro rata to `weights` (largest-remainder: floor
+    each exact share, then give the leftover paise to the largest fractional parts,
+    ties by position). Returns rupee amounts summing exactly to the target."""
+    total_w = sum(max(w, 0.0) for w in weights)
+    if not weights:
+        return []
+    if total_w <= 0:
+        out = [0] * len(weights)
+        out[-1] = target_paise
+        return [p / 100 for p in out]
+    exact = [target_paise * max(w, 0.0) / total_w for w in weights]
+    base = [int(e + 1e-9) for e in exact]
+    left = target_paise - sum(base)
+    order = sorted(range(len(weights)), key=lambda k: (-(exact[k] - base[k]), k))
+    for k in order[:left]:
+        base[k] += 1
+    return [round(p / 100, 2) for p in base]
 
 
 async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:
@@ -266,24 +288,19 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
         (await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalars().all()
     )
     # Prices are GST-inclusive; order.total (subtotal - discount) is exactly what the
-    # customer paid. Apportion that charged total across lines by the discount factor,
-    # giving the LAST line the running remainder so the rounded line charges sum to
-    # order.total to the paisa (invoice.total == amount charged).
-    subtotal = float(order.subtotal) or 0.0
-    disc_factor = (float(order.total) / subtotal) if subtotal > 0 else 1.0
-    target = round(float(order.total), 2)
-    running = 0.0
-    n = len(rows)
+    # customer paid. An order-level discount is apportioned across lines pro rata to
+    # their value, in paise by the largest-remainder method, so each line (and so each
+    # HSN/GST-rate bucket) gets its fair share to within one paisa and the lines sum to
+    # order.total exactly. (Previously the LAST line absorbed every rounding paisa,
+    # misallocating taxable value/GST to whichever product happened to be last.)
+    charges = _apportion_paise(
+        [float(it.line_total) for it in rows], round(float(order.total) * 100)
+    )
     tax_val = cgst = sgst = igst = total = 0.0
-    for idx, it in enumerate(rows):
+    for it, charged in zip(rows, charges, strict=True):
         qty = float(it.qty)
         product = await db.get(Product, it.product_id)
         rate = float(product.gst_rate) if product else 0.0
-        if idx < n - 1:
-            charged = round(float(it.line_total) * disc_factor, 2)
-        else:
-            charged = round(target - running, 2)  # last line absorbs rounding remainder
-        running = round(running + charged, 2)
         taxable, c, s, i = _inclusive_split(charged, rate, interstate)
         line_total = charged
         db.add(
