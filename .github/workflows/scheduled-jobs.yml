@@ -1,0 +1,93 @@
+# Scheduled jobs for a deploy WITHOUT an ARQ worker (Render free tier has no background
+# workers or cron). Calls POST /api/v1/internal/jobs/{job} on the live API, which runs
+# the job inline (same code as app/worker.py; every job is idempotent).
+#
+# Setup (repo Settings -> Secrets and variables -> Actions):
+#   secret   DRS_JOBS_TOKEN  same value as the API's JOBS_TOKEN env var (>= 32 random chars,
+#                            e.g. `openssl rand -hex 32`)
+#   variable DRS_API_URL     e.g. https://drs-backend-zvb1.onrender.com (no trailing slash)
+# Until both are set, runs are skipped with a warning (not failed).
+#
+# Times are UTC (GitHub cron). IST = UTC+5:30. GitHub may start scheduled runs late under
+# load, so the cutoff has a second, idempotent attempt before IST midnight.
+# If a worker is deployed (render.yaml, paid plan), disable this workflow: the worker's
+# own crons cover the same jobs.
+name: scheduled-jobs
+
+on:
+  schedule:
+    - cron: "35 17 * * *"   # 23:05 IST  cutoff (tomorrow's delivery orders)
+    - cron: "5 18 * * *"    # 23:35 IST  cutoff again (no-op if done; catches a late/failed run)
+    - cron: "45 18 * * *"   # 00:15 IST  expire_batches (as of the new IST day)
+    - cron: "0 1 * * *"     # 06:30 IST  housekeeping
+    - cron: "0 2 * * *"     # 07:30 IST  churn scoring
+    - cron: "*/10 * * * *"  # outbox: send queued notifications
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Job to run now
+        required: true
+        type: choice
+        options: [cutoff, outbox, housekeeping, churn, expire_batches]
+      date:
+        description: "cutoff only: delivery date YYYY-MM-DD (default: tomorrow IST)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-jobs-${{ github.event.schedule || inputs.job }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    # Scheduled runs only on the canonical repo (not forks).
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'avpratap/drs-backend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Pick job
+        id: pick
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_JOB: ${{ inputs.job }}
+        run: |
+          case "$SCHEDULE" in
+            "35 17 * * *"|"5 18 * * *") job=cutoff ;;
+            "45 18 * * *") job=expire_batches ;;
+            "0 1 * * *") job=housekeeping ;;
+            "0 2 * * *") job=churn ;;
+            "*/10 * * * *") job=outbox ;;
+            *) job="$INPUT_JOB" ;;
+          esac
+          echo "job=$job" >> "$GITHUB_OUTPUT"
+
+      - name: Run ${{ steps.pick.outputs.job }}
+        env:
+          API_URL: ${{ vars.DRS_API_URL }}
+          JOBS_TOKEN: ${{ secrets.DRS_JOBS_TOKEN }}
+          JOB: ${{ steps.pick.outputs.job }}
+          DATE: ${{ inputs.date }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_URL}" ] || [ -z "${JOBS_TOKEN}" ]; then
+            echo "::warning::DRS_API_URL (variable) and/or DRS_JOBS_TOKEN (secret) not set; skipping $JOB"
+            exit 0
+          fi
+          # A free instance sleeps when idle: wake it (cold start can take ~1 min).
+          curl -fsS --retry 10 --retry-delay 10 --retry-all-errors --max-time 30 \
+            "$API_URL/healthz" > /dev/null
+          url="$API_URL/api/v1/internal/jobs/$JOB"
+          if [ -n "${DATE}" ]; then url="$url?date=$DATE"; fi
+          code=$(curl -sS -o body.json -w '%{http_code}' --max-time 900 -X POST \
+            -H "Authorization: Bearer $JOBS_TOKEN" "$url")
+          cat body.json; echo
+          if [ "$code" != "200" ]; then
+            echo "::error::$JOB returned HTTP $code"
+            exit 1
+          fi
+          if [ "$(jq -r '.ok' body.json)" != "true" ]; then
+            echo "::error::$JOB ran but did not fully succeed (it is idempotent: re-run it)"
+            exit 1
+          fi
