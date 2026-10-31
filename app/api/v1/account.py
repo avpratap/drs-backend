@@ -230,6 +230,7 @@ class EraseConfirmIn(BaseModel):
 @router.post("/account/erase", operation_id="erase_my_account", response_model=EraseResultOut)
 async def erase_my_account(
     data: EraseConfirmIn,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -239,7 +240,12 @@ async def erase_my_account(
     blocked = await dpdp.erasure_blocked(db, user)
     if blocked:
         raise HTTPException(status.HTTP_409_CONFLICT, blocked)
-    if not await otp_service.verify_otp(user.phone, data.otp):
+    # Same per-IP failed-verify accounting as login: this step-up check used to skip it.
+    try:
+        ok = await otp_service.verify_otp(user.phone, data.otp, ip=client_ip(request))
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    if not ok:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid or expired OTP")
     try:
         return await dpdp.erase_user(db, user)

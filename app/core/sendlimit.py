@@ -9,7 +9,7 @@ any number of senders can push at one inbox."""
 import hashlib
 import logging
 
-from app.core.redis import redis_client
+from app.core.redis import incr_window, redis_client
 
 log = logging.getLogger("drs.sendlimit")
 
@@ -21,10 +21,7 @@ def _h(value: str) -> str:
 
 
 async def _incr_day(key: str) -> int:
-    n = await redis_client.incr(key)
-    if n == 1:
-        await redis_client.expire(key, 86400)
-    return n
+    return await incr_window(key, 86400)
 
 
 async def allow_send(
