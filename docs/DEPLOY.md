@@ -5,7 +5,15 @@ Target: **Railway (MVP)** → **Fly.io Mumbai (scale)**. One image runs both the
 
 ## Prerequisites (prod env vars)
 Set these as platform secrets — never commit. The app **fails to boot** in prod
-without the required ones (see `app/main.py`):
+without the required ones (`app/core/config.py`), with ONE error listing every missing
+or unsafe setting by name, e.g.:
+
+```
+RuntimeError: Refusing to start: ENV=prod but these settings are missing or unsafe:
+  - MSG91_AUTHKEY, MSG91_TEMPLATE_ID: not set: OTP SMS would never be sent and nobody could log in
+  - REDIS_URL: still the local dev default (localhost)
+```
+
 
 - `ENV=prod`
 - `JWT_SECRET` (≥32 random bytes) — **required**
@@ -14,7 +22,9 @@ without the required ones (see `app/main.py`):
 - `SELLER_GSTIN` — **required** (GST tax invoices are invalid without it)
 - `MSG91_AUTHKEY`, `MSG91_TEMPLATE_ID` (DLT-approved OTP template) — **required**: without
   them OTP SMS is never sent and nobody can log in, so the app refuses to boot
-- `DATABASE_URL`, `REDIS_URL`
+- `DATABASE_URL`, `REDIS_URL` — **required** (boot fails if left on the local dev defaults)
+- `FCM_PROJECT_ID` + `FCM_CREDENTIALS_JSON` — set **both or neither** (one alone fails
+  boot); with neither, push is not sent (dev stub) and boot logs a warning
 - `DB_POOL_MODE=pgbouncer` (behind PgBouncer transaction pooling) and `DB_SSL=true`
   (managed Postgres requires TLS)
 - Integration keys as they come online: `MSG91_SENDER`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,

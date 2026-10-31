@@ -1,7 +1,15 @@
-from pydantic import Field, field_validator, model_validator
+import logging
+
+from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEV_JWT_SECRET = "dev-only-change-me-to-a-long-random-32plus-byte-string"
+_DEV_DATABASE_URL = "postgresql+asyncpg://drs:drs@localhost:5432/drs"
+_DEV_REDIS_URL = "redis://localhost:6379/0"
+
+
+class ProdConfigError(ValueError):
+    """ENV=prod with required settings missing/unsafe. The message lists every one."""
 
 
 class Settings(BaseSettings):
@@ -25,8 +33,8 @@ class Settings(BaseSettings):
             raise ValueError("INVOICE_PREFIX must be 1-10 characters with no '/'")
         return v
 
-    DATABASE_URL: str = "postgresql+asyncpg://drs:drs@localhost:5432/drs"
-    REDIS_URL: str = "redis://localhost:6379/0"
+    DATABASE_URL: str = _DEV_DATABASE_URL
+    REDIS_URL: str = _DEV_REDIS_URL
 
     # DB pooling. 'direct' = app-side pool (local/dev, direct Postgres).
     # 'pgbouncer' = NullPool + disable asyncpg statement cache (prod behind PgBouncer
@@ -148,57 +156,68 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _prod_boot_guard(self) -> "Settings":
         """Fail fast at boot if a prod deploy is missing a hard security/infra requirement,
-        rather than silently running insecurely. Only enforced when ENV == 'prod'."""
+        rather than running insecurely or crashing cryptically later. Collects EVERY
+        problem and raises ONE error naming each setting. No-op unless ENV == 'prod'."""
         if self.ENV != "prod":
             return self
-        problems: list[str] = []
-        if self.JWT_SECRET == _DEV_JWT_SECRET or len(self.JWT_SECRET) < 32:
-            problems.append("JWT_SECRET must be set to a unique value of at least 32 bytes")
-        if not self.DB_SSL:
-            problems.append("DB_SSL must be true in prod (TLS to the managed database)")
-        if self.DB_POOL_MODE not in {"direct", "pgbouncer"}:
-            problems.append("DB_POOL_MODE must be 'direct' or 'pgbouncer'")
-        if not self.RAZORPAY_WEBHOOK_SECRET:
-            problems.append(
-                "RAZORPAY_WEBHOOK_SECRET must be set in prod (else unsigned webhooks are accepted)"
-            )
-        if "localhost" in self.CORS_ORIGINS:
-            problems.append("CORS_ORIGINS must not include localhost in prod")
-        # (Moved here from main.py so the ARQ worker — which never imports main.py — is
-        # guarded too.)
-        if "*" in [o.strip() for o in self.CORS_ORIGINS.split(",")]:
-            problems.append("CORS_ORIGINS must be an explicit allow-list in prod")
-        if not (self.RAZORPAY_KEY_ID and self.RAZORPAY_KEY_SECRET):
-            problems.append("RAZORPAY_KEY_ID/SECRET required in prod (else the dev stub runs)")
-        if not self.SELLER_GSTIN:
-            problems.append("SELLER_GSTIN required in prod (GST tax invoices)")
-        if not self.SHIPROCKET_WEBHOOK_TOKEN:
-            problems.append("SHIPROCKET_WEBHOOK_TOKEN required in prod")
-        if self.TRUSTED_PROXY_HOPS == 0 and not self.ALLOW_DIRECT_CLIENT_IP:
-            problems.append(
-                "TRUSTED_PROXY_HOPS must be set to the number of proxies in front of the app "
-                "(e.g. 1); 0 behind a proxy collapses every client onto the proxy's IP for "
-                "rate limiting and OTP caps. Set ALLOW_DIRECT_CLIENT_IP=true only if the app "
-                "is exposed directly"
-            )
+        problems: list[tuple[str, str]] = []  # (setting name(s), what is wrong)
+
+        def need(ok: bool, names: str, why: str) -> None:
+            if not ok:
+                problems.append((names, why))
+
+        need(self.DATABASE_URL != _DEV_DATABASE_URL, "DATABASE_URL",
+             "still the local dev default (localhost)")
+        need(self.REDIS_URL != _DEV_REDIS_URL, "REDIS_URL",
+             "still the local dev default (localhost)")
+        need(self.JWT_SECRET != _DEV_JWT_SECRET and len(self.JWT_SECRET) >= 32, "JWT_SECRET",
+             "must be a unique value of at least 32 bytes")
+        need(self.DB_SSL, "DB_SSL", "must be true (TLS to the managed database)")
+        need(self.DB_POOL_MODE in {"direct", "pgbouncer"}, "DB_POOL_MODE",
+             "must be 'direct' or 'pgbouncer'")
         # Without both, OTPs are generated but never delivered (and never returned in
         # prod), so every OTP login would silently fail. MSG91 only sends with a
         # DLT-approved template id, hence both are required.
-        if not (self.MSG91_AUTHKEY.strip() and self.MSG91_TEMPLATE_ID.strip()):
-            problems.append(
-                "MSG91_AUTHKEY and MSG91_TEMPLATE_ID required in prod (else OTP SMS is "
-                "never sent and nobody can log in)"
-            )
+        need(bool(self.MSG91_AUTHKEY.strip() and self.MSG91_TEMPLATE_ID.strip()),
+             "MSG91_AUTHKEY, MSG91_TEMPLATE_ID",
+             "not set: OTP SMS would never be sent and nobody could log in")
+        need(bool(self.RAZORPAY_KEY_ID and self.RAZORPAY_KEY_SECRET),
+             "RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET", "not set: the payment dev stub would run")
+        need(bool(self.RAZORPAY_WEBHOOK_SECRET), "RAZORPAY_WEBHOOK_SECRET",
+             "not set: unsigned payment webhooks would be accepted")
+        need(bool(self.SELLER_GSTIN), "SELLER_GSTIN", "not set: GST tax invoices are invalid")
+        need(bool(self.SHIPROCKET_WEBHOOK_TOKEN), "SHIPROCKET_WEBHOOK_TOKEN", "not set")
+        need("localhost" not in self.CORS_ORIGINS, "CORS_ORIGINS", "must not include localhost")
+        # (Moved here from main.py so the ARQ worker — which never imports main.py — is
+        # guarded too.)
+        need("*" not in [o.strip() for o in self.CORS_ORIGINS.split(",")], "CORS_ORIGINS",
+             "must be an explicit allow-list (no '*')")
+        need(self.TRUSTED_PROXY_HOPS > 0 or self.ALLOW_DIRECT_CLIENT_IP, "TRUSTED_PROXY_HOPS",
+             "must be the number of proxies in front of the app (e.g. 1); 0 behind a proxy "
+             "collapses every client onto the proxy's IP for rate limiting and OTP caps "
+             "(set ALLOW_DIRECT_CLIENT_IP=true only if the app is exposed directly)")
         # Without R2 the local-disk stub would store uploads/invoices on ephemeral disk
         # and serve them from /files; invoices need a bucket with NO public binding.
-        if not (self.R2_ENDPOINT and self.R2_ACCESS_KEY and self.R2_SECRET_KEY and self.R2_BUCKET):
-            problems.append("R2_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET required in prod")
-        if not self.R2_PRIVATE_BUCKET or self.R2_PRIVATE_BUCKET == self.R2_BUCKET:
-            problems.append(
-                "R2_PRIVATE_BUCKET required in prod, distinct from the public R2_BUCKET"
-            )
+        need(bool(self.R2_ENDPOINT and self.R2_ACCESS_KEY and self.R2_SECRET_KEY and self.R2_BUCKET),
+             "R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY, R2_BUCKET", "not all set")
+        need(bool(self.R2_PRIVATE_BUCKET) and self.R2_PRIVATE_BUCKET != self.R2_BUCKET,
+             "R2_PRIVATE_BUCKET", "must be set and differ from the public R2_BUCKET")
+        # Push: half a configuration is a mistake; none at all means push is not live yet
+        # (the dev stub logs instead of sending) — allowed, but said out loud.
+        fcm = (bool(self.FCM_PROJECT_ID.strip()), bool(self.FCM_CREDENTIALS_JSON.strip()))
+        need(fcm[0] == fcm[1], "FCM_PROJECT_ID, FCM_CREDENTIALS_JSON",
+             "set both or neither (only one is set)")
         if problems:
-            raise ValueError("Insecure prod configuration: " + "; ".join(problems))
+            lines = "\n".join(f"  - {names}: {why}" for names, why in problems)
+            raise ProdConfigError(
+                "Refusing to start: ENV=prod but these settings are missing or unsafe:\n"
+                f"{lines}\nSet them in the deployment environment (see docs/DEPLOY.md)."
+            )
+        if not any(fcm):
+            logging.getLogger("drs.config").warning(
+                "FCM_PROJECT_ID/FCM_CREDENTIALS_JSON not set: push notifications are not sent "
+                "(dev stub logs them)"
+            )
         return self
 
     @property
@@ -206,4 +225,17 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
 
-settings = Settings()
+def _load_settings() -> Settings:
+    """Settings for this process. A prod misconfiguration surfaces as ONE plain error
+    listing every missing setting, not pydantic's validation-error wrapper."""
+    try:
+        return Settings()
+    except ValidationError as exc:
+        for err in exc.errors():
+            original = (err.get("ctx") or {}).get("error")
+            if isinstance(original, ProdConfigError):
+                raise RuntimeError(str(original)) from None
+        raise
+
+
+settings = _load_settings()
