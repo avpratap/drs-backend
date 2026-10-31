@@ -11,7 +11,12 @@ from app.models.shop import CustomerAccount
 from app.models.user import User
 from app.services import batches, inventory
 from app.services import notifications as notify
-from app.services.billing import bill_delivery, credit_entry, wallet_adjust
+from app.services.billing import (
+    InsufficientPrepaidBalance,
+    bill_delivery,
+    credit_entry,
+    wallet_adjust,
+)
 from app.services.subscription import today_ist
 
 
@@ -183,7 +188,8 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     order.subtotal = round(sum(float(it.line_total) for it in items.values()), 2)
     order.total = net
     order.amount_due = net
-    await bill_delivery(db, order, net)
+    # Cash/UPI taken at the door is posted BEFORE billing: for a prepaid account it is
+    # what lets a short wallet still cover this delivery.
     if data.cash_collected:
         # Cash/UPI taken at the door PAYS this delivery: post it against the bill (else a
         # COD customer was charged again on their wallet/credit) — and never more than
@@ -208,6 +214,31 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
             await credit_entry(db, account.id, -cash, "payment", "cash_collection", cc.id)
         else:
             await wallet_adjust(db, order.account_id, cash, "cash_collection", "cash_collection", cc.id)
+
+    try:
+        await bill_delivery(db, order, net)
+    except InsufficientPrepaidBalance as exc:
+        # Prepaid invariant: never deliver (bill) into the negative. Defer the stop —
+        # roll everything back (nothing billed, no POD/stock/cash recorded, the order
+        # stays open), nudge the owner to top up, and tell the driver.
+        order_id, account_id = order.id, order.account_id
+        await db.rollback()
+        account = await db.get(CustomerAccount, account_id)
+        owner = await db.get(User, account.owner_user_id) if account else None
+        if owner is not None:
+            await notify.emit_event(
+                db, "wallet.low", owner,
+                {"balance": round(exc.balance, 2), "needed": exc.needed},
+                account_id=account_id, dedupe_key=f"delivery.lowbalance:{order_id}",
+            )
+            await db.commit()
+        short = round(exc.needed - exc.balance, 2)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Prepaid wallet can't cover this delivery (Rs {exc.needed:.2f} due, short by "
+            f"Rs {short:.2f}). Collect the shortfall as cash (cash_collected) or skip "
+            "this stop; nothing was billed.",
+        ) from None
 
     # Decrement stock for what actually went out (delivered - returned), once per
     # delivery_order so a corrected re-submit never double-depletes inventory.

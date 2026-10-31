@@ -97,13 +97,9 @@ async def _load_ctx(db: AsyncSession, delivery_date: dt.date, sub_ids: list[int]
         else {}
     )
     owners = {a.id: users.get(a.owner_user_id) for a in accounts.values()}
-    # Preload wallet balances for the retail prepaid accounts so the funds gate below
-    # does no per-subscription lookup (keeps the cutoff N+1-free).
-    prepaid_ids = {
-        a.id
-        for a in accounts.values()
-        if a.account_type == "retail" and a.billing_mode == "prepaid_wallet"
-    }
+    # Preload wallet balances for ALL prepaid accounts (retail and B2B) so the funds
+    # gate below does no per-subscription lookup (keeps the cutoff N+1-free).
+    prepaid_ids = {a.id for a in accounts.values() if a.billing_mode == "prepaid_wallet"}
     wallets: dict[int, float] = {}
     if prepaid_ids:
         wrows = (
@@ -204,12 +200,12 @@ async def _materialize_one(
         # (one-time/manual) order that happens to share this (shop, date).
         return False
 
-    # Retail prepaid funds gate: never deliver a prepaid retail account into the negative.
-    # If the wallet can't cover tomorrow's order, skip it, drop any stale pending order
-    # from a prior run, and nudge the customer to top up.
+    # Prepaid funds gate (retail AND B2B): never schedule a prepaid account into the
+    # negative. If the wallet can't cover tomorrow's order, skip it, drop any stale
+    # pending order from a prior run, and nudge the customer to top up. (Billing re-checks
+    # under the wallet lock at delivery time; this is the early, planning-time gate.)
     if (
         account is not None
-        and account.account_type == "retail"
         and account.billing_mode == "prepaid_wallet"
         and ctx.wallets.get(sub.account_id, 0.0) < subtotal
     ):
