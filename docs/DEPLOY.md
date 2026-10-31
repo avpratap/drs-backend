@@ -36,11 +36,14 @@ without the required ones (see `app/main.py`):
   privately on next access, but delete the old public objects from the bucket.
 
 ## Health probes
-- **Liveness**: `GET /healthz` — always 200 if the process is up. Used by the
-  Docker `HEALTHCHECK`.
-- **Readiness**: `GET /readyz` — checks Postgres + Redis. **Point the platform's
-  traffic gate at `/readyz`**, not `/healthz`, so a booting/degraded instance
-  doesn't receive traffic.
+- **Liveness**: `GET /healthz` (alias `GET /health`) — always 200 if the process is up.
+  Used by the Docker `HEALTHCHECK`.
+- **Readiness**: `GET /readyz` (alias `GET /ready`) — pings Postgres + Redis, each
+  bounded to 2 s, and returns 200, or 503 when either is down or hung. **Point the
+  platform's traffic gate at `/readyz`**, not `/healthz`, so a booting/degraded
+  instance doesn't receive traffic.
+- Both are unauthenticated, exempt from the per-IP rate limit, and return no error
+  details (those go to the log).
 
 ## Migrations on deploy (zero-downtime)
 At **multi-instance scale** (Fly.io), run migrations as a **release/pre-deploy step
