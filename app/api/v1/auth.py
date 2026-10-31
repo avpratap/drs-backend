@@ -29,7 +29,15 @@ def _client_meta(request: Request) -> dict:
     }
 
 
-@router.post("/otp/request", response_model=OTPRequestResponse, operation_id="request_otp")
+# exclude_none: in prod (or once an SMS was sent) the response carries NO dev_otp key at
+# all, not `"dev_otp": null` — a client testing for the key's presence must never show a
+# "dev code" box in production.
+@router.post(
+    "/otp/request",
+    response_model=OTPRequestResponse,
+    response_model_exclude_none=True,
+    operation_id="request_otp",
+)
 async def request_otp(data: OTPRequest, request: Request):
     phone = normalize_phone(data.phone)
     if not is_indian_mobile(phone):
@@ -47,7 +55,11 @@ async def verify_otp(data: OTPVerify, request: Request, db: AsyncSession = Depen
     phone = normalize_phone(data.phone)
     if not is_indian_mobile(phone):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid Indian mobile number")
-    if not await otp_service.verify_otp(phone, data.otp):
+    try:
+        ok = await otp_service.verify_otp(phone, data.otp, ip=client_ip(request))
+    except ValueError as exc:  # per-IP failed-verify cap
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    if not ok:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired OTP")
     user = await auth_service.get_or_create_user(db, phone)
     if user.status != "active":

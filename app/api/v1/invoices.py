@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -8,7 +8,8 @@ from app.deps.auth import get_current_user, require_role
 from app.deps.pagination import Page, pagination
 from app.models.delivery import DeliveryOrder
 from app.models.invoice import Invoice, InvoiceLine
-from app.models.shop import CustomerAccount
+from app.models.order import Order
+from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
 from app.schemas.invoice import CreditNoteIn, InvoiceLineOut, InvoiceOut
 from app.services import invoice_pdf, invoicing
@@ -58,6 +59,11 @@ async def _details(db: AsyncSession, invoices: list[Invoice]) -> list[InvoiceOut
 
 @router.get("/invoices", response_model=list[InvoiceOut], operation_id="list_invoices")
 async def list_invoices(
+    shop_id: int | None = Query(
+        default=None,
+        description="Only invoices/credit notes for deliveries or orders of this shop "
+        "(must be one of the caller's shops).",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
@@ -65,9 +71,28 @@ async def list_invoices(
     query = select(Invoice).order_by(Invoice.id.desc())
     if user.role != "admin":
         ids = await _my_account_ids(db, user)
+        # A shop that isn't the caller's is a 404 (not an empty list confirming it exists).
+        if shop_id is not None and (
+            not ids
+            or await db.scalar(
+                select(Shop.id).where(Shop.id == shop_id, Shop.account_id.in_(ids))
+            ) is None
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Shop not found")
         if not ids:
             return []
         query = query.where(Invoice.account_id.in_(ids))
+    if shop_id is not None:
+        # An invoice (and its credit notes, which copy these refs) belongs to the shop of
+        # the delivery order or order it bills.
+        query = query.where(
+            or_(
+                Invoice.delivery_order_id.in_(
+                    select(DeliveryOrder.id).where(DeliveryOrder.shop_id == shop_id)
+                ),
+                Invoice.order_id.in_(select(Order.id).where(Order.shop_id == shop_id)),
+            )
+        )
     invoices = (
         await db.execute(query.limit(page.limit).offset(page.offset))
     ).scalars().all()

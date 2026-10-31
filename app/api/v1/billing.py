@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import false, func, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -8,7 +8,9 @@ from app.deps.auth import get_current_user, require_role
 from app.deps.idempotency import require_idempotency_key
 from app.deps.pagination import Page, paged, pagination, set_total
 from app.models.billing import CreditLedger, Wallet, WalletTransaction, WithdrawalRequest
-from app.models.shop import CustomerAccount
+from app.models.delivery import DeliveryOrder
+from app.models.fulfillment import CashCollection
+from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
 from app.schemas.billing import (
     BillingSummary,
@@ -108,6 +110,12 @@ async def my_wallet_transactions(
     "/credit-statement", response_model=list[CreditLedgerLineOut], operation_id="my_credit_statement"
 )
 async def my_credit_statement(
+    shop_id: int | None = Query(
+        default=None,
+        description="Only lines attributable to this shop (its delivery charges and the "
+        "cash collected at its door). Account-level payments are omitted, and "
+        "`balance_after` stays the ACCOUNT's running outstanding.",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     page: Page = Depends(pagination),
@@ -115,11 +123,14 @@ async def my_credit_statement(
     """Line-item statement for an account on credit terms (B2B postpaid): every charge,
     payment and credit note with the running outstanding, newest first (`?limit=&offset=`,
     total in `X-Total-Count`). Scoped to the caller's own account; an account that was
-    never on credit simply has no lines."""
+    never on credit simply has no lines. `?shop_id=` narrows it to one of the account's
+    shops (404 for a shop that isn't theirs)."""
     account = await db.scalar(
         select(CustomerAccount).where(CustomerAccount.owner_user_id == user.id)
     )
     if account is None:
+        if shop_id is not None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Shop not found")
         await set_total(db, select(CreditLedger).where(false()), page)
         return []
     q = (
@@ -127,6 +138,30 @@ async def my_credit_statement(
         .where(CreditLedger.account_id == account.id)
         .order_by(CreditLedger.id.desc())
     )
+    if shop_id is not None:
+        if await db.scalar(
+            select(Shop.id).where(Shop.id == shop_id, Shop.account_id == account.id)
+        ) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Shop not found")
+        shop_orders = select(DeliveryOrder.id).where(DeliveryOrder.shop_id == shop_id)
+        # The ledger refs that identify a shop: a delivery's charge and cash taken at its
+        # door. Settlements are account-level (no shop) and are left out.
+        q = q.where(
+            or_(
+                and_(
+                    CreditLedger.ref_type == "delivery_order",
+                    CreditLedger.ref_id.in_(shop_orders),
+                ),
+                and_(
+                    CreditLedger.ref_type == "cash_collection",
+                    CreditLedger.ref_id.in_(
+                        select(CashCollection.id).where(
+                            CashCollection.delivery_order_id.in_(shop_orders)
+                        )
+                    ),
+                ),
+            )
+        )
     return await paged(db, q, page)
 
 
