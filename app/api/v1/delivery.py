@@ -237,7 +237,9 @@ async def delivery_route(
 ):
     """The caller's assigned stops for a date as an ordered route with sequence numbers.
     Ordered by shop_id (stable); geo nearest-neighbor from the driver's latest location
-    is a future enhancement once shops carry geo."""
+    is a future enhancement once shops carry geo. Delivery staff (and admins) only, like
+    the rest of the driver endpoints; subscribers use GET /delivery/orders."""
+    _require_delivery(user)
     for_date = date or (today_ist() + dt.timedelta(days=1))
     ids = await allowed_shop_ids(user, db)
     q = select(DeliveryOrder).where(DeliveryOrder.delivery_date == for_date)

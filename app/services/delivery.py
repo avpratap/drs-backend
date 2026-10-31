@@ -167,25 +167,20 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
     # double-charges.
     # Round PER LINE exactly like the GST invoice does (charged = round(price * net qty, 2)
     # per line) — rounding the sum once drifted a paisa from the invoice total.
-    net = round(
-        sum(
-            round(
-                max(
-                    float(it.unit_price)
-                    * round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3),
-                    0.0,
-                ),
-                2,
-            )
-            for pid, it in items.items()
-        ),
-        2,
-    )
-    # Update the order/line totals to the ACTUAL delivered amounts (they held planned
-    # values from cutoff). Otherwise amount_due would mislead a COD driver on a partial.
-    for it in items.values():
-        it.line_total = round(float(it.unit_price) * float(it.qty_delivered), 2)
-    order.subtotal = round(sum(float(it.line_total) for it in items.values()), 2)
+    # The lines and subtotal now carry these NET values too (they held the planned values
+    # from cutoff, and were later set to GROSS delivered, ignoring door returns, so a COD
+    # driver's line/subtotal figures disagreed with total/amount_due and the invoice).
+    for pid, it in items.items():
+        it.line_total = round(
+            max(
+                float(it.unit_price)
+                * round(float(it.qty_delivered) - returned_qty.get(pid, 0.0), 3),
+                0.0,
+            ),
+            2,
+        )
+    net = round(sum(float(it.line_total) for it in items.values()), 2)
+    order.subtotal = net
     order.total = net
     order.amount_due = net
     # Cash/UPI taken at the door is posted BEFORE billing: for a prepaid account it is
