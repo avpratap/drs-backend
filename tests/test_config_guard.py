@@ -21,6 +21,7 @@ _GOOD = {
     "CORS_ORIGINS": "https://drs.co.in",
     "MSG91_AUTHKEY": "msg91-auth",
     "MSG91_TEMPLATE_ID": "dlt-template",
+    "TRUSTED_PROXY_HOPS": 1,
 }
 
 
@@ -50,6 +51,8 @@ def test_prod_config_ok_with_all_requirements():
         {"MSG91_AUTHKEY": ""},
         {"MSG91_TEMPLATE_ID": ""},
         {"MSG91_AUTHKEY": "   "},
+        # Behind a proxy, 0 hops makes every client share the proxy's IP.
+        {"TRUSTED_PROXY_HOPS": 0},
     ],
 )
 def test_prod_config_rejects_insecure(override):
@@ -66,3 +69,15 @@ def test_dev_config_not_guarded():
 def test_prod_error_names_msg91():
     with pytest.raises(ValueError, match="MSG91_AUTHKEY and MSG91_TEMPLATE_ID"):
         Settings(**{**_GOOD, "MSG91_TEMPLATE_ID": ""})
+
+
+def test_direct_exposure_must_be_explicit():
+    with pytest.raises(ValueError, match="TRUSTED_PROXY_HOPS"):
+        Settings(**{**_GOOD, "TRUSTED_PROXY_HOPS": 0})
+    ok = Settings(**{**_GOOD, "TRUSTED_PROXY_HOPS": 0, "ALLOW_DIRECT_CLIENT_IP": True})
+    assert ok.TRUSTED_PROXY_HOPS == 0
+
+
+def test_negative_proxy_hops_rejected():
+    with pytest.raises(ValueError):
+        Settings(ENV="dev", TRUSTED_PROXY_HOPS=-1)
