@@ -8,13 +8,16 @@ import hashlib
 import secrets
 
 from app.core.config import settings
-from app.core.redis import redis_client
+from app.core.redis import incr_window, redis_client
 from app.services.sms import send_otp_sms, sms_enabled
 
 # Floor at 60s so a misconfigured MSG91_OTP_EXPIRY_MIN=0 can't make every OTP expire
 # instantly (redis SET ex=0 is rejected) and lock users out of login.
 OTP_TTL = max(60, settings.MSG91_OTP_EXPIRY_MIN * 60)  # keep in sync with the SMS's stated expiry
+# Per (phone, requesting IP): so someone else hammering a victim's number can't use up
+# the victim's own budget (the SMS always goes to the phone's owner anyway).
 MAX_SENDS_PER_HOUR = 5
+MAX_SENDS_PER_PHONE_HOUR = 15  # per phone across all IPs: bounds SMS cost/flooding
 MAX_SENDS_PER_IP_HOUR = 50  # across all phones from one device/IP
 MAX_VERIFY_ATTEMPTS = 5  # per issued OTP, per phone: THE hard brute-force cap
 # Per-IP failed verifies (across all phones) are a throttle, not a block: many Indian
@@ -29,8 +32,22 @@ def _hash_otp(phone: str, otp: str) -> str:
     return hashlib.sha256(f"{phone}:{otp}:{settings.JWT_SECRET}".encode()).hexdigest()
 
 
+class UseLatestCode(Exception):
+    """The send cap for this phone is reached but a code sent earlier is still valid:
+    tell the caller to use the latest SMS instead of failing (so a third party requesting
+    OTPs for someone's number can't lock them out of their own login)."""
+
+
+async def _capped(phone: str) -> None:
+    if await redis_client.exists(f"otp:{phone}"):
+        raise UseLatestCode()
+    raise ValueError("Too many OTP requests. Try again later.")
+
+
 async def request_otp(phone: str, ip: str | None = None) -> str | None:
-    """Generate + store an OTP. Returns the OTP in non-prod for testing, else None."""
+    """Generate + store an OTP. Returns the OTP in non-prod for testing, else None.
+    Raises ValueError (429) when rate-limited with no valid code outstanding, and
+    UseLatestCode when capped but the last code sent to the phone is still valid."""
     # Cooldown first so a client that's merely resending too fast doesn't burn its hourly
     # per-IP budget (the IP counter only increments once we're actually going to send).
     if await redis_client.get(f"otp:cooldown:{phone}"):
@@ -38,17 +55,14 @@ async def request_otp(phone: str, ip: str | None = None) -> str | None:
 
     # Per-IP cap — stops a single device cycling through many phone numbers.
     if ip:
-        ip_sends = await redis_client.incr(f"otp:ip:{ip}")
-        if ip_sends == 1:
-            await redis_client.expire(f"otp:ip:{ip}", 3600)
-        if ip_sends > MAX_SENDS_PER_IP_HOUR:
+        if await incr_window(f"otp:ip:{ip}", 3600) > MAX_SENDS_PER_IP_HOUR:
             raise ValueError("Too many OTP requests from this device. Try again later.")
 
-    sends = await redis_client.incr(f"otp:send:{phone}")
-    if sends == 1:
-        await redis_client.expire(f"otp:send:{phone}", 3600)
-    if sends > MAX_SENDS_PER_HOUR:
-        raise ValueError("Too many OTP requests. Try again later.")
+    # Per (phone, IP) cap, then a looser per-phone ceiling across all callers.
+    if await incr_window(f"otp:send:{phone}:{ip or '-'}", 3600) > MAX_SENDS_PER_HOUR:
+        await _capped(phone)
+    if await incr_window(f"otp:send:{phone}", 3600) > MAX_SENDS_PER_PHONE_HOUR:
+        await _capped(phone)
 
     otp = f"{secrets.randbelow(10**6):06d}"
     await redis_client.set(f"otp:{phone}", _hash_otp(phone, otp), ex=OTP_TTL)
@@ -74,9 +88,7 @@ return 0
 async def _verify_failed(ip: str | None) -> bool:
     """Count a failed verify against the caller's IP; always returns False."""
     if ip:
-        key = f"otp:vfail:{ip}"
-        if await redis_client.incr(key) == 1:
-            await redis_client.expire(key, 3600)
+        await incr_window(f"otp:vfail:{ip}", 3600)
     return False
 
 
