@@ -3,6 +3,7 @@
 Dev: the OTP is returned in the API response so you can test without MSG91.
 Prod: wire send_sms() to MSG91 (DLT-registered) and never return the OTP.
 """
+import asyncio
 import hashlib
 import secrets
 
@@ -15,8 +16,12 @@ from app.services.sms import send_otp_sms, sms_enabled
 OTP_TTL = max(60, settings.MSG91_OTP_EXPIRY_MIN * 60)  # keep in sync with the SMS's stated expiry
 MAX_SENDS_PER_HOUR = 5
 MAX_SENDS_PER_IP_HOUR = 50  # across all phones from one device/IP
-MAX_VERIFY_ATTEMPTS = 5  # per issued OTP, per phone
-MAX_VERIFY_FAILS_PER_IP_HOUR = 50  # failed verifies across all phones from one IP
+MAX_VERIFY_ATTEMPTS = 5  # per issued OTP, per phone: THE hard brute-force cap
+# Per-IP failed verifies (across all phones) are a throttle, not a block: many Indian
+# users share one CGNAT/office IP, so a block would lock out people typing the RIGHT code.
+VERIFY_THROTTLE_AFTER_FAILS = 50  # past this, every verify from the IP is slowed...
+VERIFY_THROTTLE_DELAY_S = 2.0  # ...by this much (a correct code still succeeds)
+VERIFY_FAILS_PER_IP_CEILING = 2000  # hard 429 only at a volume no shared NAT produces
 RESEND_COOLDOWN = 60  # seconds
 
 
@@ -78,12 +83,17 @@ async def _verify_failed(ip: str | None) -> bool:
 async def verify_otp(phone: str, otp: str, ip: str | None = None) -> bool:
     """True when `otp` is the outstanding code for `phone` (consumed on success).
 
-    Raises ValueError once `ip` has MAX_VERIFY_FAILS_PER_IP_HOUR failed verifies in the
-    hour: the per-phone attempt cap alone let one client guess across many phones that
-    have a code outstanding. Only failures count, so a shared (CGNAT/office) IP full of
-    users typing their codes correctly is not throttled."""
-    if ip and int(await redis_client.get(f"otp:vfail:{ip}") or 0) >= MAX_VERIFY_FAILS_PER_IP_HOUR:
-        raise ValueError("Too many incorrect codes from this device. Try again later.")
+    The hard limit is per phone (MAX_VERIFY_ATTEMPTS per issued code). Failed verifies
+    are also counted per IP: past VERIFY_THROTTLE_AFTER_FAILS in the hour each verify
+    from that IP is delayed (slowing a guesser cycling through many phones) but still
+    evaluated, so co-NAT users submitting a correct code are never locked out. Only at
+    VERIFY_FAILS_PER_IP_CEILING does it raise ValueError (429)."""
+    if ip:
+        fails = int(await redis_client.get(f"otp:vfail:{ip}") or 0)
+        if fails >= VERIFY_FAILS_PER_IP_CEILING:
+            raise ValueError("Too many incorrect codes from this network. Try again later.")
+        if fails >= VERIFY_THROTTLE_AFTER_FAILS:
+            await asyncio.sleep(VERIFY_THROTTLE_DELAY_S)
     stored = await redis_client.get(f"otp:{phone}")
     if not stored:
         return await _verify_failed(ip)
