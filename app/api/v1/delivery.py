@@ -328,3 +328,53 @@ async def fail_delivery_order(
     order.failure_reason = data.reason
     await db.commit()
     return await _order_detail(db, order)
+
+
+class RouteStartOut(BaseModel):
+    date: dt.date
+    stops: int  # open stops on the caller's route for the date
+    notified: int  # customers told "out for delivery" now (repeats are not re-sent)
+
+
+@router.post("/route/start", response_model=RouteStartOut, operation_id="start_delivery_route")
+async def start_delivery_route(
+    date: dt.date | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The rider is leaving with today's load: every customer with an open stop on the
+    caller's route gets an "out for delivery" push (event delivery.out_for_delivery,
+    deep-linking to that delivery). Idempotent per stop — calling again only notifies
+    stops not already told. Delivery staff/admin only; riders only for today."""
+    from app.models.shop import CustomerAccount
+    from app.services import notifications as notify
+
+    _require_delivery(user)
+    for_date = date or today_ist()
+    if user.role != "admin" and for_date != today_ist():
+        raise HTTPException(status.HTTP_409_CONFLICT, "A route can only be started on its day")
+    ids = await allowed_shop_ids(user, db)
+    q = select(DeliveryOrder).where(
+        DeliveryOrder.delivery_date == for_date,
+        DeliveryOrder.status.in_(("generated", "frozen")),
+    )
+    if ids is not ALL:
+        if not ids:
+            return RouteStartOut(date=for_date, stops=0, notified=0)
+        q = q.where(DeliveryOrder.shop_id.in_(ids))
+    orders = (await db.execute(q.order_by(DeliveryOrder.shop_id))).scalars().all()
+    notified = 0
+    for order in orders:
+        account = await db.get(CustomerAccount, order.account_id)
+        owner = await db.get(User, account.owner_user_id) if account else None
+        if owner is None or owner.status != "active":
+            continue
+        rows = await notify.emit_event(
+            db, "delivery.out_for_delivery", owner,
+            {"delivery_id": order.id, "date": str(for_date)},
+            account_id=order.account_id,
+            dedupe_key=f"delivery.out_for_delivery:{order.id}",
+        )
+        notified += 1 if rows else 0
+    await db.commit()
+    return RouteStartOut(date=for_date, stops=len(orders), notified=notified)

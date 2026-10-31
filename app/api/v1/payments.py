@@ -75,7 +75,8 @@ async def _finalize_payment(db: AsyncSession, payment: Payment, gateway_payment_
                 db,
                 "payment.success",
                 owner,
-                {"amount": float(payment.amount), "balance": float(wallet.balance)},
+                {"amount": float(payment.amount), "balance": float(wallet.balance),
+                 "payment_id": payment.id},
                 account_id=payment.account_id,
                 dedupe_key=f"payment.success:{payment.id}",
             )
@@ -383,7 +384,7 @@ async def _apply_refund_effect(db: AsyncSession, payment: Payment, refund: Refun
     if owner is not None:
         await notify.emit_event(
             db, "payment.refunded", owner,
-            {"amount": amount, "balance": float(wallet.balance)},
+            {"amount": amount, "balance": float(wallet.balance), "payment_id": payment.id},
             account_id=payment.account_id, dedupe_key=f"payment.refunded:{refund.id}",
         )
     return float(wallet.balance)
@@ -705,7 +706,8 @@ async def _handle_webhook_event(db: AsyncSession, event_type: str | None, payloa
         owner = await _owner_user(db, payment.account_id)
         if owner is not None:
             await notify.emit_event(
-                db, "payment.failed", owner, {"amount": float(payment.amount)},
+                db, "payment.failed", owner,
+                {"amount": float(payment.amount), "payment_id": payment.id},
                 account_id=payment.account_id, dedupe_key=f"payment.failed:{payment.id}",
             )
         return

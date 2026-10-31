@@ -248,7 +248,9 @@ async def deliver_notification(db: AsyncSession, notif: Notification) -> bool:
     notif.last_attempt_at = dt.datetime.now(dt.UTC)
     await db.commit()
     # Phase 2 — call the provider, then record the terminal state.
-    ok, msg_id, err = await sender(notif.to_addr or "", notif.body or "", notif.payload)
+    # The event type rides along so push can deep-link (see senders.push_data).
+    payload = {**(notif.payload or {}), "type": notif.event_type}
+    ok, msg_id, err = await sender(notif.to_addr or "", notif.body or "", payload)
     if ok:
         notif.status = "sent"
         notif.provider = settings.WHATSAPP_PROVIDER if notif.channel == "whatsapp" else notif.channel

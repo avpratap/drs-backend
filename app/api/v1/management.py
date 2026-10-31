@@ -48,6 +48,7 @@ from app.schemas.shop import ShopOut
 from app.services import admin_tools as audit_svc
 from app.services import applied_ops, dpdp
 from app.services import billing as billing_svc
+from app.services import notifications as notify
 from app.services import refunds as refund_acct
 
 router = APIRouter(
@@ -117,15 +118,24 @@ async def assign_delivery(data: DeliveryAssignmentIn, db: AsyncSession = Depends
             DeliveryAssignment.shop_id == data.shop_id,
         )
     )
+    newly_active = existing is None or not existing.active
     if existing is not None:
         existing.active = True
         row = existing
     else:
         row = DeliveryAssignment(delivery_id=data.delivery_id, shop_id=data.shop_id, active=True)
         db.add(row)
+    if newly_active:
+        await _notify_route_changed(db, user, added=1, removed=0)
     await db.commit()
     await db.refresh(row)
     return row
+
+
+async def _notify_route_changed(db: AsyncSession, rider: User, *, added: int, removed: int) -> None:
+    """Push the rider a route.changed event when their shop assignments change."""
+    if rider.status == "active" and (added or removed):
+        await notify.emit_event(db, "route.changed", rider, {"added": added, "removed": removed})
 
 
 class AdminDeliveryAssignmentRow(DeliveryAssignmentOut):
@@ -189,7 +199,11 @@ async def unassign_delivery(assignment_id: int, db: AsyncSession = Depends(get_d
     row = await db.get(DeliveryAssignment, assignment_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
+    was_active = row.active
     row.active = False  # soft-deactivate (keeps history)
+    rider = await db.get(User, row.delivery_id)
+    if was_active and rider is not None:
+        await _notify_route_changed(db, rider, added=0, removed=1)
     await db.commit()
 
 
@@ -663,6 +677,7 @@ async def set_shop_scope(
             db, actor.id, "staff_shop_scope", "user", user_id,
             detail={"added": added, "removed": sorted(removed)},
         )
+        await _notify_route_changed(db, user, added=len(added), removed=len(removed))
     await db.commit()
     return await _scope_out(db, user)
 

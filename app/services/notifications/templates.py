@@ -112,6 +112,25 @@ def _r_review_request(d: dict) -> dict:
     return {"text": txt, "wa_template": "review_request", "wa_params": [str(d.get("product", ""))]}
 
 
+def _r_route_assigned(d: dict) -> dict:
+    n = int(d.get("stops", 0) or 0)
+    txt = f"DRS: Your delivery route for {d.get('date')} is ready — {n} stop{'s' if n != 1 else ''}."
+    return {"text": txt, "wa_template": "route_assigned", "wa_params": [str(d.get("date")), str(n)]}
+
+
+def _r_route_changed(d: dict) -> dict:
+    added, removed = int(d.get("added", 0) or 0), int(d.get("removed", 0) or 0)
+    parts = [f"{added} shop{'s' if added != 1 else ''} added"] if added else []
+    parts += [f"{removed} shop{'s' if removed != 1 else ''} removed"] if removed else []
+    txt = f"DRS: Your delivery route changed — {', '.join(parts) or 'updated'}."
+    return {"text": txt, "wa_template": "route_changed", "wa_params": [str(added), str(removed)]}
+
+
+def _r_out_for_delivery(d: dict) -> dict:
+    txt = "DRS: Your order is out for delivery 🚚 and will reach you shortly."
+    return {"text": txt, "wa_template": "out_for_delivery", "wa_params": []}
+
+
 # event_type -> (category, channels, renderer)
 REGISTRY: dict[str, tuple[str, list[str], Callable[[dict], dict]]] = {
     # "push" = the in-app bell (inbox.py). Customer transactional events carry it so the
@@ -130,6 +149,11 @@ REGISTRY: dict[str, tuple[str, list[str], Callable[[dict], dict]]] = {
     "subscription.cancelled": (TRANSACTIONAL, ["whatsapp", "push"], _r_subscription_cancelled),
     "shipment.delivered": (TRANSACTIONAL, ["whatsapp", "push"], _r_shipment_delivered),
     "review.request": (MARKETING, ["whatsapp", "push"], _r_review_request),
+    # Rider (delivery staff) events: push only — the rider app is the audience.
+    "route.assigned": (TRANSACTIONAL, ["push"], _r_route_assigned),
+    "route.changed": (TRANSACTIONAL, ["push"], _r_route_changed),
+    # Customer: the rider started the day's route with this stop on it.
+    "delivery.out_for_delivery": (TRANSACTIONAL, ["push"], _r_out_for_delivery),
 }
 
 

@@ -212,7 +212,7 @@ async def bill_delivery(db: AsyncSession, order: DeliveryOrder, amount: float) -
                     db,
                     "wallet.low",
                     owner,
-                    {"balance": float(wallet.balance)},
+                    {"balance": float(wallet.balance), "delivery_id": order.id},
                     account_id=account.id,
                     dedupe_key=f"wallet.low:{order.id}",
                 )

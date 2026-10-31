@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.redis import redis_client
 from app.models.billing import Wallet
 from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
-from app.models.shop import CustomerAccount, Shop
+from app.models.shop import CustomerAccount, DeliveryAssignment, Shop
 from app.models.subscription import Subscription, SubscriptionItem, SubscriptionOverride
 from app.models.user import User
 from app.services import notifications as notify
@@ -230,7 +230,8 @@ async def _materialize_one(
             await notify.emit_event(
                 db, "wallet.low", owner,
                 {"balance": balance, "needed": subtotal,
-                 "reserved": round(max(balance - available, 0.0), 2)},
+                 "reserved": round(max(balance - available, 0.0), 2),
+                 "subscription_id": sub.id, "date": str(delivery_date)},
                 account_id=sub.account_id,
                 dedupe_key=f"cutoff.skipped_lowbalance:{sub.id}:{delivery_date}",
             )
@@ -285,11 +286,51 @@ async def _materialize_one(
             db,
             "order.generated",
             owner,
-            {"date": str(delivery_date), "summary": f"{len(priced)} item(s)", "total": subtotal},
+            {"date": str(delivery_date), "summary": f"{len(priced)} item(s)", "total": subtotal,
+             "delivery_id": order.id},
             account_id=sub.account_id,
             dedupe_key=f"order.generated:{order.id}",
         )
     return True
+
+
+async def _notify_rider_routes(db: AsyncSession, delivery_date: dt.date) -> None:
+    """Tell each rider their route for the date is ready (route.assigned, push). Deduped
+    on (rider, date, stop count): re-running the cutoff re-notifies a rider only when
+    their number of stops actually changed. Best-effort: never fails the run."""
+    try:
+        rows = (
+            await db.execute(
+                select(DeliveryAssignment.delivery_id, func.count(DeliveryOrder.id))
+                .join(DeliveryOrder, DeliveryOrder.shop_id == DeliveryAssignment.shop_id)
+                .where(
+                    DeliveryAssignment.active.is_(True),
+                    DeliveryOrder.delivery_date == delivery_date,
+                    DeliveryOrder.status.in_(("generated", "frozen")),
+                )
+                .group_by(DeliveryAssignment.delivery_id)
+            )
+        ).all()
+        if not rows:
+            return
+        riders = {
+            u.id: u for u in (
+                await db.execute(select(User).where(_any(User.id, [r[0] for r in rows])))
+            ).scalars()
+            if u.status == "active"
+        }
+        for rider_id, stops in rows:
+            rider = riders.get(rider_id)
+            if rider is None:
+                continue
+            await notify.emit_event(
+                db, "route.assigned", rider, {"date": str(delivery_date), "stops": int(stops)},
+                dedupe_key=f"route.assigned:{rider_id}:{delivery_date}:{int(stops)}",
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        log.exception("cutoff: rider route notifications failed for %s", delivery_date)
 
 
 async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
@@ -433,6 +474,7 @@ async def run_cutoff(db: AsyncSession, delivery_date: dt.date) -> dict:
             if await _drop_if_stale(db, order):
                 removed += 1
         await db.commit()
+        await _notify_rider_routes(db, delivery_date)
 
         run = await db.get(ScheduleRun, run_id)
         run.status = "partial" if failed else "frozen"
