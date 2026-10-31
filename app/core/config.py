@@ -170,6 +170,14 @@ class Settings(BaseSettings):
             problems.append("SELLER_GSTIN required in prod (GST tax invoices)")
         if not self.SHIPROCKET_WEBHOOK_TOKEN:
             problems.append("SHIPROCKET_WEBHOOK_TOKEN required in prod")
+        # Without both, OTPs are generated but never delivered (and never returned in
+        # prod), so every OTP login would silently fail. MSG91 only sends with a
+        # DLT-approved template id, hence both are required.
+        if not (self.MSG91_AUTHKEY.strip() and self.MSG91_TEMPLATE_ID.strip()):
+            problems.append(
+                "MSG91_AUTHKEY and MSG91_TEMPLATE_ID required in prod (else OTP SMS is "
+                "never sent and nobody can log in)"
+            )
         # Without R2 the local-disk stub would store uploads/invoices on ephemeral disk
         # and serve them from /files; invoices need a bucket with NO public binding.
         if not (self.R2_ENDPOINT and self.R2_ACCESS_KEY and self.R2_SECRET_KEY and self.R2_BUCKET):

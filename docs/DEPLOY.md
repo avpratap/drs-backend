@@ -12,10 +12,12 @@ without the required ones (see `app/main.py`):
 - `CORS_ORIGINS` (explicit allow-list, no `*`) — **required**
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` — **required**
 - `SELLER_GSTIN` — **required** (GST tax invoices are invalid without it)
+- `MSG91_AUTHKEY`, `MSG91_TEMPLATE_ID` (DLT-approved OTP template) — **required**: without
+  them OTP SMS is never sent and nobody can log in, so the app refuses to boot
 - `DATABASE_URL`, `REDIS_URL`
 - `DB_POOL_MODE=pgbouncer` (behind PgBouncer transaction pooling) and `DB_SSL=true`
   (managed Postgres requires TLS)
-- Integration keys as they come online: `MSG91_*`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,
+- Integration keys as they come online: `MSG91_SENDER`, `GUPSHUP_*`, `ANTHROPIC_API_KEY`,
   `R2_*`, `SENTRY_DSN`.
 - **PostgreSQL 15 or newer** (migration 0051 uses `NULLS NOT DISTINCT`); CI/compose run 16.
 - `ALLOW_NEGATIVE_STOCK=false` — **production sets this to false.** Any delivery or stock

@@ -19,6 +19,8 @@ _GOOD = {
     "R2_BUCKET": "public-assets",
     "R2_PRIVATE_BUCKET": "private-docs",
     "CORS_ORIGINS": "https://drs.co.in",
+    "MSG91_AUTHKEY": "msg91-auth",
+    "MSG91_TEMPLATE_ID": "dlt-template",
 }
 
 
@@ -44,6 +46,10 @@ def test_prod_config_ok_with_all_requirements():
         {"R2_BUCKET": ""},
         {"R2_PRIVATE_BUCKET": ""},
         {"R2_PRIVATE_BUCKET": "public-assets"},  # same as the public bucket
+        # OTP login: without both, codes are never delivered (nor returned in prod).
+        {"MSG91_AUTHKEY": ""},
+        {"MSG91_TEMPLATE_ID": ""},
+        {"MSG91_AUTHKEY": "   "},
     ],
 )
 def test_prod_config_rejects_insecure(override):
@@ -55,3 +61,8 @@ def test_prod_config_rejects_insecure(override):
 def test_dev_config_not_guarded():
     # The dev defaults (dev JWT secret, DB_SSL off) are fine when ENV != prod.
     assert Settings(ENV="dev").ENV == "dev"
+
+
+def test_prod_error_names_msg91():
+    with pytest.raises(ValueError, match="MSG91_AUTHKEY and MSG91_TEMPLATE_ID"):
+        Settings(**{**_GOOD, "MSG91_TEMPLATE_ID": ""})
