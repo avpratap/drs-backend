@@ -115,6 +115,10 @@ async def credit_outstanding(db: AsyncSession, account_id: int) -> float:
 async def credit_entry(
     db: AsyncSession, account_id: int, amount: float, entry_type: str, ref_type=None, ref_id=None
 ) -> float:
+    # Quantize ONCE (as wallet_adjust does) so the stored entry and the balance move are
+    # the same paisa value: storing the raw amount while rounding balance_after let the
+    # append-only ledger's lines stop summing to its balance on sub-paisa input.
+    amount = round(float(amount), 2)
     # Serialize concurrent credit entries for this account by locking the account row.
     await db.execute(
         select(CustomerAccount.id).where(CustomerAccount.id == account_id).with_for_update()
