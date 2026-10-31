@@ -192,6 +192,29 @@ def photo_kind(*fields: str | None) -> str:
     return "milk"
 
 
+# Storefront category slugs the web knows (icons + /shop?category=<slug>). The categories
+# endpoint lists DISTINCT product.category, so with every demo product at NULL the
+# "Shop by category" grid was empty.
+STOREFRONT_CATEGORIES = ("milk", "buttermilk", "curd", "paneer", "ghee", "sweets")
+
+
+def category_slug(*fields: str | None) -> str:
+    """Storefront category slug from a product's name / sku (buttermilk before milk;
+    cheese files under paneer, frozen desserts under sweets)."""
+    text = " ".join(f for f in fields if f).lower()
+    for slug, words in (
+        ("buttermilk", ("buttermilk", "chaas", "chhach", "chaach", "lassi")),
+        ("curd", ("curd", "dahi", "yogurt", "yoghurt", "shrikhand")),
+        ("ghee", ("ghee",)),
+        ("paneer", ("paneer", "cheese")),
+        ("sweets", ("kulfi", "ice cream", "sweet", "peda", "rasgulla", "barfi", "khoa", "mithai")),
+        ("milk", ("milk",)),
+    ):
+        if any(w in text for w in words):
+            return slug
+    return "milk"
+
+
 def _store_asset(key: str) -> str:
     """Store a baked demo JPEG (scripts/demo_assets/<key>) into the media store."""
     from app.core import storage
@@ -267,6 +290,19 @@ async def seed_demo(db, *, phone: str = DEFAULT_PHONE, force: bool = False) -> d
         p.image_url = photos[photo_kind(p.category, p.name, p.sku)]
         set_.append(p.sku)
     summary["product_images"] = {"set": set_, "kept_existing": kept}
+
+    # 1a. Product categories (storefront "Shop by category"): fill an empty category with
+    # its slug; a category an admin set is kept unless --force.
+    cat_set, cat_kept = [], []
+    for p in products:
+        if p.category and not force:
+            cat_kept.append(p.sku)
+            continue
+        slug = category_slug(p.name, p.sku)
+        if p.category != slug:
+            p.category = slug
+            cat_set.append(p.sku)
+    summary["product_categories"] = {"set": cat_set, "kept_existing": cat_kept}
 
     # 1b. Site images used by the hardcoded home hero and about page.
     _store_asset("hero.jpg")
@@ -406,7 +442,8 @@ def _guard() -> None:
 
 
 async def _clear_caches() -> None:
-    """Drop the product-list and sitemap caches so new images/articles show at once."""
+    """Drop the product-list and sitemap caches so new images/categories/articles show
+    at once."""
     try:
         from app.core.cache import cache_delete
         from app.services.content import SITEMAP_CACHE_KEY
@@ -422,6 +459,8 @@ def _print(summary: dict) -> None:
     print("Storefront demo seed complete.")
     print(f"  product images -> {len(imgs['set'])} set, {len(imgs['kept_existing'])} kept "
           f"(existing images; --force to replace)")
+    cats = summary["product_categories"]
+    print(f"  categories     -> {len(cats['set'])} set, {len(cats['kept_existing'])} kept")
     for key in ("banners", "articles", "pages"):
         s = summary[key]
         print(f"  {key:<14} -> {s['created']} created, {s['updated']} updated")

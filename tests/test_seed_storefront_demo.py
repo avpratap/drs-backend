@@ -159,6 +159,36 @@ async def test_demo_seed_is_complete_and_idempotent(demo, client):
     assert third["demo_customer"]["points"] == 250
 
 
+async def test_categories_populate_the_storefront_grid(demo, client):
+    """Every demo product had category=NULL, so GET /products/categories was [] and the
+    storefront's "Shop by category" failed. The seed fills lowercase slugs the web knows."""
+    script, Session, _engine, _dir = demo
+    from app.models.product import Product
+
+    assert (await client.get("/api/v1/products/categories")).json() == []
+    first = await script.seed_demo_session(Session)
+    assert set(first["product_categories"]["set"]) == {
+        "MILK-500", "GHEE-500", "PANEER-200", "CHEESE-200", "KULFI-1PC"}  # active only
+    cats = (await client.get("/api/v1/products/categories")).json()
+    assert cats == ["ghee", "milk", "paneer", "sweets"]
+    assert set(cats) <= set(script.STOREFRONT_CATEGORIES)
+    milk = (await client.get("/api/v1/products?category=milk")).json()
+    assert [p["sku"] for p in milk] == ["MILK-500"]
+
+    again = await script.seed_demo_session(Session)  # idempotent: nothing to change
+    assert again["product_categories"]["set"] == []
+    async with Session() as db:  # an admin's category is kept unless --force
+        p = await db.scalar(select(Product).where(Product.sku == "CHEESE-200"))
+        p.category = "cheese"
+        await db.commit()
+    await script.seed_demo_session(Session)
+    async with Session() as db:
+        assert await db.scalar(select(Product.category).where(Product.sku == "CHEESE-200")) \
+            == "cheese"
+    out = await script.seed_demo_session(Session, force=True)
+    assert out["product_categories"]["set"] == ["CHEESE-200"]
+
+
 async def test_force_replaces_existing_content(demo):
     script, Session, _engine, _dir = demo
     from app.models.content import StaticPage
@@ -186,3 +216,8 @@ def test_refuses_prod_and_bad_phone(monkeypatch):
     assert script.product_kind("Buttermilk (Chaas) 200ml") == "buttermilk"  # not "milk"
     assert script.product_kind(None, "Malai Paneer") == "cheese"
     assert script.product_kind("dahi") == "curd"
+    assert script.category_slug("Buttermilk (Chaas) 200ml") == "buttermilk"
+    assert script.category_slug("Processed Cheese 200g") == "paneer"
+    assert script.category_slug("Malai Kulfi Stick", "KULFI-1PC") == "sweets"
+    assert script.category_slug("Bilona A2 Ghee 500ml") == "ghee"
+    assert script.category_slug("Mystery item") == "milk"
