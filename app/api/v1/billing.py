@@ -20,6 +20,7 @@ from app.schemas.billing import (
     WalletTxnOut,
 )
 from app.services import admin_tools as audit_svc
+from app.services import applied_ops
 from app.services import billing as billing_service
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -167,20 +168,31 @@ async def my_credit_statement(
 
 @router.post(
     "/admin/topup",
-    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
+    dependencies=[Depends(require_role("admin"))],
     operation_id="wallet_topup",
     response_model=TopupOut,
 )
 async def topup(
-    data: TopupIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    data: TopupIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idem_key: str = Depends(require_idempotency_key),
 ):
+    # Handler-level idempotency: replays (never re-applies) a retry whose middleware claim
+    # was reaped after a crash between this commit and the response store.
+    key, payload = applied_ops.scoped_key(user.id, idem_key), data.model_dump()
+    done = await applied_ops.replay(db, "wallet_topup", key, payload)
+    if done is not None:
+        return done
     await billing_service.wallet_adjust(db, data.account_id, data.amount, "topup", "manual", None)
     await audit_svc.record_audit(
         db, user.id, "wallet_topup", "customer_account", data.account_id,
         detail={"amount": float(data.amount)},
     )
+    result = {"detail": "wallet topped up", "account_id": data.account_id, "amount": data.amount}
+    await applied_ops.record(db, "wallet_topup", key, payload, result)
     await db.commit()
-    return {"detail": "wallet topped up", "account_id": data.account_id, "amount": data.amount}
+    return result
 
 
 @router.post("/withdrawals", response_model=WithdrawalOut, operation_id="request_withdrawal")

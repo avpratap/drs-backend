@@ -46,8 +46,8 @@ from app.schemas.management import (
 )
 from app.schemas.shop import ShopOut
 from app.services import admin_tools as audit_svc
+from app.services import applied_ops, dpdp
 from app.services import billing as billing_svc
-from app.services import dpdp
 from app.services import refunds as refund_acct
 
 router = APIRouter(
@@ -778,19 +778,26 @@ async def admin_account_billing(account_id: int, db: AsyncSession = Depends(get_
     "/accounts/{account_id}/wallet/adjust",
     operation_id="admin_wallet_adjust",
     response_model=WalletBalanceOut,
-    dependencies=[Depends(require_idempotency_key)],
 )
 async def admin_wallet_adjust(
     account_id: int,
     data: WalletAdjustIn,
     actor: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    idem_key: str = Depends(require_idempotency_key),
 ):
     """Admin wallet correction/goodwill (signed). Negative is allowed (override)."""
     if data.amount == 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "amount must be non-zero")
     if await db.get(CustomerAccount, account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    # Handler-level idempotency (see applied_ops): a retry after a crash between this
+    # commit and the middleware's response store replays instead of re-adjusting.
+    key = applied_ops.scoped_key(actor.id, idem_key)
+    payload = {"account_id": account_id, **data.model_dump()}
+    done = await applied_ops.replay(db, "wallet_adjust", key, payload)
+    if done is not None:
+        return done
     wallet = await billing_svc.wallet_adjust(
         # Fixed ledger type (the free-text reason was cut to 20 chars into txn_type); the
         # full reason and note live in the audit record written below.
@@ -801,21 +808,23 @@ async def admin_wallet_adjust(
         db, actor.id, "wallet_adjust", "customer_account", account_id,
         detail={"amount": float(data.amount), "reason": data.reason, "note": data.note},
     )
+    result = {"account_id": account_id, "wallet_balance": float(wallet.balance)}
+    await applied_ops.record(db, "wallet_adjust", key, payload, result)
     await db.commit()
-    return {"account_id": account_id, "wallet_balance": float(wallet.balance)}
+    return result
 
 
 @router.post(
     "/accounts/{account_id}/credit/settle",
     operation_id="admin_settle_credit",
     response_model=CreditOutstandingOut,
-    dependencies=[Depends(require_idempotency_key)],
 )
 async def admin_settle_credit(
     account_id: int,
     data: CreditSettleIn,
     actor: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    idem_key: str = Depends(require_idempotency_key),
 ):
     """Record a payment received against a B2B postpaid account's outstanding credit."""
     # Lock the account row FIRST so the overpay check and the credit write are atomic:
@@ -830,6 +839,13 @@ async def admin_settle_credit(
     ).scalar_one_or_none()
     if account is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    # Handler-level idempotency (see applied_ops): checked under the account lock, so a
+    # retry after a crash between the commit and the response store replays.
+    key = applied_ops.scoped_key(actor.id, idem_key)
+    payload = {"account_id": account_id, **data.model_dump()}
+    done = await applied_ops.replay(db, "credit_settle", key, payload)
+    if done is not None:
+        return done
     if account.billing_mode != "postpaid_credit":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -849,8 +865,10 @@ async def admin_settle_credit(
         db, actor.id, "credit_settle", "customer_account", account_id,
         detail={"amount": float(data.amount)},
     )
+    result = {"account_id": account_id, "credit_outstanding": new_balance}
+    await applied_ops.record(db, "credit_settle", key, payload, result)
     await db.commit()
-    return {"account_id": account_id, "credit_outstanding": new_balance}
+    return result
 
 
 # ---------- Shop management ----------

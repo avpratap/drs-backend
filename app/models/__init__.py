@@ -16,7 +16,7 @@ from app.models.delivery import DeliveryOrder, DeliveryOrderItem, ScheduleRun
 from app.models.device_token import DeviceToken
 from app.models.driver import DriverLocation
 from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
-from app.models.idempotency import IdempotencyKey
+from app.models.idempotency import AppliedOperation, IdempotencyKey
 from app.models.inventory import StockItem, StockMovement
 from app.models.invoice import Invoice, InvoiceLine
 from app.models.loyalty import (
@@ -58,6 +58,7 @@ from app.models.wishlist import WishlistItem
 __all__ = [
     "Address",
     "AdminAuditLog",
+    "AppliedOperation",
     "Article",
     "AuthSession",
     "Banner",
