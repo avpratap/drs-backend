@@ -174,7 +174,10 @@ async def client():
 # Customer writes that REQUIRE an Idempotency-Key. Like a real storefront, the test client
 # sends a fresh key on each such call unless the test sets one itself (to exercise replay)
 # or opts out with the NO_IDEM header (to exercise the 428).
-_IDEM_REQUIRED_PATHS = {"/api/v1/orders", "/api/v1/cart/checkout", "/api/v1/payments/create"}
+_IDEM_REQUIRED_PATHS = {
+    "/api/v1/orders", "/api/v1/cart/checkout", "/api/v1/payments/create",
+    "/api/v1/loyalty/gift-cards/redeem",
+}
 NO_IDEM = {"X-Test-No-Idempotency-Key": "1"}
 
 
