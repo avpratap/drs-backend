@@ -58,22 +58,39 @@ async def test_otp_verify_limited_per_phone(client):
     assert r.status_code == 401
 
 
-async def test_otp_verify_failures_limited_per_ip(client, monkeypatch):
-    monkeypatch.setattr(otp_service, "MAX_VERIFY_FAILS_PER_IP_HOUR", 3)
+async def test_otp_verify_ip_failures_throttle_but_never_block_a_correct_code(client, monkeypatch):
+    """B1: on a shared CGNAT/office IP past the failure threshold, a user with the RIGHT
+    code still logs in (only slowed); the hard limit stays per phone."""
+    slept: list[float] = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(otp_service, "VERIFY_THROTTLE_AFTER_FAILS", 3)
+    monkeypatch.setattr(otp_service.asyncio, "sleep", fake_sleep)
     url = "/api/v1/auth/otp/verify"
-    # A correct login doesn't count toward the cap.
+    # A correct login doesn't count as a failure.
     assert (await login(client, "9000002040")) is not None
-    # Guessing across phones (with or without a code outstanding) from one IP.
     otp = (await client.post("/api/v1/auth/otp/request", json={"phone": "9000002041"})).json()["dev_otp"]
-    for phone in ("9000002041", "9000002042", "9000002043"):
-        r = await client.post(url, json={"phone": phone, "otp": "000000" if otp != "000000" else "111111"})
-        assert r.status_code == 401
+    wrong = "000000" if otp != "000000" else "111111"
+    for phone in ("9000002042", "9000002043", "9000002044"):  # someone guessing on the NAT
+        assert (await client.post(url, json={"phone": phone, "otp": wrong})).status_code == 401
+    assert slept == []
+    # Another user behind the same IP, correct code: throttled, NOT blocked.
     r = await client.post(url, json={"phone": "9000002041", "otp": otp})
-    assert r.status_code == 429  # blocked before the code is even checked
-    # ...and the blocked attempt didn't consume the victim's code (still valid once the
-    # IP window passes).
-    await otp_service.redis_client.delete("otp:vfail:127.0.0.1")
-    assert (await client.post(url, json={"phone": "9000002041", "otp": otp})).status_code == 200
+    assert r.status_code == 200 and slept == [otp_service.VERIFY_THROTTLE_DELAY_S]
+    # Wrong guesses past the threshold are slowed too (and still just 401).
+    assert (await client.post(url, json={"phone": "9000002042", "otp": wrong})).status_code == 401
+    assert len(slept) == 2
+
+
+async def test_otp_verify_ip_ceiling_is_a_hard_429(client, monkeypatch):
+    monkeypatch.setattr(otp_service, "VERIFY_FAILS_PER_IP_CEILING", 2)
+    monkeypatch.setattr(otp_service, "VERIFY_THROTTLE_AFTER_FAILS", 100)
+    url = "/api/v1/auth/otp/verify"
+    for phone in ("9000002045", "9000002046"):
+        assert (await client.post(url, json={"phone": phone, "otp": "123456"})).status_code == 401
+    assert (await client.post(url, json={"phone": "9000002047", "otp": "123456"})).status_code == 429
 
 
 # ---------- (3) ?shop_id= on /invoices and /billing/credit-statement ----------
