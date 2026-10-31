@@ -26,6 +26,9 @@ MOBILE_OPERATIONS = [
     ("create_subscription", "POST", "/api/v1/subscriptions"),
     ("delete_address", "DELETE", "/api/v1/addresses/{address_id}"),
     ("delete_device_token", "DELETE", "/api/v1/account/device-tokens"),
+    # Web admin detail screens (replacing list-then-filter).
+    ("admin_get_product", "GET", "/api/v1/admin/products/{product_id}"),
+    ("admin_get_location", "GET", "/api/v1/admin/locations/{location_id}"),
     ("delete_my_rating", "DELETE", "/api/v1/products/{product_id}/ratings"),
     ("deliver_order", "POST", "/api/v1/delivery/orders/{order_id}/deliver"),
     ("delivery_route", "GET", "/api/v1/delivery/orders/route"),

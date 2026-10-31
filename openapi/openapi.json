@@ -16332,6 +16332,55 @@
       }
     },
     "/api/v1/admin/locations/{location_id}": {
+      "get": {
+        "description": "One stock location (warehouse / shop / vehicle) for the admin detail screen.",
+        "operationId": "admin_get_location",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "location_id",
+            "required": true,
+            "schema": {
+              "title": "Location Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Location not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Admin Get Location",
+        "tags": [
+          "inventory"
+        ]
+      },
       "patch": {
         "operationId": "update_location",
         "parameters": [
@@ -18730,6 +18779,57 @@
           }
         ],
         "summary": "Product Search",
+        "tags": [
+          "admin-tools"
+        ]
+      }
+    },
+    "/api/v1/admin/products/{product_id}": {
+      "get": {
+        "description": "One product for the admin detail screen. Unlike the storefront GET /products/{id},\nretired products are returned too (their status says so).",
+        "operationId": "admin_get_product",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product_id",
+            "required": true,
+            "schema": {
+              "title": "Product Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Product not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Admin Get Product",
         "tags": [
           "admin-tools"
         ]
