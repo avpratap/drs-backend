@@ -129,11 +129,19 @@ def _apportion_paise(weights: list[float], target_paise: int) -> list[float]:
     return [round(p / 100, 2) for p in base]
 
 
-async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:
+async def issue_delivery_invoice(db: AsyncSession, order: DeliveryOrder) -> Invoice:
+    """The GST tax invoice for a delivered (or partially delivered) delivery order,
+    FLUSH-ONLY: the caller commits it in the same transaction as whatever it belongs to
+    (the delivery itself, so a rolled-back delivery never leaves an invoice or burns a
+    serial). Idempotent: returns the existing tax invoice for the order if there is one.
+    Exactly one per order (advisory lock + uq_invoice_delivery_order partial unique index).
+
+    Bills the NET delivered quantity per line (delivered - door returns), at the order
+    line's GST-inclusive unit price: the same per-line figures delivery billing charged.
+    Raises NothingToInvoice when nothing was supplied (failed / fully returned)."""
     # Serialize concurrent generations for this order so the existence check below
     # is reliable (partial-unique index on delivery_order_id is the DB backstop).
     await db.execute(select(func.pg_advisory_xact_lock(_INV_LOCK_NS, _lk(order.id))))
-    # Idempotent: reuse the existing tax invoice for this delivery order.
     existing = await db.scalar(
         select(Invoice).where(
             Invoice.delivery_order_id == order.id, Invoice.is_credit_note.is_(False)
@@ -144,7 +152,9 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
 
     rows = (
         await db.execute(
-            select(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
+            select(DeliveryOrderItem)
+            .where(DeliveryOrderItem.delivery_order_id == order.id)
+            .order_by(DeliveryOrderItem.product_id)
         )
     ).scalars().all()
     # Net out door returns per product so the invoice bills the NET delivered quantity
@@ -170,10 +180,27 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
     place = canonical(await _place_of_supply(db, order)) or settings.SELLER_STATE
     # Compare on the GST state code, so "RJ" / "rajasthan." / "08" are all intra-state.
     interstate = not same_state(place, settings.SELLER_STATE)
+
+    lines: list[InvoiceLine] = []
+    for it, qty in chargeable:
+        product = await db.get(Product, it.product_id)
+        rate = float(product.gst_rate) if product else 0.0
+        # unit_price is GST-inclusive (MRP); charged is what delivery billing collected.
+        charged = round(float(it.unit_price) * qty, 2)
+        taxable, c, s, i = _inclusive_split(charged, rate, interstate)
+        lines.append(InvoiceLine(
+            product_id=it.product_id,
+            hsn_code=product.hsn_code if product else None,
+            description=product.name if product else None,
+            qty=qty, unit_price=float(it.unit_price), taxable_value=taxable,
+            gst_rate=rate, cgst=c, sgst=s, igst=i, line_total=charged,
+        ))
+
     today = _today()
     fy = fy_for_date(today)
     seq = await _next_seq(db, fy)
-
+    # Totals are computed BEFORE the insert: an issued tax invoice is never updated
+    # afterwards (append-only, enforced by a DB trigger), only its PDF key is cached.
     inv = Invoice(
         invoice_no=f"{settings.INVOICE_PREFIX}/{fy}/{seq:06d}",
         fy=fy,
@@ -185,48 +212,35 @@ async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoi
         buyer_gstin=await _buyer_gstin(db, order.account_id),
         place_of_supply=place,
         is_interstate=interstate,
+        **_totals(lines),
     )
     db.add(inv)
     await db.flush()
+    for ln in lines:
+        ln.invoice_id = inv.id
+        db.add(ln)
+    await db.flush()
+    return inv
 
-    tax_val = cgst = sgst = igst = total = 0.0
-    for it, qty in chargeable:
-        product = await db.get(Product, it.product_id)
-        rate = float(product.gst_rate) if product else 0.0
-        # unit_price is GST-inclusive (MRP); charged is what delivery billing collected.
-        charged = round(float(it.unit_price) * qty, 2)
-        taxable, c, s, i = _inclusive_split(charged, rate, interstate)
-        line_total = charged
-        db.add(
-            InvoiceLine(
-                invoice_id=inv.id,
-                product_id=it.product_id,
-                hsn_code=product.hsn_code if product else None,
-                description=product.name if product else None,
-                qty=qty,
-                unit_price=float(it.unit_price),
-                taxable_value=taxable,
-                gst_rate=rate,
-                cgst=c,
-                sgst=s,
-                igst=i,
-                line_total=line_total,
-            )
-        )
-        tax_val += taxable
-        cgst += c
-        sgst += s
-        igst += i
-        total += line_total
 
-    inv.taxable_value = round(tax_val, 2)
-    inv.cgst = round(cgst, 2)
-    inv.sgst = round(sgst, 2)
-    inv.igst = round(igst, 2)
-    inv.total = round(total, 2)
+async def generate_for_delivery(db: AsyncSession, order: DeliveryOrder) -> Invoice:
+    """issue_delivery_invoice + commit (the manual/backfill path:
+    POST /admin/invoices/generate). Idempotent."""
+    inv = await issue_delivery_invoice(db, order)
     await db.commit()
     await db.refresh(inv)
     return inv
+
+
+def _totals(lines: list[InvoiceLine]) -> dict:
+    """Document totals = the sum of its (already rounded) lines."""
+    return {
+        "taxable_value": round(sum(float(ln.taxable_value) for ln in lines), 2),
+        "cgst": round(sum(float(ln.cgst) for ln in lines), 2),
+        "sgst": round(sum(float(ln.sgst) for ln in lines), 2),
+        "igst": round(sum(float(ln.igst) for ln in lines), 2),
+        "total": round(sum(float(ln.line_total) for ln in lines), 2),
+    }
 
 
 async def _order_place_of_supply(db: AsyncSession, order: Order) -> str:
@@ -266,24 +280,6 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
 
     place = canonical(await _order_place_of_supply(db, order)) or settings.SELLER_STATE
     interstate = not same_state(place, settings.SELLER_STATE)
-    today = _today()
-    fy = fy_for_date(today)
-    seq = await _next_seq(db, fy)
-    inv = Invoice(
-        invoice_no=f"{settings.INVOICE_PREFIX}/{fy}/{seq:06d}",
-        fy=fy,
-        seq_no=seq,
-        account_id=order.account_id,
-        order_id=order.id,
-        invoice_date=today,
-        seller_gstin=settings.SELLER_GSTIN or None,
-        buyer_gstin=await _buyer_gstin(db, order.account_id),
-        place_of_supply=place,
-        is_interstate=interstate,
-    )
-    db.add(inv)
-    await db.flush()
-
     rows = list(
         (await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalars().all()
     )
@@ -296,32 +292,41 @@ async def generate_for_order(db: AsyncSession, order: Order) -> Invoice:
     charges = _apportion_paise(
         [float(it.line_total) for it in rows], round(float(order.total) * 100)
     )
-    tax_val = cgst = sgst = igst = total = 0.0
+    lines: list[InvoiceLine] = []
     for it, charged in zip(rows, charges, strict=True):
-        qty = float(it.qty)
         product = await db.get(Product, it.product_id)
         rate = float(product.gst_rate) if product else 0.0
         taxable, c, s, i = _inclusive_split(charged, rate, interstate)
-        line_total = charged
-        db.add(
-            InvoiceLine(
-                invoice_id=inv.id, product_id=it.product_id,
-                hsn_code=product.hsn_code if product else None,
-                description=product.name if product else None,
-                qty=qty, unit_price=float(it.unit_price), taxable_value=taxable,
-                gst_rate=rate, cgst=c, sgst=s, igst=i, line_total=line_total,
-            )
-        )
-        tax_val += taxable
-        cgst += c
-        sgst += s
-        igst += i
-        total += line_total
-    inv.taxable_value = round(tax_val, 2)
-    inv.cgst = round(cgst, 2)
-    inv.sgst = round(sgst, 2)
-    inv.igst = round(igst, 2)
-    inv.total = round(total, 2)
+        lines.append(InvoiceLine(
+            product_id=it.product_id,
+            hsn_code=product.hsn_code if product else None,
+            description=product.name if product else None,
+            qty=float(it.qty), unit_price=float(it.unit_price), taxable_value=taxable,
+            gst_rate=rate, cgst=c, sgst=s, igst=i, line_total=charged,
+        ))
+
+    today = _today()
+    fy = fy_for_date(today)
+    seq = await _next_seq(db, fy)
+    # Totals before the insert: issued tax invoices are append-only (DB trigger).
+    inv = Invoice(
+        invoice_no=f"{settings.INVOICE_PREFIX}/{fy}/{seq:06d}",
+        fy=fy,
+        seq_no=seq,
+        account_id=order.account_id,
+        order_id=order.id,
+        invoice_date=today,
+        seller_gstin=settings.SELLER_GSTIN or None,
+        buyer_gstin=await _buyer_gstin(db, order.account_id),
+        place_of_supply=place,
+        is_interstate=interstate,
+        **_totals(lines),
+    )
+    db.add(inv)
+    await db.flush()
+    for ln in lines:
+        ln.invoice_id = inv.id
+        db.add(ln)
     await db.commit()
     await db.refresh(inv)
     return inv

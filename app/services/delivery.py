@@ -9,7 +9,7 @@ from app.models.fulfillment import CashCollection, ProofOfDelivery, Return
 from app.models.inventory import StockMovement
 from app.models.shop import CustomerAccount
 from app.models.user import User
-from app.services import batches, inventory
+from app.services import batches, inventory, invoicing
 from app.services import notifications as notify
 from app.services.billing import (
     InsufficientPrepaidBalance,
@@ -268,6 +268,18 @@ async def mark_delivered(db: AsyncSession, order: DeliveryOrder, user: User, dat
                         f"{exc.available:g} on hand, {out_qty:g} needed. Receive or "
                         "transfer stock first.",
                     ) from None
+
+    # GST tax invoice, in THIS transaction: it commits together with the delivery
+    # status, billing and stock movements (or rolls back with them, so no invoice or
+    # serial exists for a delivery that didn't happen). One per delivery order
+    # (idempotent + partial unique index). It bills the NET delivered quantity per line,
+    # so a partial delivery is invoiced for what was supplied; a failed stop, or one whose
+    # goods all came back at the door, supplied nothing and gets no invoice.
+    if order.status in ("delivered", "partially_delivered"):
+        try:
+            await invoicing.issue_delivery_invoice(db, order)
+        except invoicing.NothingToInvoice:
+            pass
 
     # Notify the account owner that their stop is done (idempotent per order).
     account = await db.get(CustomerAccount, order.account_id)
