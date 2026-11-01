@@ -1,5 +1,6 @@
 """Storefront demo content: generated product art, banners, journal articles, static
-pages, product reviews and a demo customer with account data.
+pages, product reviews, a demo customer with account data, and a daily standing order
+for the demo B2B subscriber (so the nightly cutoff generates delivery orders).
 
 Idempotent and additive: runs against an EXISTING database (never wipes) and can be
 re-run safely. Rows are matched by natural keys (banner title, article/page slug,
@@ -32,6 +33,13 @@ WALLET_TARGET = 500.0
 POINTS_TARGET = 250
 GIFT_CARD_AMOUNT = 500.0
 WISHLIST_SIZE = 3
+
+# Standing order for the demo B2B subscriber (app/seed.py's "Sharma Stores"): an active
+# daily subscription on each of their shops, so the nightly cutoff materializes real
+# delivery_orders (and the delivery app gets a route). Quantities are in the product's
+# uom (litres) and are whole multiples of its packs.
+DEMO_SUBSCRIBER_PHONE = "9999900002"
+STANDING_ORDER = (("MILK-500", 10.0), ("CHAAS-200", 2.0))  # (sku, litres per day)
 
 # Baked demo photos (scripts/demo_assets/**.jpg), stored into the media store on seed.
 ASSETS_DIR = Path(__file__).resolve().parent / "demo_assets"
@@ -375,6 +383,11 @@ async def seed_demo(db, *, phone: str = DEFAULT_PHONE, force: bool = False) -> d
         await reviews.recompute_product_rating(db, p.id)
     summary["ratings"] = {"created": created, "products": len(products)}
 
+    # 5b. Standing orders: the demo subscriber's shops each get an active daily
+    # subscription (created if missing; an existing one is left as an admin set it,
+    # only missing items are added), so tomorrow's cutoff generates delivery_orders.
+    summary["standing_orders"] = await _seed_standing_orders(db)
+
     # 6. Demo customer with wallet, points, a gift card and a wishlist.
     phone = normalize_phone(phone)
     if not is_indian_mobile(phone):
@@ -428,6 +441,52 @@ async def seed_demo(db, *, phone: str = DEFAULT_PHONE, force: bool = False) -> d
     return summary
 
 
+async def _seed_standing_orders(db) -> dict:
+    from app.models.product import Product
+    from app.models.shop import CustomerAccount, Shop
+    from app.models.subscription import Subscription, SubscriptionItem
+    from app.models.user import User
+    from app.services.subscription import today_ist
+
+    out = {"shops": 0, "subscriptions_created": 0, "items_added": 0, "kept": 0}
+    owner = await db.scalar(select(User).where(User.phone == DEMO_SUBSCRIBER_PHONE))
+    if owner is None:  # app/seed.py creates the subscriber; nothing to attach to
+        out["skipped"] = f"no user {DEMO_SUBSCRIBER_PHONE} (run app.seed first)"
+        return out
+    shops = (await db.execute(
+        select(Shop).join(CustomerAccount, CustomerAccount.id == Shop.account_id)
+        .where(CustomerAccount.owner_user_id == owner.id, Shop.status == "active")
+        .order_by(Shop.id)
+    )).scalars().all()
+    products = {
+        p.sku: p for p in (await db.execute(select(Product).where(
+            Product.sku.in_([sku for sku, _ in STANDING_ORDER]), Product.status == "active",
+        ))).scalars()
+    }
+    for shop in shops:
+        out["shops"] += 1
+        sub = await db.scalar(select(Subscription).where(Subscription.shop_id == shop.id))
+        if sub is None:
+            sub = Subscription(account_id=shop.account_id, shop_id=shop.id, status="active",
+                               start_date=today_ist())
+            db.add(sub)
+            await db.flush()
+            out["subscriptions_created"] += 1
+        elif sub.status != "active":
+            out["kept"] += 1  # paused/cancelled on purpose: leave it
+            continue
+        have = set((await db.execute(select(SubscriptionItem.product_id).where(
+            SubscriptionItem.subscription_id == sub.id))).scalars())
+        for sku, qty in STANDING_ORDER:
+            p = products.get(sku)
+            if p is not None and p.id not in have:
+                db.add(SubscriptionItem(subscription_id=sub.id, product_id=p.id,
+                                        default_qty=qty, frequency="daily", active=True))
+                out["items_added"] += 1
+    await db.flush()
+    return out
+
+
 async def seed_demo_session(session_factory, **kw) -> dict:
     """seed_demo() in a fresh session from `session_factory` (used by tests)."""
     async with session_factory() as db:
@@ -464,6 +523,10 @@ def _print(summary: dict) -> None:
     for key in ("banners", "articles", "pages"):
         s = summary[key]
         print(f"  {key:<14} -> {s['created']} created, {s['updated']} updated")
+    so = summary["standing_orders"]
+    print(f"  standing orders-> {so['subscriptions_created']} subscription(s) created, "
+          f"{so['items_added']} item(s) added across {so['shops']} shop(s)"
+          + (f" ({so['skipped']})" if so.get("skipped") else ""))
     r = summary["ratings"]
     print(f"  ratings        -> {r['created']} created across {r['products']} active products")
     c = summary["demo_customer"]

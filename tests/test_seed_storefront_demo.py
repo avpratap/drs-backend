@@ -189,6 +189,40 @@ async def test_categories_populate_the_storefront_grid(demo, client):
     assert out["product_categories"]["set"] == ["CHEESE-200"]
 
 
+async def test_standing_order_makes_the_cutoff_generate_deliveries(demo, client):
+    """The demo subscriber gets an active daily subscription per shop, so tomorrow's
+    cutoff materializes real delivery_orders and the delivery agent has a route."""
+    import datetime as dt
+
+    from app.models.subscription import Subscription, SubscriptionItem
+    from app.services.subscription import today_ist
+
+    script, Session, _engine, _dir = demo
+    first = (await script.seed_demo_session(Session))["standing_orders"]
+    assert first["shops"] == 2 and first["subscriptions_created"] == 2
+    assert first["items_added"] == 2  # milk on each shop; CHAAS-200 is inactive here
+    again = (await script.seed_demo_session(Session))["standing_orders"]
+    assert again["subscriptions_created"] == 0 and again["items_added"] == 0  # idempotent
+    assert await _count(Session, Subscription, Subscription.status == "active") == 2
+    assert await _count(Session, SubscriptionItem) == 2
+
+    tomorrow = (today_ist() + dt.timedelta(days=1)).isoformat()
+    ah = auth(await login(client, "9999900001"))
+    r = await client.post(f"/api/v1/admin/cutoff/run?date={tomorrow}", json={}, headers=ah)
+    assert r.status_code == 200, r.text
+    assert r.json()["orders_generated"] == 2 and not r.json().get("failed")
+    rider = auth(await login(client, "9999900003"))
+    stops = (await client.get(f"/api/v1/delivery/orders?date={tomorrow}", headers=rider)).json()
+    assert len(stops) == 2
+    from app.seed import PRICES
+
+    b2b_milk = PRICES["MILK-500"][1]  # the subscriber bills at B2B rates (Rs/L)
+    assert all(o["total"] == 10 * b2b_milk for o in stops)
+    route = (await client.get(f"/api/v1/delivery/orders/route?date={tomorrow}",
+                              headers=rider)).json()
+    assert len(route) == 2
+
+
 async def test_force_replaces_existing_content(demo):
     script, Session, _engine, _dir = demo
     from app.models.content import StaticPage
@@ -221,3 +255,4 @@ def test_refuses_prod_and_bad_phone(monkeypatch):
     assert script.category_slug("Malai Kulfi Stick", "KULFI-1PC") == "sweets"
     assert script.category_slug("Bilona A2 Ghee 500ml") == "ghee"
     assert script.category_slug("Mystery item") == "milk"
+    assert dict(script.STANDING_ORDER) == {"MILK-500": 10.0, "CHAAS-200": 2.0}
