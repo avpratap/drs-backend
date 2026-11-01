@@ -67,6 +67,12 @@ def test_seed_catalog_invariants():
         assert min_qty_for(p["sku"]) <= min(_packs(p["sku"]))
         if is_whole_unit(p["uom"]):
             assert all(float(s) == int(s) for s in _packs(p["sku"]))
+    # Every demo product offers a choice of packs, so the storefront pack selector is
+    # exercised on all of them (CHAAS / CHEESE / KULFI used to show a single size).
+    for p in PRODUCTS:
+        packs = _packs(p["sku"])
+        assert len(packs) >= 2 and len(set(packs)) == len(packs), p["sku"]
+        assert p["pack_size"] in packs, p["sku"]  # the base pack stays sellable
     # Per-unit rates (Rs/L, Rs/kg), not per-pack: 500 ml milk = 54 x 0.5.
     assert PRICES["MILK-500"][0] == 54
 
