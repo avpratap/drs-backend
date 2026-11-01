@@ -9,7 +9,7 @@ import secrets
 
 from app.core.config import settings
 from app.core.redis import incr_window, redis_client
-from app.services.sms import send_otp_sms, sms_enabled
+from app.services.otp_delivery import deliver_otp
 
 # Floor at 60s so a misconfigured MSG91_OTP_EXPIRY_MIN=0 can't make every OTP expire
 # instantly (redis SET ex=0 is rejected) and lock users out of login.
@@ -69,8 +69,8 @@ async def request_otp(phone: str, ip: str | None = None) -> str | None:
     await redis_client.set(f"otp:attempts:{phone}", 0, ex=OTP_TTL)
     await redis_client.set(f"otp:cooldown:{phone}", "1", ex=RESEND_COOLDOWN)
 
-    sent = await send_otp_sms(phone, otp) if sms_enabled() else False
-    # Return the OTP for testing ONLY when we did not actually send an SMS.
+    sent = await deliver_otp(phone, otp)
+    # Return the OTP for testing ONLY when we did not deliver it anywhere (dev; never prod).
     if sent:
         return None
     return otp if settings.ENV != "prod" else None

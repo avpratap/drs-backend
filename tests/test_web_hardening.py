@@ -23,12 +23,12 @@ async def test_dev_otp_only_outside_prod(client, monkeypatch):
     assert "dev_otp" not in r.json()  # absent, not null: a presence check can't trip
 
 
-async def test_dev_otp_absent_once_an_sms_was_sent(client, monkeypatch):
-    async def _sent(phone, otp):
+async def test_dev_otp_absent_once_delivered(client, monkeypatch):
+    async def _delivered(phone, otp):
         return True
 
-    monkeypatch.setattr(otp_service, "sms_enabled", lambda: True)
-    monkeypatch.setattr(otp_service, "send_otp_sms", _sent)
+    # Simulate a provider (Twilio/MSG91) accepting the code: dev_otp must then be withheld.
+    monkeypatch.setattr(otp_service, "deliver_otp", _delivered)
     r = await client.post("/api/v1/auth/otp/request", json={"phone": "9000002003"})
     assert r.status_code == 200 and "dev_otp" not in r.json()
 

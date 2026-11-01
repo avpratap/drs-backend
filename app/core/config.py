@@ -96,6 +96,20 @@ class Settings(BaseSettings):
     MSG91_SENDER: str = ""
     MSG91_OTP_EXPIRY_MIN: int = 5
 
+    # Twilio OTP delivery (SMS / WhatsApp). Set SID + token to enable; pick the channel with
+    # OTP_CHANNEL = "sms" | "whatsapp". Senders: TWILIO_SMS_FROM is a Twilio number (+1...);
+    # TWILIO_WHATSAPP_FROM is your WhatsApp sender or the sandbox (whatsapp:+14155238886).
+    # OTP_RELAY_TO (optional, TESTING): when set, EVERY OTP is sent to this one number instead
+    # of the requesting phone, labelled with who requested it — so you can relay codes on a
+    # trial (which only reaches verified numbers). Country code, no '+' or with '+'.
+    # NOTE: a Twilio TRIAL delivers only to VERIFIED numbers; India prod SMS needs DLT.
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_SMS_FROM: str = ""
+    TWILIO_WHATSAPP_FROM: str = ""
+    OTP_CHANNEL: str = "sms"
+    OTP_RELAY_TO: str = ""
+
     # GST invoicing (seller = Dhanna Ram Sherawat Enterprises)
     SELLER_LEGAL_NAME: str = "Dhanna Ram Sherawat Enterprises"
     SELLER_GSTIN: str = ""  # 15-char GSTIN once registered
@@ -188,12 +202,21 @@ class Settings(BaseSettings):
         need(self.DB_SSL, "DB_SSL", "must be true (TLS to the managed database)")
         need(self.DB_POOL_MODE in {"direct", "pgbouncer"}, "DB_POOL_MODE",
              "must be 'direct' or 'pgbouncer'")
-        # Without both, OTPs are generated but never delivered (and never returned in
-        # prod), so every OTP login would silently fail. MSG91 only sends with a
-        # DLT-approved template id, hence both are required.
-        need(bool(self.MSG91_AUTHKEY.strip() and self.MSG91_TEMPLATE_ID.strip()),
-             "MSG91_AUTHKEY, MSG91_TEMPLATE_ID",
-             "not set: OTP SMS would never be sent and nobody could log in")
+        # An OTP delivery provider is required: EITHER MSG91 (DLT-approved template) OR
+        # Twilio (SID + token + a sender for the chosen channel). Without one, codes are
+        # generated but never delivered (and never returned in prod) and nobody can log in.
+        _msg91_ready = bool(self.MSG91_AUTHKEY.strip() and self.MSG91_TEMPLATE_ID.strip())
+        _tw_sender = (
+            self.TWILIO_WHATSAPP_FROM.strip()
+            if (self.OTP_CHANNEL or "sms").strip().lower() == "whatsapp"
+            else self.TWILIO_SMS_FROM.strip()
+        )
+        _twilio_ready = bool(
+            self.TWILIO_ACCOUNT_SID.strip() and self.TWILIO_AUTH_TOKEN.strip() and _tw_sender
+        )
+        need(_msg91_ready or _twilio_ready, "MSG91_* or TWILIO_*",
+             "no OTP delivery provider set (MSG91_AUTHKEY+MSG91_TEMPLATE_ID, or "
+             "TWILIO_ACCOUNT_SID+TWILIO_AUTH_TOKEN + a sender): OTP login would be dead")
         need(bool(self.RAZORPAY_KEY_ID and self.RAZORPAY_KEY_SECRET),
              "RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET", "not set: the payment dev stub would run")
         need(bool(self.RAZORPAY_WEBHOOK_SECRET), "RAZORPAY_WEBHOOK_SECRET",
