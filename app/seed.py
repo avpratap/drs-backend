@@ -47,6 +47,12 @@ VARIANTS = {  # product sku: [(variant sku, label, pack_size)]
     "MILK-500": [("MILK-500-V500", "500ml", 0.5), ("MILK-500-V1L", "1L", 1)],
     "GHEE-500": [("GHEE-500-V500", "500ml", 0.5), ("GHEE-500-V1L", "1L", 1)],
     "PANEER-200": [("PANEER-200-V200", "200g", 0.2), ("PANEER-200-V1K", "1kg", 1)],
+    "CHAAS-200": [("CHAAS-200-V200", "200ml", 0.2), ("CHAAS-200-V500", "500ml", 0.5),
+                  ("CHAAS-200-V1L", "1L", 1)],
+    "CHEESE-200": [("CHEESE-200-V200", "200g", 0.2), ("CHEESE-200-V500", "500g", 0.5)],
+    # Piece uom: whole packs only (validate_catalog asserts it).
+    "KULFI-1PC": [("KULFI-1PC-V1", "1 pc", 1), ("KULFI-1PC-V4", "Pack of 4", 4),
+                  ("KULFI-1PC-V6", "Pack of 6", 6)],
 }
 
 PRICE_FROM = dt.date(2026, 1, 1)
