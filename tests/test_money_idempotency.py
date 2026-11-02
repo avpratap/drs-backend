@@ -61,6 +61,62 @@ async def test_wallet_retry_after_reaped_claim_does_not_double_apply(client, end
     assert await _wallet(client, h) == 150.0
 
 
+async def test_giftcard_redeem_retry_after_reaped_claim_does_not_double_credit(client):
+    """The crown-jewel fix: a PARTIAL gift-card redeem whose claim was reaped after the
+    handler committed must REPLAY — never debit the card or credit the wallet twice."""
+    admin = auth(await login(client, "9999900001"))
+    acct, h = await _account(client, admin)
+    issue_hdr = {**admin, "Idempotency-Key": f"gi-{uuid.uuid4().hex}"}
+    code = (await client.post("/api/v1/admin/gift-cards",
+                              json={"amount": 500, "issued_to_account_id": acct},
+                              headers=issue_hdr)).json()["code"]
+    assert await _wallet(client, h) == 0.0
+
+    key = f"gr-{uuid.uuid4().hex}"
+    hdr = {**h, "Idempotency-Key": key}
+    r1 = await client.post("/api/v1/loyalty/gift-cards/redeem",
+                           json={"code": code, "amount": 200}, headers=hdr)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["balance"] == 300.0 and await _wallet(client, h) == 200.0
+
+    await _reap_claim(key)  # crash window
+    r2 = await client.post("/api/v1/loyalty/gift-cards/redeem",
+                           json={"code": code, "amount": 200}, headers=hdr)
+    assert r2.status_code == 200 and r2.json() == r1.json()
+    assert r2.json()["balance"] == 300.0  # card debited once
+    assert await _wallet(client, h) == 200.0  # wallet credited once
+
+    # Same key, different amount after a reap: refused, nothing moves.
+    await _reap_claim(key)
+    assert (await client.post("/api/v1/loyalty/gift-cards/redeem",
+                              json={"code": code, "amount": 50}, headers=hdr)).status_code == 422
+    assert await _wallet(client, h) == 200.0
+
+
+async def test_giftcard_issue_retry_after_reaped_claim_does_not_duplicate(client):
+    admin = auth(await login(client, "9999900001"))
+    key = f"gi-{uuid.uuid4().hex}"
+    hdr = {**admin, "Idempotency-Key": key}
+    r1 = await client.post("/api/v1/admin/gift-cards", json={"amount": 500}, headers=hdr)
+    assert r1.status_code == 200, r1.text
+    await _reap_claim(key)
+    r2 = await client.post("/api/v1/admin/gift-cards", json={"amount": 500}, headers=hdr)
+    assert r2.status_code == 200 and r2.json() == r1.json()  # the SAME card, not a second one
+
+
+async def test_points_adjust_retry_after_reaped_claim_does_not_double_apply(client):
+    admin = auth(await login(client, "9999900001"))
+    acct, _h = await _account(client, admin)
+    key = f"pa-{uuid.uuid4().hex}"
+    hdr = {**admin, "Idempotency-Key": key}
+    url = f"/api/v1/admin/loyalty/{acct}/adjust"
+    r1 = await client.post(url, json={"points": 100, "reason": "goodwill"}, headers=hdr)
+    assert r1.status_code == 200, r1.text
+    await _reap_claim(key)
+    r2 = await client.post(url, json={"points": 100, "reason": "goodwill"}, headers=hdr)
+    assert r2.status_code == 200 and r2.json()["points_balance"] == r1.json()["points_balance"]
+
+
 async def test_credit_settle_retry_after_reaped_claim_does_not_double_apply(client):
     from app.services import billing
 
