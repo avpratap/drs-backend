@@ -124,7 +124,9 @@ def _check_dev_token(token: str | None) -> None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid dev token")
 
 
-@router.get("/dev/otp/{phone}", response_model=DevOTPOut, operation_id="dev_peek_otp")
+# include_in_schema=False: this is a dev/staging testing aid, not part of the product API —
+# it must NOT appear in openapi.json or the generated Dart/TS client SDKs (it 404s in prod).
+@router.get("/dev/otp/{phone}", response_model=DevOTPOut, include_in_schema=False)
 async def dev_peek_otp(phone: str, x_dev_token: str | None = Header(default=None)):
     """Return the current OTP for a phone (dev/staging only, secret-gated). 404 in prod."""
     _assert_dev_otp_enabled()
