@@ -68,12 +68,30 @@ async def request_otp(phone: str, ip: str | None = None) -> str | None:
     await redis_client.set(f"otp:{phone}", _hash_otp(phone, otp), ex=OTP_TTL)
     await redis_client.set(f"otp:attempts:{phone}", 0, ex=OTP_TTL)
     await redis_client.set(f"otp:cooldown:{phone}", "1", ex=RESEND_COOLDOWN)
+    # Non-prod ONLY: also stash the plaintext so the dev OTP-lookup endpoint can return it
+    # to a tester when no SMS/WhatsApp provider can reach their number. NEVER in prod — the
+    # key is not written there, so the lookup has nothing to return even if reached.
+    if settings.ENV != "prod":
+        await redis_client.set(f"otp:peek:{phone}", otp, ex=OTP_TTL)
 
     sent = await deliver_otp(phone, otp)
     # Return the OTP for testing ONLY when we did not deliver it anywhere (dev; never prod).
     if sent:
         return None
     return otp if settings.ENV != "prod" else None
+
+
+async def peek_otp(phone: str) -> tuple[str | None, int]:
+    """DEV/STAGING ONLY. Return (current_otp, ttl_seconds) for a phone, or (None, 0) if no
+    live code. Reads the non-prod plaintext stash written by request_otp; in prod that key
+    is never written, so this returns (None, 0). The caller must still gate by ENV + secret."""
+    if settings.ENV == "prod":
+        return None, 0
+    otp = await redis_client.get(f"otp:peek:{phone}")
+    if not otp:
+        return None, 0
+    ttl = await redis_client.ttl(f"otp:peek:{phone}")
+    return otp, max(0, int(ttl))
 
 
 # Compare-and-delete in one atomic step (Redis runs a script without interleaving).
