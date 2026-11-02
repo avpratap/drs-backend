@@ -165,7 +165,12 @@ class Settings(BaseSettings):
     # GitHub Actions cron on a deploy with no ARQ worker). Empty = endpoint disabled.
     JOBS_TOKEN: str = ""
 
-    # Email (SMTP). Empty host -> dev stub (logs, no send).
+    # Email. Preferred: SendGrid (Twilio's email product) via its Web API — set
+    # SENDGRID_API_KEY (+ SENDGRID_FROM, a verified sender). Otherwise any SMTP relay works
+    # (incl. SendGrid SMTP: SMTP_HOST=smtp.sendgrid.net, SMTP_USER=apikey, SMTP_PASSWORD=<key>).
+    # Nothing set -> dev stub (logs, no send).
+    SENDGRID_API_KEY: str = ""
+    SENDGRID_FROM: str = ""  # verified sender address; falls back to the address in SMTP_FROM
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USER: str = ""

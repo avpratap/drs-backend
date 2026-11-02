@@ -10,6 +10,7 @@ import secrets
 import httpx
 
 from app.core.config import settings
+from app.services import twilio_msg
 from app.services.sms import _to_msg91_mobile, sms_enabled
 
 log = logging.getLogger("drs.notify")
@@ -36,16 +37,28 @@ def _stub(channel: str, to_addr: str, body: str) -> tuple[bool, str | None, str 
     return True, f"stub_{channel}_{secrets.token_hex(6)}", None
 
 
+def twilio_sms_ready() -> bool:
+    return twilio_msg.twilio_configured() and bool(settings.TWILIO_SMS_FROM.strip())
+
+
+def twilio_whatsapp_ready() -> bool:
+    return twilio_msg.twilio_configured() and bool(settings.TWILIO_WHATSAPP_FROM.strip())
+
+
 def channel_unavailable(channel: str) -> str | None:
     """A channel that can't deliver in this deployment (skip, don't retry 5x into the
-    DLQ). Transactional SMS needs a DLT-approved MSG91 flow that isn't wired yet, so in
-    prod it is skipped; other unconfigured channels still FAIL loudly in prod (_stub)."""
-    if channel == "sms" and settings.ENV == "prod":
+    DLQ). Transactional SMS needs a provider: Twilio (if configured) can deliver it;
+    otherwise MSG91 needs a DLT-approved flow that isn't wired yet, so in prod SMS is
+    skipped. Other unconfigured channels still FAIL loudly in prod (_stub)."""
+    if channel == "sms" and settings.ENV == "prod" and not twilio_sms_ready():
         return "provider_unavailable"
     return None
 
 
 async def send_whatsapp(to_addr: str, body: str, payload: dict | None) -> tuple[bool, str | None, str | None]:
+    # Prefer Twilio when configured (same provider as OTP); else Gupshup BSP; else dev stub.
+    if twilio_whatsapp_ready():
+        return await twilio_msg.send_whatsapp(to_addr, body)
     if not whatsapp_enabled():
         return _stub("whatsapp", to_addr, body)
     # Gupshup session message (text). Template sends use the template API once
@@ -72,8 +85,10 @@ async def send_whatsapp(to_addr: str, body: str, payload: dict | None) -> tuple[
 
 
 async def send_sms(to_addr: str, body: str, payload: dict | None) -> tuple[bool, str | None, str | None]:
-    # MSG91 transactional SMS requires a DLT-approved flow/template; until wired,
-    # dev-stub. (OTP uses the dedicated MSG91 OTP endpoint; this is for alerts.)
+    # Prefer Twilio when configured (same provider as OTP). MSG91 transactional SMS needs a
+    # DLT-approved flow/template that isn't wired yet, so without Twilio we dev-stub.
+    if twilio_sms_ready():
+        return await twilio_msg.send_sms(to_addr, body)
     if not sms_enabled():
         return _stub("sms", to_addr, body)
     # Placeholder for MSG91 flow API; stub-send for now to avoid half-wired calls.
@@ -84,8 +99,45 @@ def fcm_enabled() -> bool:
     return bool(settings.FCM_PROJECT_ID and settings.FCM_CREDENTIALS_JSON)
 
 
+def sendgrid_enabled() -> bool:
+    return bool(settings.SENDGRID_API_KEY.strip())
+
+
 def email_enabled() -> bool:
-    return bool(settings.SMTP_HOST)
+    # SendGrid (Twilio's email product) via its API, or any SMTP relay (incl. SendGrid SMTP).
+    return bool(settings.SENDGRID_API_KEY.strip() or settings.SMTP_HOST.strip())
+
+
+def _from_email() -> str:
+    """Bare sender address for the SendGrid API (SMTP_FROM may be 'DRS <a@b>')."""
+    import re
+
+    frm = settings.SENDGRID_FROM.strip() or settings.SMTP_FROM
+    m = re.search(r"<([^>]+)>", frm)
+    return (m.group(1) if m else frm).strip()
+
+
+async def _send_email_sendgrid(
+    to_addr: str, body: str, payload: dict | None
+) -> tuple[bool, str | None, str | None]:
+    data = {
+        "personalizations": [{"to": [{"email": to_addr}]}],
+        "from": {"email": _from_email()},
+        "subject": (payload or {}).get("subject", "DRS notification"),
+        "content": [{"type": "text/plain", "value": body}],
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.SENDGRID_API_KEY.strip()}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post("https://api.sendgrid.com/v3/mail/send", json=data, headers=headers)
+        if resp.status_code in (200, 202):  # SendGrid returns 202 Accepted
+            return True, resp.headers.get("X-Message-Id"), None
+        return False, None, f"sendgrid {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return False, None, f"sendgrid error: {exc}"
 
 
 def _fcm_access_token() -> str:
@@ -166,6 +218,8 @@ async def send_email(to_addr: str, body: str, payload: dict | None) -> tuple[boo
         return _stub("email", to_addr or "email", body)
     if not to_addr:
         return False, None, "no email address"
+    if sendgrid_enabled():  # SendGrid Web API (preferred); SMTP below is the fallback
+        return await _send_email_sendgrid(to_addr, body, payload)
     try:
         import email.message
 
