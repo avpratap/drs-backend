@@ -1,7 +1,5 @@
 """Dev/staging-only OTP lookup: secret-gated, returns the live code, and is INVISIBLE in
 prod (every path 404s and the plaintext is never stored)."""
-from conftest import auth, login
-
 from app.core.config import settings
 from app.services import otp as otp_service
 
