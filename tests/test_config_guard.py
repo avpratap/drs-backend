@@ -74,9 +74,23 @@ def test_dev_config_not_guarded():
     assert Settings(ENV="dev").ENV == "dev"
 
 
-def test_prod_error_names_msg91():
-    with pytest.raises(ValueError, match="MSG91_AUTHKEY, MSG91_TEMPLATE_ID: not set"):
+def test_prod_error_names_otp_provider():
+    with pytest.raises(ValueError, match="no OTP delivery provider set"):
         Settings(**{**_GOOD, "MSG91_TEMPLATE_ID": ""})
+
+
+def test_prod_config_ok_with_twilio_instead_of_msg91():
+    # Twilio (SID + token + a channel sender) satisfies the OTP-provider requirement
+    # without MSG91, so a Twilio-only prod config must boot.
+    cfg = {
+        **_GOOD,
+        "MSG91_AUTHKEY": "",
+        "MSG91_TEMPLATE_ID": "",
+        "TWILIO_ACCOUNT_SID": "AC_test",
+        "TWILIO_AUTH_TOKEN": "tok_test",
+        "TWILIO_SMS_FROM": "+15550001111",
+    }
+    assert Settings(**cfg).ENV == "prod"
 
 
 def test_direct_exposure_must_be_explicit():
@@ -104,7 +118,7 @@ def test_every_problem_is_listed_in_one_error():
     assert msg.startswith("Refusing to start: ENV=prod")
     listed = [ln for ln in msg.splitlines() if ln.startswith("  - ")]
     assert [ln.split(":")[0].strip("- ").strip() for ln in listed] == [
-        "REDIS_URL", "MSG91_AUTHKEY, MSG91_TEMPLATE_ID", "SELLER_GSTIN",
+        "REDIS_URL", "MSG91_* or TWILIO_*", "SELLER_GSTIN",
     ]
 
 
@@ -121,13 +135,13 @@ def test_boot_fails_fast_with_a_plain_error_listing_what_is_missing():
     import subprocess
     import sys
 
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("MSG91_", "R2_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("MSG91_", "TWILIO_", "R2_"))}
     env.update(ENV="prod", MSG91_AUTHKEY="", MSG91_TEMPLATE_ID="")
     r = subprocess.run([sys.executable, "-c", "import app.core.config"], env=env,
                        capture_output=True, text=True)
     assert r.returncode != 0
     assert "RuntimeError: Refusing to start: ENV=prod" in r.stderr
-    assert "MSG91_AUTHKEY, MSG91_TEMPLATE_ID: not set" in r.stderr
+    assert "no OTP delivery provider set" in r.stderr
     assert "ValidationError" not in r.stderr
 
 
