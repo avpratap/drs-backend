@@ -5,15 +5,27 @@ transactional notifications (app/services/notifications/senders.py). We generate
 ourselves (Redis); Twilio only delivers. On a Twilio trial, delivery only reaches VERIFIED
 numbers; for India production SMS, DLT registration is still required.
 """
+import logging
+
 import httpx
 
 from app.core.config import settings
 
+log = logging.getLogger("drs.twilio")
+
 _TWILIO_API = "https://api.twilio.com/2010-04-01"
 
 
+def _sid() -> str:
+    return settings.TWILIO_ACCOUNT_SID.strip()
+
+
+def _token() -> str:
+    return settings.TWILIO_AUTH_TOKEN.strip()
+
+
 def twilio_configured() -> bool:
-    return bool(settings.TWILIO_ACCOUNT_SID.strip() and settings.TWILIO_AUTH_TOKEN.strip())
+    return bool(_sid() and _token())
 
 
 def sms_sender() -> str:
@@ -42,20 +54,25 @@ def _wa(addr: str) -> str:
 
 
 async def _message(from_: str, to: str, body: str) -> tuple[bool, str | None, str | None]:
-    """POST one Twilio message. Returns (ok, message_sid, error)."""
-    url = f"{_TWILIO_API}/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json"
+    """POST one Twilio message. Returns (ok, message_sid, error). Credentials are stripped so
+    a stray space/newline from an env paste can't cause a 401. Failures are logged (no secrets,
+    no PII) so delivery problems are diagnosable in the service logs."""
+    url = f"{_TWILIO_API}/Accounts/{_sid()}/Messages.json"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 url,
                 data={"From": from_, "To": to, "Body": body},
-                auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+                auth=(_sid(), _token()),
             )
         if resp.status_code in (200, 201):  # Twilio returns 201 Created
             j = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
             return True, j.get("sid"), None
-        return False, None, f"twilio {resp.status_code}: {resp.text[:200]}"
+        err = f"twilio {resp.status_code}: {resp.text[:200]}"
+        log.warning("twilio send failed: %s", err)  # text is Twilio's error, not our creds
+        return False, None, err
     except Exception as exc:
+        log.warning("twilio send error: %s", exc)
         return False, None, f"twilio error: {exc}"
 
 
