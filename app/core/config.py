@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     TWILIO_WHATSAPP_FROM: str = ""
     OTP_CHANNEL: str = "sms"
     OTP_RELAY_TO: str = ""
+    # TESTING AID (never active in prod). When a delivery provider can't reach the tester's
+    # number (e.g. a Twilio trial that only reaches verified numbers), set this to a long
+    # random secret and the dev-only endpoint GET /api/v1/auth/dev/otp/{phone} (+ page
+    # /dev/otp) returns the current code for any number to whoever sends the secret. The
+    # plaintext code is only stashed, and the endpoint only exists, when ENV != "prod".
+    DEV_OTP_TOKEN: str = ""
 
     # GST invoicing (seller = Dhanna Ram Sherawat Enterprises)
     SELLER_LEGAL_NAME: str = "Dhanna Ram Sherawat Enterprises"

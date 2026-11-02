@@ -21,6 +21,13 @@ class OTPRequestResponse(BaseModel):
     dev_otp: str | None = None
 
 
+class DevOTPOut(BaseModel):
+    """Dev/staging-only OTP lookup result (never served in prod)."""
+    phone: str
+    otp: str
+    ttl_seconds: int
+
+
 class OTPVerify(BaseModel):
     phone: str
     otp: str
