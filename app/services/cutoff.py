@@ -255,6 +255,10 @@ async def _materialize_one(
     else:
         order.schedule_run_id = run_id
         order.status = "generated"
+        # Keep the billing target in sync if the shop was reassigned between runs, and clear
+        # any stale failure_reason from a prior run now that this one is regenerating the order.
+        order.account_id = sub.account_id
+        order.failure_reason = None
         await db.execute(
             delete(DeliveryOrderItem).where(DeliveryOrderItem.delivery_order_id == order.id)
         )

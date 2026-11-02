@@ -14,7 +14,7 @@ from app.deps.pagination import Page, paged, pagination
 from app.models.loyalty import GiftCard, LoyaltyAccount
 from app.models.shop import CustomerAccount
 from app.models.user import User
-from app.services import loyalty
+from app.services import applied_ops, loyalty
 from app.services import profile as profile_svc
 
 router = APIRouter(tags=["loyalty"])
@@ -185,21 +185,33 @@ async def gift_card_balance(
 
 
 # Moves card value into the wallet, so a retried (e.g. PARTIAL) redeem must replay, not
-# re-apply: the Idempotency-Key is required like every other money-moving write.
+# re-apply. The Idempotency-Key MIDDLEWARE alone has a crash window (its claim is reaped if
+# the process dies between this commit and the response store), and the DB backstop keys on
+# a fresh per-call GiftCardTransaction id that changes on replay — so without handler-level
+# applied_ops a partial redeem could double-debit the card AND double-credit the wallet.
 @router.post(
     "/loyalty/gift-cards/redeem",
     response_model=GiftCardOut,
     operation_id="redeem_gift_card",
-    dependencies=[Depends(require_idempotency_key)],
 )
 async def redeem_gift_card(
-    data: RedeemGiftIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    data: RedeemGiftIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idem_key: str = Depends(require_idempotency_key),
 ):
+    key, payload = applied_ops.scoped_key(user.id, idem_key), data.model_dump()
+    done = await applied_ops.replay(db, "redeem_gift_card", key, payload)
+    if done is not None:
+        return done
     acct = await _my_account(db, user)
     gc = await loyalty.redeem_gift_card(db, data.code, acct.id, data.amount)
-    await db.commit()
+    await db.flush()
     await db.refresh(gc)
-    return gc
+    result = GiftCardOut.model_validate(gc).model_dump(mode="json")
+    await applied_ops.record(db, "redeem_gift_card", key, payload, result)
+    await db.commit()
+    return result
 
 
 # ---------- Admin ----------
@@ -207,34 +219,64 @@ async def redeem_gift_card(
     "/admin/loyalty/{account_id}/adjust",
     response_model=LoyaltyOut,
     operation_id="admin_adjust_points",
-    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
+    dependencies=[Depends(require_role("admin"))],
 )
-async def admin_adjust_points(account_id: int, data: AdjustPointsIn, db: AsyncSession = Depends(get_db)):
+async def admin_adjust_points(
+    account_id: int,
+    data: AdjustPointsIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idem_key: str = Depends(require_idempotency_key),
+):
+    # Handler-level dedup: a crash-window retry must replay, not re-apply the points move
+    # (PointsLedger has no ref backstop for an "adjust", so the middleware is not enough).
+    key = applied_ops.scoped_key(user.id, idem_key)
+    payload = {"account_id": account_id, **data.model_dump()}
+    done = await applied_ops.replay(db, "admin_adjust_points", key, payload)
+    if done is not None:
+        return done
     if await db.get(CustomerAccount, account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     la = await loyalty.adjust_points(db, account_id, data.points, data.reason)
-    await db.commit()
+    await db.flush()
     recent = await loyalty.recent_ledger(db, account_id)
-    return LoyaltyOut(
+    result = LoyaltyOut(
         account_id=account_id,
         points_balance=la.points_balance,
         recent=[LedgerEntryOut.model_validate(r) for r in recent],
-    )
+    ).model_dump(mode="json")
+    await applied_ops.record(db, "admin_adjust_points", key, payload, result)
+    await db.commit()
+    return result
 
 
 @router.post(
     "/admin/gift-cards",
     response_model=GiftCardOut,
     operation_id="admin_issue_gift_card",
-    dependencies=[Depends(require_role("admin")), Depends(require_idempotency_key)],
+    dependencies=[Depends(require_role("admin"))],
 )
-async def admin_issue_gift_card(data: IssueGiftIn, db: AsyncSession = Depends(get_db)):
+async def admin_issue_gift_card(
+    data: IssueGiftIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idem_key: str = Depends(require_idempotency_key),
+):
+    # Handler-level dedup: a crash-window retry must replay, not mint a SECOND gift card
+    # (a new card = new code, so no DB backstop can catch it — the middleware is not enough).
+    key, payload = applied_ops.scoped_key(user.id, idem_key), data.model_dump()
+    done = await applied_ops.replay(db, "admin_issue_gift_card", key, payload)
+    if done is not None:
+        return done
     if data.issued_to_account_id is not None and await db.get(CustomerAccount, data.issued_to_account_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     gc = await loyalty.issue_gift_card(db, data.amount, data.issued_to_account_id, data.expires_at)
-    await db.commit()
+    await db.flush()
     await db.refresh(gc)
-    return gc
+    result = GiftCardOut.model_validate(gc).model_dump(mode="json")
+    await applied_ops.record(db, "admin_issue_gift_card", key, payload, result)
+    await db.commit()
+    return result
 
 
 @router.get(
