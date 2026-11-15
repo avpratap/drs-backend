@@ -2482,6 +2482,19 @@
       },
       "CartItemIn": {
         "properties": {
+          "pack_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Size"
+          },
           "product_id": {
             "title": "Product Id",
             "type": "integer"
@@ -2525,6 +2538,10 @@
             "title": "Line Total",
             "type": "number"
           },
+          "pack_size": {
+            "title": "Pack Size",
+            "type": "number"
+          },
           "product_id": {
             "title": "Product Id",
             "type": "integer"
@@ -2542,6 +2559,7 @@
           "id",
           "product_id",
           "qty",
+          "pack_size",
           "unit_price",
           "line_total"
         ],

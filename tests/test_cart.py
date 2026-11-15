@@ -94,6 +94,67 @@ async def test_cart_item_idor_404(client):
     assert (await client.delete(f"/api/v1/cart/items/{a_item}", headers=auth(b))).status_code == 404
 
 
+async def test_add_with_chosen_pack_validates(client):
+    """The cart remembers the chosen pack and only accepts a whole number of that pack."""
+    cust = await login(client, "9100000710")
+    h = auth(cust)
+    pid = await _milk_id(client, h)  # MILK-1L: one pack of 1 L, no variants
+
+    r = await client.post(
+        "/api/v1/cart/items", json={"product_id": pid, "qty": 2, "pack_size": 1}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    line = r.json()["items"][0]
+    assert line["pack_size"] == 1.0 and line["qty"] == 2.0
+
+    # A pack this product doesn't sell is rejected.
+    bad = await client.post(
+        "/api/v1/cart/items", json={"product_id": pid, "qty": 1, "pack_size": 0.5}, headers=h
+    )
+    assert bad.status_code == 422, bad.text
+
+    # A quantity that isn't a whole number of the chosen pack is rejected.
+    frac = await client.post(
+        "/api/v1/cart/items", json={"product_id": pid, "qty": 1.5, "pack_size": 1}, headers=h
+    )
+    assert frac.status_code == 422, frac.text
+
+
+async def test_two_packs_are_separate_lines(client):
+    """A product in two pack sizes is two independent cart lines; same product+pack merges."""
+    admin = auth(await login(client, "9999900001"))
+    pid = (
+        await client.post(
+            "/api/v1/products", json={"sku": "PACKTEST", "name": "Pack Test", "uom": "kg"}, headers=admin
+        )
+    ).json()["id"]
+    for sku, label, size in [("PACKTEST-05", "500 g", 0.5), ("PACKTEST-1", "1 kg", 1)]:
+        v = await client.post(
+            f"/api/v1/products/{pid}/variants",
+            json={"sku": sku, "label": label, "pack_size": size},
+            headers=admin,
+        )
+        assert v.status_code == 200, v.text
+
+    h = auth(await login(client, "9100000711"))
+    await client.post("/api/v1/cart/items", json={"product_id": pid, "qty": 1, "pack_size": 1}, headers=h)
+    r = await client.post(
+        "/api/v1/cart/items", json={"product_id": pid, "qty": 1, "pack_size": 0.5}, headers=h
+    )
+    items = r.json()["items"]
+    assert len(items) == 2
+    assert {i["pack_size"] for i in items} == {0.5, 1.0}
+
+    # Adding the same product+pack again merges into that pack's line (still two lines).
+    r2 = await client.post(
+        "/api/v1/cart/items", json={"product_id": pid, "qty": 1, "pack_size": 1}, headers=h
+    )
+    items2 = r2.json()["items"]
+    assert len(items2) == 2
+    one_kg = next(i for i in items2 if i["pack_size"] == 1.0)
+    assert one_kg["qty"] == 2.0
+
+
 async def test_concurrent_first_cart_touch_no_500(client):
     """#70: two concurrent first-touches on the active cart must not 500 on the partial
     unique index — the get-or-create collision is caught and re-selected."""
