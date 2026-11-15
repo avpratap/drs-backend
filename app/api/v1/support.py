@@ -1,4 +1,6 @@
 """Support tickets: customer inbox + admin console."""
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from sqlalchemy import func, select
@@ -61,6 +63,7 @@ class MessageOut(BaseModel):
     sender_role: str
     body: str
     attachment_url: str | None = None
+    created_at: dt.datetime
 
     @field_serializer("attachment_url")
     def _view_url(self, v: str | None) -> str | None:
