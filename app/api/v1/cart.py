@@ -23,6 +23,9 @@ router = APIRouter(prefix="/cart", tags=["cart"])
 class CartItemIn(BaseModel):
     product_id: int
     qty: float = Field(gt=0, le=100_000, allow_inf_nan=False)
+    # The chosen pack (base units per pack). Optional for older clients; the server then
+    # defaults to the product's smallest pack.
+    pack_size: float | None = Field(default=None, gt=0, le=100_000, allow_inf_nan=False)
 
 
 class CartItemQtyIn(BaseModel):
@@ -48,6 +51,7 @@ class CartLineOut(BaseModel):
     id: int
     product_id: int
     qty: float
+    pack_size: float
     unit_price: float
     line_total: float
 
@@ -115,7 +119,7 @@ async def add_cart_item(
     data: CartItemIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     cart = await cart_svc.get_or_create_active_cart(db, await _account_id(db, user))
-    await cart_svc.add_item(db, cart, data.product_id, data.qty)
+    await cart_svc.add_item(db, cart, data.product_id, data.qty, data.pack_size)
     view = CartOut.model_validate(await cart_svc.cart_view(db, cart))
     await db.commit()
     return view

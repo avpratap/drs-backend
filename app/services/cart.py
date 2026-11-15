@@ -3,6 +3,8 @@
 Checkout reuses app.services.orders.create_order so pricing / coupon reservation /
 redemption all go through one authoritative path, then flips the cart to 'converted'.
 """
+from collections import defaultdict
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +16,7 @@ from app.models.order import Order
 from app.models.product import Product
 from app.models.shop import CustomerAccount, Shop
 from app.models.user import User
+from app.models.variant import ProductVariant
 from app.schemas.order import OrderItemIn
 from app.services import orders as order_service
 from app.services.pricing import resolve_tier_id, resolve_unit_price
@@ -88,35 +91,88 @@ async def _locked_item(db: AsyncSession, cart_id: int, item_id: int) -> CartItem
     return item
 
 
-async def add_item(db: AsyncSession, cart: Cart, product_id: int, qty: float) -> None:
+async def _valid_pack_sizes(db: AsyncSession, product: Product) -> list[float]:
+    """The packs a product can be bought in: its active variants' sizes, or — for a product
+    without variants — its own pack_size. Mirrors the storefront's pack options."""
+    rows = (
+        await db.execute(
+            select(ProductVariant.pack_size).where(
+                ProductVariant.product_id == product.id,
+                ProductVariant.status == "active",
+                ProductVariant.pack_size > 0,
+            )
+        )
+    ).scalars().all()
+    sizes = [round(float(r), 3) for r in rows if float(r) > 0]
+    return sizes or [round(float(product.pack_size), 3)]
+
+
+def _resolve_pack(pack_size: float | None, valid: list[float]) -> float:
+    """Pick the pack the line is for. A missing pack_size (older/mobile clients) defaults to
+    the smallest pack — the size those clients already assume. An unknown size is rejected."""
+    if pack_size is None:
+        return round(min(valid), 3)
+    for v in valid:
+        if abs(v - float(pack_size)) < 1e-6:
+            return v
+    raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "That pack isn't available for this product")
+
+
+def _packed_qty(qty: float, pack: float) -> float:
+    """qty must be a whole number of packs; snap away float drift (e.g. 3 packs of 0.5)."""
+    q = round(float(qty), 3)
+    packs = round(q / pack)
+    snapped = round(packs * pack, 3)
+    if packs < 1 or round(abs(snapped - q), 3) != 0:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Quantity must be a whole number of packs"
+        )
+    return snapped
+
+
+async def add_item(
+    db: AsyncSession, cart: Cart, product_id: int, qty: float, pack_size: float | None = None
+) -> None:
     product = await _require_product(db, product_id)
     await _lock_active_cart(db, cart)
+    pack = _resolve_pack(pack_size, await _valid_pack_sizes(db, product))
+    # Strict whole-pack quantity only when the client chose a pack (the web flow). Clients
+    # that omit pack_size keep the old "any quantity" behaviour against the default pack.
+    qty = _packed_qty(qty, pack) if pack_size is not None else round(float(qty), 3)
     existing = (
         await db.execute(
             select(CartItem)
-            .where(CartItem.cart_id == cart.id, CartItem.product_id == product_id)
+            .where(
+                CartItem.cart_id == cart.id,
+                CartItem.product_id == product_id,
+                CartItem.pack_size == pack,
+            )
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if existing is not None:  # merge same product into one line
+    if existing is not None:  # merge the same product+pack into one line
         new_qty = round(float(existing.qty) + qty, 3)
         _check_qty(new_qty)
         order_service.check_whole_units(product, new_qty)
         existing.qty = new_qty
         return
-    _check_qty(round(qty, 3))
-    order_service.check_whole_units(product, round(qty, 3))
+    _check_qty(qty)
+    order_service.check_whole_units(product, qty)
     # No row to lock yet: a concurrent first add could insert too. UNIQUE(cart_id,
-    # product_id) arbitrates; the loser merges into the winner's row.
+    # product_id, pack_size) arbitrates; the loser merges into the winner's row.
     try:
         async with db.begin_nested():
-            db.add(CartItem(cart_id=cart.id, product_id=product_id, qty=round(qty, 3)))
+            db.add(CartItem(cart_id=cart.id, product_id=product_id, qty=qty, pack_size=pack))
             await db.flush()
     except IntegrityError:
         row = (
             await db.execute(
                 select(CartItem)
-                .where(CartItem.cart_id == cart.id, CartItem.product_id == product_id)
+                .where(
+                    CartItem.cart_id == cart.id,
+                    CartItem.product_id == product_id,
+                    CartItem.pack_size == pack,
+                )
                 .with_for_update()
             )
         ).scalar_one()
@@ -188,6 +244,7 @@ async def cart_view(db: AsyncSession, cart: Cart) -> dict:
                 "id": it.id,
                 "product_id": it.product_id,
                 "qty": float(it.qty),
+                "pack_size": float(it.pack_size),
                 "unit_price": unit_price,
                 "line_total": line_total,
             }
@@ -258,7 +315,12 @@ async def checkout(
     items = await _items(db, locked.id)
     if not items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Cart is empty")
-    payload = [OrderItemIn(product_id=i.product_id, qty=float(i.qty)) for i in items]
+    # The order is base-unit and has one line per product, so combine a product's pack lines
+    # (e.g. a 1 kg and a 0.5 kg pack) into a single order line by total quantity.
+    merged: dict[int, float] = defaultdict(float)
+    for i in items:
+        merged[i.product_id] = round(merged[i.product_id] + float(i.qty), 3)
+    payload = [OrderItemIn(product_id=pid, qty=q) for pid, q in merged.items()]
     # Flip within the locked transaction; create_order's commit persists the order +
     # coupon reservation/redemption + this status change atomically. If create_order
     # raises (e.g. unpriced/retired product), the session rolls back and the cart
